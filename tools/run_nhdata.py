@@ -27,10 +27,6 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path(__file__).parent.parent / "out")
     parser.add_argument("--only", type=str, default=None, help="파일명 부분 일치 필터")
     parser.add_argument("--exclude", type=str, default=None, help="파일명 부분 일치 제외 (예: 은행연합회 — rag 트랙)")
-    parser.add_argument(
-        "--region-vlm", action="store_true",
-        help="영역별 VLM 통독(§6 ④+) 활성화 — 전 페이지 적용, 배치 호출·상한 없음",
-    )
     args = parser.parse_args()
 
     out_json = args.out / "json"
@@ -53,7 +49,7 @@ def main() -> None:
         reset_stats()   # 문서별 단계 비용을 따로 본다 (안 하면 누적돼 차분을 손으로 빼야 한다)
         start = time.time()
         try:
-            doc = process_file(path, preview_dir=out_prev, region_vlm=args.region_vlm)
+            doc = process_file(path, preview_dir=out_prev)
         except Exception as exc:
             print(f"  ✗ 처리 실패: {exc}")
             continue

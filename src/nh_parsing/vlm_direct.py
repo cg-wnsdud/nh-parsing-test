@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-"""VLM 직독 폴백 — 설계서 6.4 (OCR/디지털 추출이 놓친 텍스트 회수 + 수치 재확인).
+"""VLM 직독 폴백 — 설계서 6.4 (OCR/디지털 추출이 놓친 텍스트 회수).
 
-두 가지 폴백 (모든 페이지 라우트 공통, 범용 규칙만 사용):
+sweep_missing_lines — 페이지 축소본과 이미 추출된 텍스트 목록을 주고, 화면에 보이는데
+목록에 없는 문구를 전사시킨다. 대응 대상:
+- 장식 타이포·복잡 배경 헤드라인 (OCR 검출 실패: '행운의 777 이벤트')
+- 벡터(패스) 텍스트 (텍스트 레이어에도 이미지 오브젝트에도 없음 —
+  003 p3 '올원모임 소문내기 이벤트 멘션' 실측)
+환각 방지: 정규화 기준으로 기존 텍스트에 이미 있으면 버린다.
+bbox 는 VLM 이 준 y_ratio 로 만든 전폭 근사 밴드 (source='vlm_sweep' 표시).
 
-1) sweep_missing_lines — 페이지 축소본과 이미 추출된 텍스트 목록을 주고,
-   화면에 보이는데 목록에 없는 문구를 전사시킨다. 대응 대상:
-   - 장식 타이포·복잡 배경 헤드라인 (OCR 검출 실패: '행운의 777 이벤트')
-   - 벡터(패스) 텍스트 (텍스트 레이어에도 이미지 오브젝트에도 없음 —
-     003 p3 '올원모임 소문내기 이벤트 멘션' 실측)
-   환각 방지: 정규화 기준으로 기존 텍스트에 이미 있으면 버린다.
-   bbox 는 VLM 이 준 y_ratio 로 만든 전폭 근사 밴드 (source='vlm_sweep' 표시).
-
-2) verify_numeric_fields — 수치 필드(금리/우대금리/심의필번호)의 앵커 라인을
-   고해상 크롭으로 다시 읽혀 값을 교정한다. 대응 대상:
-   - 원문자 병합 ('① 0.1%p' → '10.1%p'), 소수점 소실 ('7.1%' → '71%')
-   이전 프로젝트의 관측→병합→judge 3단계 중 judge 를 수치에 한정한 축소판.
+(수치 필드 크롭 재확인 verify_numeric_fields 와 영역별 통독 transcribe_region_crops
+는 밴드 통합판독 read_band_regions 이 흡수하며 죽은 코드가 되어 2026-07-29 제거했다
+— 죽은 코드 감사 참조.)
 """
 
 import re
@@ -24,11 +21,9 @@ from PIL import Image
 
 from .config import SETTINGS
 from .gemma_client import chat_json, image_part
-from .ir import ExtractedField, Line, Region
+from .ir import Line, Region
 
 _MAX_SWEEP_ITEMS = 20
-_MAX_CROPS_PER_PAGE = 8
-_NUMERIC_KEYS = {"금리", "우대금리", "심의필번호"}
 
 
 def _n(text: str) -> str:
@@ -213,7 +208,7 @@ def sweep_missing_lines(
     return recovered, notes
 
 
-# ──────────────────────── 2) 수치 필드 크롭 재확인 ────────────────────────
+# ──────────────────────── 크롭 재판독 공용 스키마 ────────────────────────
 
 _CROP_SCHEMA = {
     "type": "object",
@@ -225,12 +220,6 @@ _CROP_SCHEMA = {
     "required": ["analysis", "value", "confidence"],
     "additionalProperties": False,
 }
-
-_CROP_PROMPT = """크롭 이미지에서 '{key}' 에 해당하는 표기를 보이는 그대로 전사하세요.
-- 숫자·소수점·%·%p·하이픈을 정확히 옮기세요.
-- ①②③ 같은 목록 번호나 순번은 값에 포함하지 마세요.
-- 크롭에 해당 표기가 없으면 value 를 빈 문자열로 반환하세요.
-먼저 analysis 에 크롭에 보이는 내용을 서술한 뒤 value 를 채우세요."""
 
 
 def _looks_malformed(text: str) -> bool:
@@ -259,10 +248,6 @@ def _crop_bbox(bbox: list[int] | None, canvas: Image.Image) -> Image.Image | Non
         scale = 600 / crop.width
         crop = crop.resize((600, int(crop.height * scale)), Image.LANCZOS)
     return crop
-
-
-def _crop_for(field: ExtractedField, canvas: Image.Image) -> Image.Image | None:
-    return _crop_bbox(field.bbox, canvas)
 
 
 # ──────────────────── 라인 크롭 재판독 (스윕-OCR 중복 심판) ────────────────────
@@ -298,100 +283,6 @@ def transcribe_line_crop(bbox: list[int] | None, canvas: Image.Image) -> str:
     if not reading or _looks_malformed(reading):
         return ""
     return reading
-
-
-# ──────────────────── 영역 크롭 통독 (§6 영역별 VLM 통독) ────────────────────
-#
-# transcribe_line_crop(한 줄) 을 여러 Region 통독으로 일반화·배치화한 것. StructureV3
-# 가 자른 영역 bbox 들을 원본에서 크롭해, 여러 장을 한 호출에 묶어(HyundaiHS x4 방식)
-# VLM 이 각 크롭 텍스트를 보이는 순서대로 통째로 전사한다. OCR 이 "자신 있게 틀리게"
-# 읽는 회전·장식 헤드라인(002 최고연/777)·원문자 병합(올원 10.1%p)을 근본에서 잡고,
-# 결과가 그 영역 텍스트의 1차 출처가 된다. OCR 라인은 좌표 앵커+ocr_score 대조 근거로
-# 강등(호출측이 region.ocr_lines 로 보존). 개수 상한 없음 — 호출 수만 배치로 줄인다.
-
-_REGION_BATCH_PROMPT = """아래에 광고 화면에서 잘라낸 크롭 이미지 {n}장이 첨부 순서대로(index 0 부터) 붙어 있습니다.
-각 크롭에 보이는 모든 텍스트를 사람이 읽는 순서대로(위→아래, 좌→우) 그대로 전사하세요.
-- 회전된 글자, 장식·꾸밈 글씨, 배경 위 문구도 빠짐없이 포함하세요.
-- 숫자·소수점·%·%p·하이픈과 ①②③ 같은 원문자 번호를 정확히 옮기세요.
-- 크롭에 실제로 보이는 내용만 전사하고, 없는 내용을 지어내지 마세요. 텍스트가 없으면 text 를 빈 문자열로.
-- 크롭마다 결과 하나를, 그 크롭의 첨부 순서를 index(0..{last})로 달아 반환하세요. 모든 크롭을 빠짐없이.
-먼저 analysis 에 전체 구성을 한두 문장으로 정리한 뒤 regions 를 채우세요."""
-
-_REGION_BATCH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "analysis": {"type": "string"},  # 배열 선두 빈 배열 퇴행 방지 (부록 C-5)
-        "regions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "index": {"type": "integer"},
-                    "text": {"type": "string"},
-                    "confidence": {"type": "number"},
-                },
-                "required": ["index", "text", "confidence"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["analysis", "regions"],
-    "additionalProperties": False,
-}
-
-
-def transcribe_region_crops(
-    bboxes: list[list[int] | None], canvas: Image.Image, batch_size: int = 4
-) -> list[tuple[str, float | None]]:
-    """여러 영역 bbox 를 batch_size 장씩 한 호출에 묶어 통독하고, 입력 순서대로 결과를
-    돌려준다. 결과 원소는 (전사문자열, VLM 확신도) 이며 실패/누락/형식파손/빈 크롭은
-    ('', None). 한 배치 호출이 통째로 실패해도 그 배치만 원값 유지(다른 배치 영향 없음).
-
-    배치 내에서 크기가 너무 작아 크롭이 안 되는 영역은 그 로컬 인덱스를 건너뛰고 유효
-    크롭만 첨부하되, 반환 시 원래 전역 인덱스로 되매핑한다(index 오정렬 방지).
-    """
-    results: list[tuple[str, float | None]] = [("", None)] * len(bboxes)
-    step = max(1, batch_size)
-    for start in range(0, len(bboxes), step):
-        batch_globals = list(range(start, min(start + step, len(bboxes))))
-        local_to_global: list[int] = []
-        crops: list[Image.Image] = []
-        for gi in batch_globals:
-            crop = _crop_bbox(bboxes[gi], canvas)
-            if crop is not None:
-                local_to_global.append(gi)
-                crops.append(crop)
-        if not crops:
-            continue
-        parts: list[dict] = [
-            {"type": "text", "text": _REGION_BATCH_PROMPT.format(
-                n=len(crops), last=len(crops) - 1)}
-        ]
-        for crop in crops:
-            parts.append(image_part(crop, box=(896, 896)))
-        try:
-            data = chat_json(
-                parts,
-                schema_name="region_crops_transcribe",
-                schema=_REGION_BATCH_SCHEMA,
-                max_tokens=600 + 500 * len(crops),
-            )
-        except Exception:
-            continue  # 이 배치만 원값 유지
-        for item in data.get("regions", []):
-            li = item.get("index")
-            if not isinstance(li, int) or not (0 <= li < len(local_to_global)):
-                continue
-            reading = str(item.get("text", "")).strip()
-            if not reading or _looks_malformed(reading):
-                continue
-            conf = item.get("confidence")
-            try:
-                conf = float(conf)
-            except (TypeError, ValueError):
-                conf = None
-            results[local_to_global[li]] = (reading, conf)
-    return results
 
 
 def _reread_crop_with_conf(
@@ -549,100 +440,17 @@ def reread_low_confidence_lines(
     return notes
 
 
-def verify_numeric_fields(
-    fields: list[ExtractedField],
-    canvas: Image.Image,
-    skip_bboxes: set[tuple[int, ...]] | None = None,
-) -> list[str]:
-    """수치 필드를 앵커 라인 고해상 크롭으로 재확인하고, 다르면 교정한다.
-
-    skip_bboxes: 영역별 VLM 통독(§6)으로 이미 깨끗이 읽힌 영역들의 bbox 집합. 통독본은
-    region.lines 가 '영역 1줄'이라 그 영역에서 뽑힌 필드는 전부 영역 전체 bbox 를 앵커로
-    갖는다 → 여기서 크롭 재판독하면 영역 전체를 다시 읽어 형제 필드값을 덮어쓴다(우대금리
-    ①②③④ 뭉개짐 실측). 통독본은 이미 VLM 판독이므로 재확인을 건너뛴다.
-
-    반환: 교정/건너뜀 내역 노트 목록 (조용한 수정 금지 — 페이지 notes 에 기록용).
-    """
-    skip_bboxes = skip_bboxes or set()
-    notes: list[str] = []
-    checked = 0
-    skipped = 0
-    for field in fields:
-        if checked >= _MAX_CROPS_PER_PAGE:
-            break
-        if field.key not in _NUMERIC_KEYS:
-            continue
-        if field.bbox and tuple(field.bbox) in skip_bboxes:
-            skipped += 1
-            continue  # 영역 통독본 — 크롭 재판독하면 형제 필드 덮어씀
-        crop = _crop_for(field, canvas)
-        if crop is None:
-            continue
-        checked += 1
-        try:
-            data = chat_json(
-                [
-                    {"type": "text", "text": _CROP_PROMPT.format(key=field.key)},
-                    image_part(crop, box=(896, 896)),
-                ],
-                schema_name="numeric_crop_verify",
-                schema=_CROP_SCHEMA,
-                max_tokens=600,
-            )
-        except Exception as exc:
-            # 재확인 실패는 원값 유지하되 조용히 넘어가지 않는다 — 이 호출 실패가
-            # 감사 기록 없이 삼켜지면 "실행마다 교정 여부가 달라지는" 현상이 API
-            # 신뢰성 문제인지 모델 변동인지 구분할 수 없다 (002 실측, 2026-07-20).
-            notes.append(
-                f"수치 크롭 재확인 실패(원값 유지): [{field.key}] {field.value!r} — {exc}"
-            )
-            continue
-        reading = str(data.get("value", "")).strip()
-        if not reading:
-            continue
-        if _looks_malformed(reading):
-            # 극소 크롭(실측: 147x10px)에서 VLM 이 구조 파손 응답을 낼 때가 있다
-            # ('13%, 13%"}') — 숫자만 비교하면 통과하므로 별도 형식 가드가 필요.
-            notes.append(f"크롭 재확인 응답 형식 이상(원값 유지): [{field.key}] {reading!r}")
-            continue
-        if _n(reading) == _n(field.value):
-            field.crop_verified = True
-            continue
-        # 숫자 집합이 진짜로 충돌할 때만 교체한다 (실측 교훈 2026-07-19):
-        # - 크롭 숫자 ⊆ 원값 숫자: 크롭이 원값의 일부만 읽음('연 3.1%(26.06.10 기준)'
-        #   →'3.1%') — 원값이 더 많은 정보를 담으므로 유지
-        # - 원값 숫자 ⊆ 크롭 숫자: 크롭이 주변 표기까지 병합해 읽음 — 원값 유지
-        # - 어느 쪽도 아님: 원문자 병합('10.1%p' vs '0.1%p')·소수점 소실('71' vs
-        #   '7.1') 같은 실제 오염 — 크롭(고해상 재판독)이 이김
-        nums_old = set(re.findall(r"\d+(?:\.\d+)?", field.value))
-        nums_new = set(re.findall(r"\d+(?:\.\d+)?", reading))
-        if nums_new <= nums_old or nums_old <= nums_new:
-            field.crop_verified = True
-            continue
-        notes.append(f"수치 재확인 교정: [{field.key}] '{field.value}' → '{reading}'")
-        field.value = reading
-        field.extractor = "vlm+crop"
-        field.crop_verified = True
-    if skipped:
-        notes.append(
-            f"수치 크롭 재확인 건너뜀 {skipped}건 — 영역 통독본(이미 VLM 판독, "
-            f"영역 bbox 크롭 재판독은 형제 필드 덮어씀)"
-        )
-    return notes
-
-
 # ─────────────── 밴드 단위 통합 판독 (④+ 통독 + ⑧ 스윕을 한 호출로) ───────────────
 #
-# 지금까지 두 단계가 같은 페이지를 다른 크롭으로 각각 봤다:
-#   ④+ 통독 — 영역 하나씩 크롭(4장 배치), 목적은 글자 단위 오류 교정
-#   ⑧  스윕 — 밴드 하나씩,             목적은 OCR 이 아예 못 본 문구 회수
-# 실측(5문서): 통독 60회 + 밴드스윕 15회. 밴드 하나에 그 안의 영역 목록을 함께 주면
-# "이 영역들을 고쳐라 + 목록에 없는 문구를 찾아라"를 한 호출로 물을 수 있다.
+# 예전엔 두 단계가 같은 페이지를 다른 크롭으로 각각 봤다(영역별 통독 4장 배치 + 밴드
+# 스윕). 실측(5문서): 통독 60회 + 밴드스윕 15회. 밴드 하나에 그 안의 영역 목록을 함께
+# 주면 "이 영역들을 고쳐라 + 목록에 없는 문구를 찾아라"를 한 호출로 물을 수 있어
+# 합쳤다(65회로 절감, 2026-07-28). 옛 개별 경로(영역별 통독·수치 크롭 재확인)는
+# 이 함수가 완전히 흡수해 죽은 코드가 됐고 2026-07-29 걷어냈다.
 #
-# **해상도 상충이 이 방식의 위험이다.** 영역 크롭은 그 영역 하나가 896x896 을 다 쓰지만,
-# 밴드는 영역 5~10개가 한 장을 나눠 쓴다. 통독이 잡던 미세 오류(원문자가 숫자에 붙음,
-# 소수점 소실)가 낮은 배율에서 살아남는지가 채택 여부를 가른다 — 그래서 플래그로 두고
-# A/B 로 판정한다. 기본값은 끔.
+# **해상도 상충이 이 방식의 위험이었다.** 영역 크롭은 그 영역 하나가 896x896 을 다
+# 쓰지만, 밴드는 영역 5~10개가 한 장을 나눠 쓴다. 통독이 잡던 미세 오류(원문자가
+# 숫자에 붙음, 소수점 소실)가 낮은 배율에서도 살아남는 것을 A/B 로 확인했다.
 
 _BAND_READ_SCHEMA = {
     "type": "object",

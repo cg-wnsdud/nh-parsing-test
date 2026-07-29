@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-"""영역 구성 + 규칙 기반 초기 역할 + regex 필드 추출 (폴백 전용) — 설계서 6.4절.
+"""영역 구성 + 규칙 기반 초기 역할(폴백 전용) — 설계서 6.4절.
 
-⚠ 역할 판정과 필드 추출의 판단 주체는 VLM(vlm_judge.py)이다.
-이 모듈의 키워드/위치 규칙과 regex 는:
+⚠ 역할 판정의 판단 주체는 VLM(vlm_judge.py)이다.
+이 모듈의 키워드/위치 규칙은:
   1) VLM 호출 전의 초기값, 2) VLM 실패 시 폴백
 으로만 쓰인다. nh-data 샘플에 맞춘 패턴이므로 일반화를 기대하지 말 것 —
 regex 를 판단 로직으로 승격하려면 대량 데이터에서 공통 패턴 도출이 선행돼야 한다.
+
+(regex 기반 필드 추출 extract_fields 는 필드가 STAGE_3 로 일원화되며 죽은 코드가
+되어 2026-07-29 제거했다 — 죽은 코드 감사 참조. _REVIEW_NO/_RATE 정규식은
+_refine_role 의 역할 판정 폴백으로 여전히 쓰여 남긴다.)
 """
 
 import re
 
-from .ir import ExtractedField, Line, Region
+from .ir import Line, Region
 from .paddlex_client import LayoutBlock
 
 # PP-StructureV3 공식 block_label 전체 매핑 (공식 문서 + 실측 vision_footnote)
@@ -123,26 +127,3 @@ def _refine_role(region: Region, canvas_h: int) -> None:
         if region.bbox[1] > canvas_h * 0.8:
             region.role = "유의사항"
             region.role_confidence = 0.5
-
-
-def extract_fields(lines: list[Line]) -> list[ExtractedField]:
-    """regex 폴백 필드 추출 — VLM 필드 추출(vlm_judge) 실패 시에만 사용."""
-    fields: list[ExtractedField] = []
-    for line in lines:
-        for m in _REVIEW_NO.finditer(line.text):
-            fields.append(
-                ExtractedField(
-                    key="심의필번호", value=m.group(2).replace(" ", ""),
-                    bbox=line.bbox, confidence=line.confidence, source=line.source,
-                    extractor="regex",
-                )
-            )
-        for m in _RATE.finditer(line.text):
-            fields.append(
-                ExtractedField(
-                    key="금리", value=m.group(0).strip(),
-                    bbox=line.bbox, confidence=line.confidence, source=line.source,
-                    extractor="regex",
-                )
-            )
-    return fields

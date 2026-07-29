@@ -19,45 +19,35 @@ from .canvas import CanvasPage, load_image_canvas, render_pdf_page, rgb_on_white
 from .config import SETTINGS
 from .gemma_client import classify
 from .hwp_ingest import ingest_hwp
-from .ir import AdDocument, AdPage, ExtractedField, Line, Region
+from .ir import AdDocument, AdPage, Line, Region
 from .paddlex_client import LayoutBlock, request_layout_parsing
-from .regions import build_regions, extract_fields
+from .regions import build_regions
 from .tiling import dedupe_lines, make_tiles, restore_coords
-from .vlm_judge import extract_fields_vlm, judge_region_roles
+from .vlm_judge import judge_region_roles
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
 HWP_EXTS = {".hwp", ".hwpx"}
-# 누락 스윕 패스 구성 — 각 원소가 그 패스의 banded 여부. 합집합으로 회수율을 올린다.
-# 통짜와 밴드는 잡는 대상이 다르다(운영 A/B 실측): 통짜는 화면을 꽉 채우는 대형 장식
-# 타이포('행운의 777 이벤트')를, 밴드는 축소되면 사라지는 작은 글씨(001 '1~5 우리아이
-# 목록' 4/4)를 잡는다. 어느 한쪽만 쓰면 다른 쪽을 통째로 놓치므로 둘 다 돌린다.
-# 2패스는 1패스 결과를 existing 으로 받아 새 문구만 가져오므로 중복이 안 생긴다.
-_SWEEP_PASSES = (False, True)  # 1패스=통짜(큰 글씨), 2패스=밴드(작은 글씨)
 
 
-def process_file(
-    path: Path, preview_dir: Path | None = None, region_vlm: bool = False
-) -> AdDocument:
+def process_file(path: Path, preview_dir: Path | None = None) -> AdDocument:
     ext = path.suffix.lower()
     if ext in HWP_EXTS:
-        return _process_hwp(path, preview_dir, region_vlm)
+        return _process_hwp(path, preview_dir)
     if ext in IMAGE_EXTS:
-        return _process_image(path, preview_dir, region_vlm)
+        return _process_image(path, preview_dir)
     if ext == ".pdf":
-        return _process_pdf(path, preview_dir, region_vlm)
+        return _process_pdf(path, preview_dir)
     doc = AdDocument(doc_id=path.stem, source_file=path.name, file_type=ext.lstrip("."))
     doc.notes.append(f"미지원 확장자 {ext} — 판독 불가 처리 (F-001 예외)")
     doc.pages.append(AdPage(page_no=1, parse_route="ocr", parse_status="unreadable"))
     return doc
 
 
-def _process_image(
-    path: Path, preview_dir: Path | None, region_vlm: bool = False
-) -> AdDocument:
+def _process_image(path: Path, preview_dir: Path | None) -> AdDocument:
     doc = AdDocument(doc_id=path.stem, source_file=path.name, file_type="image")
     canvas = load_image_canvas(path)
     page = _ocr_canvas_to_page(canvas, page_no=1)
-    _apply_vlm_judgments(page, canvas.image, region_vlm=region_vlm)
+    _apply_vlm_judgments(page, canvas.image)
     doc.pages.append(page)
     _classify_into(doc, canvas.image)
     if preview_dir:
@@ -65,15 +55,13 @@ def _process_image(
     return doc
 
 
-def _process_hwp(
-    path: Path, preview_dir: Path | None, region_vlm: bool = False
-) -> AdDocument:
+def _process_hwp(path: Path, preview_dir: Path | None) -> AdDocument:
     """HWP: 텍스트·표는 디지털 정본, 내장 이미지는 PNG 와 동일한 OCR/VLM 트랙."""
 
     def _image_page(img: Image.Image, page_no: int) -> AdPage:
         canvas = CanvasPage(image=rgb_on_white(img), page_no=page_no)
         page = _ocr_canvas_to_page(canvas, page_no)
-        _apply_vlm_judgments(page, canvas.image, region_vlm=region_vlm)
+        _apply_vlm_judgments(page, canvas.image)
         if preview_dir:
             _save_preview(canvas, page, preview_dir, path.stem)
         return page
@@ -81,9 +69,7 @@ def _process_hwp(
     return ingest_hwp(path, image_page_processor=_image_page)
 
 
-def _process_pdf(
-    path: Path, preview_dir: Path | None, region_vlm: bool = False
-) -> AdDocument:
+def _process_pdf(path: Path, preview_dir: Path | None) -> AdDocument:
     from .triage import extract_digital_lines, triage_page
 
     doc = AdDocument(doc_id=path.stem, source_file=path.name, file_type="pdf")
@@ -118,7 +104,7 @@ def _process_pdf(
         else:  # scan_like
             page = _ocr_canvas_to_page(canvas, page_no)
         page.triage = verdict.as_dict()
-        _apply_vlm_judgments(page, canvas.image, region_vlm=region_vlm)
+        _apply_vlm_judgments(page, canvas.image)
         doc.pages.append(page)
         if preview_dir:
             _save_preview(canvas, page, preview_dir, doc.doc_id)
@@ -201,122 +187,11 @@ def _mark_illustrative(page: AdPage) -> None:
         )
 
 
-def _transcribe_regions_vlm(page: AdPage, canvas_img: Image.Image) -> None:
-    """영역별 VLM 통독 (§6 ④+, B안=OCR 정본 + VLM 후보): StructureV3 영역 크롭을
-    VLM 이 통독하되, 그 결과로 OCR 정본(region.lines)을 덮어쓰지 않고 '후보'
-    (region.vlm_reading + 정밀도/커버리지 점수)로만 붙인다. 역할판정·필드추출·리뷰는
-    결정론적인 OCR 정본(region.lines)을 계속 소비하고, 통독 후보는 judge/STAGE_3
-    (스키마)가 더 정확할 때 선택하도록 남겨둔다 — 비결정 VLM 을 텍스트 정본에서 격리.
-
-    (배경) 초기 A안은 통독으로 region.lines 를 대체했으나, 배치 cross-image leakage +
-    서버측 비결정성(temperature=0 에서도)으로 정본 텍스트가 실행마다 흔들려 금융 광고
-    정확성에 부적합했다. HyundaiHS 실구조도 OCR(page_ocr_text)을 정본 참조로 두고 VLM
-    크롭은 후보(observations)만 만든다 → B안이 그 구조에 부합. [[region-vlm-batch-leakage]]
-
-    - 대상: bbox + OCR 라인이 있는 영역(회전/장식 오독이 여기 있다). 순수 이미지 영역은
-      스윕(⑧), 디지털 정본만 있는 영역은 이미 정확하므로 재판독하지 않는다.
-    - 배치 leakage 방어: 통독을 OCR 과 양방향 토큰정합(정밀도·커버리지)으로 대조해
-      저신뢰면 그 영역만 단일 크롭 재통독 후 F1 높은 후보 채택. 모두 notes 기록.
-    - bbox: StructureV3 영역 bbox 앵커 유지(F-011/012). OCR 정본은 그대로.
-    """
-    from .field_judge import check_field_consistency
-    from .vlm_direct import transcribe_region_crops
-
-    # 장식예시(앱 화면 목업 등)는 제외한다. 심의 대상이 아니라 교정해봐야 쓰이지 않는데
-    # 통독 대상의 13%(25/197)를 차지했다 — 실측상 결정적 교정 8건 중 이 영역에서 나온 건
-    # 0건이다. 판정은 VLM(역할판정)이 하고 여기서는 그 결과를 쓸 뿐이다.
-    targets = [
-        r for r in page.regions
-        if r.bbox and r.lines and not r.is_illustrative
-        and any(l.source == "ocr" for l in r.lines)
-    ]
-    if not targets:
-        return
-    batch = SETTINGS.region_vlm_crops_per_call
-    readings = transcribe_region_crops(
-        [r.bbox for r in targets], canvas_img, batch_size=batch
-    )
-
-    def _scores(reading: str, region: Region) -> tuple[float, float]:
-        # 두 방향 토큰 정합으로 배치 leakage 의 두 증상을 각각 잡는다:
-        #  precision = 통독 토큰 중 OCR 에 있는 비율 → 낮으면 '엉뚱한 옆 셀 내용 유입'(오정렬)
-        #  recall    = OCR 토큰 중 통독에 있는 비율 → 낮으면 '값 절반 누락'(절단)
-        # 회전 헤드라인 교정은 recall 이 낮지만(=OCR 깨진 원문 미포함) pick-better 가 보존.
-        ocr_joined = " ".join(l.text for l in region.lines if l.text.strip())
-        if not ocr_joined:
-            return 0.0, 0.0
-        prec = check_field_consistency(reading, ocr_joined)
-        rec = check_field_consistency(ocr_joined, reading)
-        return prec, rec
-
-    def _combined(pr: tuple[float, float]) -> float:
-        p, r = pr
-        return 2 * p * r / (p + r) if (p + r) else 0.0  # F1 — 두 신호 다 높아야 높음
-
-    # 채택될 (통독문, 확신도, (prec,rec), reread여부)를 대상별로 확정 — 승격은 그 다음에.
-    chosen: list[tuple[str, float | None, tuple[float, float], bool]] = []
-    for region, (reading, conf) in zip(targets, readings):
-        chosen.append((reading, conf, _scores(reading, region) if reading else (0.0, 0.0), False))
-
-    # 배치 leakage 방어: precision 또는 recall 이 임계 미만인 영역만 단일 크롭으로 재통독
-    # (한 이미지=한 프롬프트라 cross-image leakage 없음), F1 이 더 높은 쪽을 채택한다.
-    lo = SETTINGS.region_vlm_reread_min_score
-    suspect = [i for i, c in enumerate(chosen) if c[0] and (c[2][0] < lo or c[2][1] < lo)]
-    suspect = suspect[: SETTINGS.region_vlm_reread_max_per_page]
-    if suspect:
-        singles = transcribe_region_crops(
-            [targets[i].bbox for i in suspect], canvas_img, batch_size=1
-        )
-        for i, (s_reading, s_conf) in zip(suspect, singles):
-            if not s_reading:
-                continue
-            s_pr = _scores(s_reading, targets[i])
-            if _combined(s_pr) > _combined(chosen[i][2]):  # 단일본이 더 정합
-                chosen[i] = (s_reading, s_conf, s_pr, True)
-
-    # B안: OCR/디지털을 텍스트 정본(region.lines)으로 그대로 두고, 통독은 '후보'로만
-    # 붙인다(region.vlm_reading + 점수). 조용한 대체 없음 — 최종 텍스트 선택은
-    # judge/STAGE_3(스키마)의 몫이고, 파싱은 정본과 후보를 둘 다 남긴다.
-    candidates = 0
-    for region, (reading, conf, (prec, rec), reread) in zip(targets, chosen):
-        if not reading:
-            continue
-        region.vlm_reading = reading
-        region.vlm_reading_score = round(prec, 3)
-        region.vlm_reading_coverage = round(rec, 3)
-        candidates += 1
-        tag = " [단일 재통독 채택]" if reread else ""
-        # 후보 성격 표시: 절단(정밀도↑·커버리지↓)이면 OCR 이 더 완전한 후보라는 뜻.
-        kind = " (절단 의심: OCR 이 더 완전)" if (prec >= SETTINGS.region_vlm_truncation_precision and rec < lo) else ""
-        page.notes.append(
-            f"영역 통독 후보 {region.region_id}: 정밀도={prec:.2f} 커버리지={rec:.2f}{tag}{kind} "
-            f"(OCR 정본 유지) VLM={reading[:40]!r}"
-        )
-    if suspect:
-        adopted = sum(1 for c in chosen if c[3])
-        page.notes.append(
-            f"배치 leakage 방어: 저신뢰(정밀도·커버리지<{lo}) {len(suspect)}개 영역 단일 "
-            f"재통독 → {adopted}개 후보 교체(F1 더 높음)"
-        )
-    if candidates:
-        calls = (len(targets) + batch - 1) // batch
-        page.notes.append(
-            f"영역별 VLM 통독(§6, B안 후보): {candidates}/{len(targets)}개 영역에 통독 후보 부착 "
-            f"(OCR 정본 유지·비대체, 배치 {batch}장/호출, 약 {calls}회 호출)"
-        )
-
-
-def _apply_vlm_judgments(
-    page: AdPage, canvas_img: Image.Image | None, region_vlm: bool = False
-) -> None:
-    """VLM 이 판단 주체 (설계서 6.5): 영역 역할 판정 + 필드 추출.
+def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
+    """VLM 이 판단 주체 (설계서 6.5): 영역 역할 판정 + 밴드 통합판독(교정+누락 회수).
 
     실패 시에만 규칙/regex 폴백을 유지하고, 그 사실을 notes 에 기록한다
     (조용한 실패 금지 원칙).
-
-    region_vlm=True 면 영역별 VLM 통독(§6 ④+)을 돌린다 (플래그로 on/off).
-    B안: 통독은 OCR 정본을 대체하지 않고 region.vlm_reading 후보로만 붙으므로, 이후
-    단계는 결정론적 OCR 정본 위에서 동작한다.
     """
     all_lines = [l for r in page.regions for l in r.lines] + page.unassigned_lines
 
@@ -347,16 +222,6 @@ def _apply_vlm_judgments(
     # 예시/장식(앱 화면 예시 등) 격리 태깅 (2a) — 판단 주체는 VLM(section_type)
     _mark_illustrative(page)
 
-    # §6 ④+ 영역별 VLM 통독 — 역할판정 '뒤'로 옮겼다(2026-07-28).
-    # 앞에 있을 때는 어느 영역이 앱 목업인지 모르는 상태라 그것까지 전부 읽혔다
-    # (실측: 통독 대상 197개 중 25개=13%가 장식예시). 역할판정은 OCR 정본(r.lines)만
-    # 보고 vlm_reading 을 안 쓰므로(B안), 뒤로 옮겨도 판정 결과가 달라지지 않는다.
-    if region_vlm and canvas_img is not None and not SETTINGS.merged_band_read:
-        try:
-            _transcribe_regions_vlm(page, canvas_img)
-        except Exception as exc:
-            page.notes.append(f"영역별 VLM 통독 단계 실패(OCR 유지): {exc}")
-
     # 미배정 라인의 섹션 귀속 (2단):
     # 1단(좌표) — 라인 중심이 섹션 bbox '내부'면 그 섹션에 붙인다. 근사 bbox 인
     #   vlm_sweep 라인은 제외 (y 추정이 이웃 섹션에 오귀속되는 실측, 올원).
@@ -373,9 +238,10 @@ def _apply_vlm_judgments(
     # (temperature=0 이어도 재현 — guided-decoding/배치 비결정성). 필드에 쓴 것과
     # 같은 관측→합집합 패턴으로 여러 번 돌려 회수율을 안정화한다. 2회차에는 1회차
     # 결과를 이미 있는 것으로 넘겨 새 문구만 받으므로(자연 합집합) 중복이 없다.
-    if canvas_img is not None and SETTINGS.merged_band_read:
-        # 통합 판독 경로: 밴드 1장 = ④+ 교정 + 밴드 스윕. 통짜 스윕만 따로 남긴다.
-        from .vlm_direct import sweep_missing_lines
+    if canvas_img is not None:
+        # 밴드 1장 = ④+ 교정 + 밴드 스윕을 한 호출로(_merged_band_read). 통짜 스윕만
+        # 따로 남긴다 — 밴드가 원래 못 잡는 대형 장식 타이포용(002 '행운의 777 이벤트').
+        from .vlm_direct import reread_low_confidence_lines, sweep_missing_lines
 
         swept = _merged_band_read(page, canvas_img, all_lines)
         try:
@@ -395,83 +261,18 @@ def _apply_vlm_judgments(
             )
         all_lines = [l for r in page.regions for l in r.lines] + page.unassigned_lines
 
-        # 저신뢰 재판독(2b) — 버그 수정(2026-07-28): ④+ 병합 분기를 만들 때 이 단계를
-        # 옮기는 걸 빠뜨려서, merged_band_read=True(현재 기본값)가 된 뒤로 조용히
-        # 안 돌고 있었다(002 '00'→'◇◇◇◇' 류 교정 소실). 두 경로 모두에서 돈다.
-        from .vlm_direct import reread_low_confidence_lines
-
-        try:
-            page.notes.extend(reread_low_confidence_lines(page.regions, canvas_img))
-        except Exception as exc:
-            page.notes.append(f"저신뢰 라인 재판독 실패(원값 유지): {exc}")
-
-    elif canvas_img is not None:
-        from .vlm_direct import sweep_missing_lines
-
-        # 밴드 절단이 글자를 반토막 내지 않도록, 이미 아는 라인 좌표를 장애물로 넘긴다.
-        # 영역(레이아웃 블록) bbox 는 일부러 뺀다 — 문단 전체를 덮어(001 실측 209px)
-        # 빈틈이 100px 넘게 밀리고, 그 과정에서 오히려 다른 글자를 자른다(002 5→7개 악화).
-        obstacles = [l.bbox for l in all_lines if l.bbox]
-
-        swept: list[Line] = []
-        for _pass, banded in enumerate(_SWEEP_PASSES):
-            try:
-                new, sweep_notes = sweep_missing_lines(
-                    all_lines + swept, canvas_img, page.canvas_w, page.canvas_h,
-                    banded=banded, obstacles=obstacles,
-                )
-            except Exception as exc:
-                page.notes.append(f"VLM 누락 스윕 실패(pass {_pass + 1}, 원 결과 유지): {exc}")
-                continue
-            # 밴드 단위 실패는 그 구간만 빠지므로 노트로 남기고 나머지는 살린다
-            page.notes.extend(
-                f"스윕 pass{_pass + 1}({'밴드' if banded else '통짜'}): {n}"
-                for n in sweep_notes
-            )
-            if new:
-                page.notes.append(
-                    f"스윕 pass{_pass + 1}({'밴드' if banded else '통짜'}) 회수 {len(new)}건"
-                )
-            swept.extend(new)
-        # 스윕-OCR 중복 해소(개선 3): 스윕이 회수한 문구가 기존 OCR 라인의 다른
-        # 판독이면(올원 '① 0.1%p' vs OCR '10.1%p') 크롭 재판독으로 정정하고 병합.
-        if swept:
-            swept = _resolve_sweep_duplicates(page, swept, canvas_img)
-        if swept:
-            page.unassigned_lines.extend(swept)
-            page.notes.append(
-                "VLM 스윕 회수 문구 " + ", ".join(f"'{l.text[:30]}'" for l in swept)
-            )
-        # region 텍스트가 정정됐을 수 있으므로 후속 단계용 all_lines 재구성
-        all_lines = [l for r in page.regions for l in r.lines] + page.unassigned_lines
-
         # 저신뢰 OCR 라인 크롭 재판독 (2b): 심의 관련 영역의 낮은 신뢰도 라인을
         # 고해상 재판독으로 교정한다. 예시/장식·이미지 영역은 제외(무관·비용).
-        from .vlm_direct import reread_low_confidence_lines
-
         try:
             page.notes.extend(reread_low_confidence_lines(page.regions, canvas_img))
         except Exception as exc:
             page.notes.append(f"저신뢰 라인 재판독 실패(원값 유지): {exc}")
-        all_lines = [l for r in page.regions for l in r.lines] + page.unassigned_lines
 
     _note_layout_gaps(page)
 
-    # ⑥-4 필드추출 제거(2026-07-28) — 필드는 STAGE_3(스키마 기반) 하나로 일원화했다.
-    #
-    # 없앤 이유: 같은 일을 두 곳에서 하고 있었다. 파싱 단계의 ⑥-4 는 스키마 없이 VLM 이
-    # 자유롭게 키·값을 만들어 냈고(문서당 전체1회+섹션 N회 = 5문서 37회 + judge 2회),
-    # STAGE_3 는 근거대장에서 나온 스키마로 같은 값을 다시 뽑았다. 심의 판정에 실제로
-    # 쓰이는 건 STAGE_3 쪽이다 — 적용조건·의무등급이 붙어 부재 3분류까지 가는 건 그쪽뿐이고,
-    # 골드 대조도 verify_extract 가 STAGE_3 결과로 44/44 를 낸다.
-    # 절감: VLM 호출 39회(전체의 23%). 파싱 단계의 필드 회수 지표는 evaluate 에서 뺐고
-    # 필드 품질은 verify_extract(STAGE_3)가 단일 창구다.
-    #
-    # 남긴 것: regions.extract_fields(regex)·vlm_judge.extract_fields_vlm·field_judge 는
-    # 코드로 남겨 둔다. 다른 데이터에서 파싱 단계 필드가 필요해지면 되살릴 수 있게.
-    # 읽기 순서 국소 재정렬 (개선 1): 전역 정렬이 긴 페이지에서 시각적 줄을
-    # 조각내는 문제(001 단어 섞임 실측)를 영역 범위 재정렬로 교정한다.
-    # 필드는 이미 추출됐으므로 순서 변경은 필드 결과에 영향 없음.
+    # 필드는 STAGE_3(스키마 기반) 단일 창구다 — 파싱 단계에서는 뽑지 않는다.
+    # 읽기 순서 국소 재정렬: 전역 정렬이 긴 페이지에서 시각적 줄을 조각내는 문제
+    # (001 단어 섞임 실측)를 영역 범위 재정렬로 교정한다.
     _finalize_reading_order(page)
 
 
@@ -518,68 +319,6 @@ def _finalize_reading_order(page: AdPage) -> None:
     for region in page.regions:
         if len(region.lines) > 1:
             region.lines = sort_reading_order(region.lines)
-
-
-_MAX_FIELD_OBSERVATION_UNITS = 12  # 페이지당 섹션 관측 상한 (비용 가드)
-
-
-def _extract_fields_multi(
-    page: AdPage, all_lines: list[Line], canvas_img: Image.Image | None
-) -> list[ExtractedField]:
-    """필드 추출 복수 관측 — 전체 1회 + 섹션 단위 N회 → 병합·득표 (설계 6.6 v2).
-
-    단일 호출은 서빙 비결정성 때문에 실행마다 필드가 ±5건 흔들린다(실측).
-    이전 프로젝트의 관측→병합 구조를 이식: 페이지 전체 패스가 모든 섹션과
-    겹치는 관측이 되어, 같은 값이 두 경로에서 나오면 득표(obs_count)가 쌓이고
-    어느 한 경로만 잡은 값도 합집합으로 보존된다. 섹션 패스는 해당 섹션
-    bbox 크롭을 첨부해 호출당 컨텍스트를 줄인다(작을수록 안정·판독 유리).
-    섹션이 없는 페이지(HWP 등)는 기존 단일 호출과 동일하게 동작한다.
-    """
-    from .field_judge import merge_observations
-
-    observations: list[list[ExtractedField]] = []
-    obs_notes: list[str] = []
-
-    observations.append(extract_fields_vlm(all_lines, canvas_img))  # 전체 패스
-
-    region_by_id = {r.region_id: r for r in page.regions}
-    units = 0
-    for section in page.sections:
-        if section.is_illustrative:
-            continue  # 예시/장식 섹션은 필드 관측에서 제외 (2a)
-        if units >= _MAX_FIELD_OBSERVATION_UNITS:
-            obs_notes.append(f"섹션 관측 상한({_MAX_FIELD_OBSERVATION_UNITS}) 도달 — 이후 섹션은 전체 패스만")
-            break
-        lines = [
-            l for rid in section.region_ids
-            if rid in region_by_id for l in region_by_id[rid].lines
-        ]
-        if len(lines) < 3:  # 초소형 섹션은 전체 패스가 커버
-            continue
-        crop = None
-        if canvas_img is not None and section.bbox:
-            x0, y0, x1, y1 = section.bbox
-            pad = 16
-            crop = canvas_img.crop((
-                max(0, x0 - pad), max(0, y0 - pad),
-                min(canvas_img.width, x1 + pad), min(canvas_img.height, y1 + pad),
-            ))
-        units += 1
-        try:
-            observations.append(extract_fields_vlm(lines, crop))
-        except Exception as exc:
-            obs_notes.append(
-                f"섹션 관측 실패({section.section_type}#{section.section_no}, 전체 패스로 커버): {exc}"
-            )
-
-    merged = merge_observations(observations)
-    if units:
-        multi = sum(1 for f in merged if (f.obs_count or 1) > 1)
-        page.notes.append(
-            f"필드 복수 관측: 전체 1회 + 섹션 {units}회 → {len(merged)}개 병합 (2회 이상 관측 {multi}개)"
-        )
-    page.notes.extend(obs_notes)
-    return merged
 
 
 def _attach_line_to_section(line: Line, section: Section, region_by_id: dict[str, Region]) -> bool:

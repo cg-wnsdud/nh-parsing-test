@@ -21,7 +21,6 @@ from PIL import Image
 from .assets import decode_asset_image, is_decorative, iter_assets
 from .gemma_client import filename_prior
 from .ir import AdDocument, AdPage, Line, Region
-from .regions import extract_fields
 
 _ANCHOR_RE = re.compile(r"^\[tbl:[^\]]+\]$")   # 표 뒤에 붙는 중첩표 앵커 라인(단독)
 _TOKEN_RE = re.compile(r"\[tbl:[^\]]+\]")      # 셀 안에 박힌 중첩표 참조 토큰
