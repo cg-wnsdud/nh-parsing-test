@@ -18,6 +18,7 @@ import json
 import re
 
 from .applicability import classify_absences, input_gap
+from .extract_models import ExtractResult, FieldCell, ObservationItem, UnmappedItem
 from .field_judge import BACKED_TOKEN_RATIO, check_field_consistency
 from .gemma_client import chat_json
 from .schema_pack import load_pack, response_schema
@@ -273,6 +274,7 @@ def extract_document(view: dict, *, product_group: str | None = None,
                 schema=schema,
                 max_tokens=_max_tokens(group),
             )
+            _validate_group_response(data)
         except Exception as exc:
             result["errors"].append({"group": gid, "error": str(exc)})
             continue
@@ -309,7 +311,33 @@ def extract_document(view: dict, *, product_group: str | None = None,
     # 어느 값에도 안 실린 수치 — 전수수집 배열이 놓친 표기 불일치의 흔적
     result["unused_figures"] = _unused_figures(view, result)
     result["coverage"] = compute_coverage(view, result)
-    return result
+
+    # 최종 출력 계약 검증(경계 ②) — 내부 코드가 계약을 어겼는지 확인한다. 여기서
+    # 실패하면 우리 쪽 버그라는 뜻이라 조용히 넘기지 않고 그대로 올린다(catch 안 함) —
+    # 잘못된 모양을 파일로 써서 다음 단계(RAG/DB)에 넘기는 것보다 여기서 멈추는 게 낫다.
+    validated = ExtractResult.model_validate(result)
+    return validated.model_dump(mode="json", exclude_none=True)
+
+
+def _validate_group_response(data: dict) -> None:
+    """VLM 응답이 strict 계약(schema_pack.response_schema)을 실제로 지켰는지 재확인(경계 ①).
+
+    guided decoding 이 모양을 강제하지만 100%는 아니다 — gemma_client 의
+    _repair_trailing_escape 가 이미 서버측 결함(문자열 종료부 손상)을 잡아낸 적이
+    있다. 여기서 걸리면 chat_json 호출 실패와 동일하게 취급돼(호출측 try/except가
+    잡음) 그룹 전체를 스킵한다 — 절반만 검증된 필드를 섞어 쓰는 것보다 그룹 전체를
+    버리는 편이 안전하고, 어차피 그룹이 실패 처리의 최소 단위다.
+    """
+    for val in (data.get("fields") or {}).values():
+        FieldCell.model_validate(val)
+    for vals in (data.get("observations") or {}).values():
+        for v in vals or []:
+            ObservationItem.model_validate(v)
+    for ev in data.get("events") or []:
+        for val in (ev or {}).values():
+            FieldCell.model_validate(val)
+    for item in data.get("unmapped") or []:
+        UnmappedItem.model_validate(item)
 
 
 # 부분문자열 대조로는 못 잡는 의역(어순이 달라진 재진술)을 잡기 위한 완화된 임계.

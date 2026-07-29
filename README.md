@@ -75,6 +75,8 @@ uv run python tools/make_review.py      # → out/review.html
 
 - **[docs/handoff.md](docs/handoff.md)** — ⭐ **여기부터.** 스키마를 어떻게 짰고 무엇이
   나오는지, 다음 단계(RAG/DB) 인계 시 정해야 할 것 5가지. 팀 논의용
+- **[docs/schema-explained.md](docs/schema-explained.md)** — 스키마 내부 구조 상세
+  (그룹 구성 이유, `field_key` 설계, pydantic 없이 어떻게 검증하는지). 개인 학습용
 - **[docs/architecture/pipeline-map.md](docs/architecture/pipeline-map.md)** — 파이프라인
   내부. 단계별 실행 순서·판단 주체(OCR/VLM/코드)·비용 실측
 - **[docs/previous/](docs/previous/)** — 대체된 과거 설계 문서 (역사적 기록)

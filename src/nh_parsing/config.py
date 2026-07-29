@@ -2,16 +2,44 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def load_env_file(path: Path) -> None:
+    """.env 파일을 읽어 **아직 없는** 환경변수만 채운다(이미 export 된 값이 우선).
+
+    HyundaiHS(orchestrator/config.py::load_env_file)와 같은 방식 — python-dotenv
+    의존성 없이 직접 파싱한다. 실제 사내 엔드포인트(PADDLEX_URL/GEMMA_URL 등)를
+    코드에 하드코딩하지 않기 위한 장치다(2026-08-01, 저장소가 잠깐 공개돼 있던
+    사고 이후 조치). `.env`는 `.gitignore` 대상이라 이 파일을 만들어도 커밋되지 않는다.
+    """
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env_file(Path(__file__).resolve().parents[2] / ".env")
 
 
 @dataclass(frozen=True)
 class Settings:
     # ── 외부 서비스 (Spark, WireGuard 필요) ─────────────────────────
+    # 실제 사내 엔드포인트는 .env(gitignore 대상)에만 둔다 — 여기 기본값은 저장소가
+    # 공개돼도 내부망 주소가 드러나지 않는 자리표시자다. .env.example 참고해 로컬
+    # .env 를 만들 것 (2026-08-01, 저장소가 실제로 공개돼 있던 사고 이후 조치).
     paddlex_url: str = os.environ.get(
-        "PADDLEX_URL", "https://pika.ihopper.co.kr/paddlex/layout-parsing"
+        "PADDLEX_URL", "http://YOUR_PADDLEX_HOST:8081/layout-parsing"
     )
     gemma_url: str = os.environ.get(
-        "GEMMA_URL", "https://pika.ihopper.co.kr/llm/v1/chat/completions"
+        "GEMMA_URL", "http://YOUR_GEMMA_HOST:4000/v1/chat/completions"
     )
     gemma_model: str = os.environ.get("GEMMA_MODEL", "gemma-4-26b-NVFP4-MTP")
     paddlex_timeout_s: int = int(os.environ.get("PADDLEX_TIMEOUT_S", "180"))
