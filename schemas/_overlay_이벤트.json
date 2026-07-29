@@ -1,0 +1,177 @@
+{
+  "schema_id": "_overlay_이벤트",
+  "version": "v1",
+  "derived_from": "out/schema_source/_product_group_fields.json (event_overlay)",
+  "note": "이벤트는 상품군이 아니라 광고유형 오버레이다. ad_type 이 이벤트페이지일 때 상품군 스키마에 이 그룹을 덧붙인다. 한 광고에 이벤트가 여러 개면(카드형) 카드별로 하나씩 담는다.",
+  "applies_to": {
+    "ad_type": [
+      "이벤트페이지"
+    ]
+  },
+  "call_groups": [
+    {
+      "group_id": "G5_이벤트",
+      "title": "이벤트 정보",
+      "instruction": "광고에 담긴 이벤트를 이벤트 단위로 하나씩 분리해 배열로 담는다. 한 이미지에 EVENT1/EVENT2 처럼 여러 개가 있으면 각각 별도 항목이고, 서로 내용을 섞지 않는다(기간·경품이 이벤트별로 다르다). 카드 번호(card_no)나 섹션이 이미 나뉘어 있으면 그 경계를 따른다.",
+      "cardinality": "list_of_events",
+      "fields": [
+        {
+          "field_key": "event_name",
+          "label": "이벤트명",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "event_overlay/event_name",
+          "prompt": "이벤트의 명칭 또는 이벤트를 가리키는 제목(형태 예: 'OO 이벤트', 'EVENT 1'). 광고 표기를 그대로 쓴다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "event_target",
+          "label": "참여 대상·자격",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "event_overlay/event_target",
+          "catalog_refs": [
+            "event_overlay/event_target",
+            "common/event_promo_info"
+          ],
+          "prompt": "누가 참여할 수 있는지, 어떤 조건을 채워야 응모 대상이 되는지(형태 예: '이벤트 기간 내 「OO적금」 가입고객', 'OO까지 연결해야 응모대상에 포함'). 참여 방법 단계가 조건에 해당하면 함께 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "event_period",
+          "label": "이벤트 기간",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "event_overlay/event_period",
+          "prompt": "이벤트 진행 기간. 날짜를 고치지 말고 광고 표기 그대로 담는다(형태 예: 'YYYY년 M월 D일(요일) ~ M월 D일(요일)'). 상품의 가입기간과 혼동하지 않는다. 이벤트가 여러 개면 각 이벤트의 기간을 각각 담는다 — 다른 이벤트의 기간을 가져오면 안 된다. 같은 기간이 광고 여러 곳에 다른 형식으로 적혀 있으면, 여기에는 가장 완전한 표기 하나만 담고 나머지는 period_mentions 에 전부 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "period_mentions",
+          "label": "이벤트 기간 표기 전수",
+          "type": "list",
+          "item_type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "event_overlay/event_period",
+          "prompt": "이 이벤트에 적용된다고 읽힐 수 있는 기간 표기를 하나도 빠뜨리지 않고 전부 배열에 담는다. 각 항목은 '표기 그대로 (region_id)' 형태로 쓴다(형태 예: 'YYYY년 M월 D일(요일) ~ M월 D일(요일) (p1_r005)', 'YYYY.MM.DD - YYYY.MM.DD (p1_r001)'). 담을 것: ① 이 이벤트 카드 안의 기간 ② 유의사항에 다시 적힌 같은 기간 ③ **페이지 상단 배너처럼 여러 이벤트에 걸쳐 하나로 합쳐 적힌 통합 기간** ④ 어느 섹션에도 안 붙은 미배정 텍스트에 있는 기간(근거 ID 는 'pN_unassigned'). ③은 이 이벤트만의 기간이 아니지만, 소비자가 이 이벤트의 기간으로 읽을 수 있으므로 담는다 — 통합 표기와 개별 기간이 어긋나면(배너는 10.01 부터인데 이 이벤트는 10.20 부터) 그 오인 소지가 바로 심의 대상이다. 어느 이벤트 것인지 애매하면 관련될 수 있는 이벤트마다 담는다. 형식이 서로 달라도 고치거나 하나로 통일하지 말고 적힌 대로 담는다.",
+          "obligation": "수집",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "event_prize",
+          "label": "경품·혜택 내용",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "event_overlay/event_prize",
+          "prompt": "무엇을 주는지와 몇 명(팀)에게 주는지(형태 예: 'OO지원금 X만원 (선착순 X명)', 'OO포인트 X만원 (추첨 X명)'). 금액·인원 숫자와 단위를 그대로 옮긴다. 같은 경품의 인원·금액이 광고의 여러 곳에 적혀 있고 표기가 서로 다르면(예: 한 곳은 '명', 다른 곳은 '팀'), 고쳐서 하나로 만들지 말고 둘 다 적어 둔다 — 표기 불일치 자체가 심의 대상이다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "prize_mentions",
+          "label": "경품·인원·선정방식 표기 전수",
+          "type": "list",
+          "item_type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "event_overlay/event_prize",
+          "prompt": "이 이벤트의 경품·인원·선정방식이 표기된 곳을 하나도 빠뜨리지 않고 전부 배열에 담는다. 각 항목은 '표기 그대로 (region_id)' 형태로 쓴다(형태 예: '추첨을 통해 총 X,XXX명 (p1_r003)', '지원금 X만원 (선착순 X,XXX팀) (p1_r011)'). 헤드라인과 경품안내 박스에 같은 경품이 각각 적혀 있으면 둘 다 별도 항목으로 담는다 — 같은 경품이라고 합치지 마라. 인원 단위('명'·'팀')나 선정방식('추첨'·'선착순')이 서로 어긋나 보여도 고치거나 하나로 정리하지 말고 적힌 대로 담는다. 그 불일치 자체가 심의 대상이므로, 합치면 심의가 잡아야 할 것을 지우는 셈이 된다.",
+          "obligation": "수집",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "event_prize_kind",
+          "label": "경품 성격",
+          "type": "string",
+          "enum": [
+            "우대금리",
+            "일반경품",
+            "판단불가"
+          ],
+          "required_by_rule": false,
+          "catalog_ref": "event_overlay/preferential_draw_probability",
+          "prompt": "주는 것이 '우대금리'(이자율을 더 얹어주는 것)인지 '일반경품'(현금·포인트·상품권·기념품 등)인지 정한다. 이 구분이 중요한 이유는, 추첨으로 우대금리를 줄 때만 당첨확률 표기가 의무이고 일반경품 추첨은 의무가 아니기 때문이다. 애매하면 '판단불가'.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger",
+                "why": "추첨으로 우대금리를 제공하는 경우에 한함"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "event_draw_method",
+          "label": "선정 방식",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "event_overlay/event_draw_method",
+          "prompt": "당첨자를 정하는 방식. '추첨', '선착순', '전원 지급' 등 광고에 적힌 표현을 그대로 담는다. 추첨인지 선착순인지는 의미가 다르므로 광고에 적힌 쪽을 따르고 바꿔 쓰지 않는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "event_winner_announcement",
+          "label": "당첨자 발표·안내 방법",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "event_overlay/event_draw_method",
+          "prompt": "당첨자를 언제 어떻게 알리는지(예: '당첨자 대상으로 11월 중 LMS 발송 예정'). 없으면 null + not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "event_draw_probability",
+          "label": "당첨확률 표기",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "event_overlay/preferential_draw_probability",
+          "prompt": "당첨확률을 구체적 수치로 적었는지(예: '당첨확률 00%'). 경품 성격이 '우대금리'이고 선정 방식이 '추첨'일 때만 필수이고, 일반경품 추첨이면 없어도 정상이므로 없으면 그냥 null 로 둔다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger",
+                "why": "추첨으로 우대금리를 제공하는 경우에 한함"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "event_notices",
+          "label": "이벤트 유의사항",
+          "type": "list",
+          "item_type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "event_overlay/event_prize",
+          "prompt": "이벤트에 딸린 유의사항 문장들을 배열로 담는다(예: 제세공과금 부담, 중복 참여 제한, 판매한도 소진 시 종료, 부정 참여 시 취소 등). 상품 자체의 유의사항과 섞지 않는다.",
+          "obligation": "수집",
+          "applicability": {
+            "conditions": []
+          }
+        }
+      ]
+    }
+  ]
+}

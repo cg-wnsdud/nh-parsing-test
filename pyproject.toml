@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nh-ad-review-poc"
+version = "0.1.0"
+description = "NH 광고심의 PoC — 초기 파싱 파이프라인 프로토타입"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.7",
+    "pypdfium2>=5.9.0,<6.0.0",
+    "pillow>=10.0",
+    "requests>=2.32",
+    # 사내 파서 (HWP/HWPX 트랙). PDF 트랙은 pypdfium2로 자체 triage.
+    "document-processor @ git+https://github.com/CGINSIDE-ROOKIES/document-processor.git",
+    "pyyaml>=6.0.3",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.uv]
+# 샌드박스 앱 제어 정책이 빌드 백엔드 실행을 차단하므로 non-package 모드로 운용.
+# 러너가 sys.path 에 src/ 를 추가한다.
+package = false
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nh_parsing"]

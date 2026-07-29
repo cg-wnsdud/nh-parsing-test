@@ -1,0 +1,746 @@
+{
+  "schema_id": "예금성",
+  "version": "v1",
+  "derived_from": "out/schema_source/_product_group_fields.json (근거 대장)",
+  "note": "런타임 추출 스키마. 근거 조문은 대장에 있고 여기엔 LLM 이 읽을 지시문만 둔다. 규정이 바뀌면 대장을 먼저 고치고 이 파일을 갱신한다.",
+  "applies_to": {
+    "product_group": "예금성"
+  },
+  "subtypes": [
+    "예금",
+    "적금",
+    "입출금(통장·MMDA)",
+    "ELD/주가·환율연동"
+  ],
+  "call_groups": [
+    {
+      "group_id": "G1_상품기본",
+      "title": "상품 기본정보",
+      "instruction": "광고에 적힌 상품 자체의 기본 조건을 뽑는다. 금리는 이 그룹에서 다루지 않는다(G2 담당).",
+      "fields": [
+        {
+          "field_key": "product_subtype",
+          "label": "예금성 세부유형",
+          "type": "string",
+          "enum": [
+            "예금",
+            "적금",
+            "입출금(통장·MMDA)",
+            "ELD/주가·환율연동",
+            "판단불가"
+          ],
+          "required_by_rule": false,
+          "catalog_ref": "scope/deposit_subtypes",
+          "prompt": "이 광고가 다루는 예금성 상품의 세부유형을 정한다. 매월/수시로 납입하며 만기가 있으면 '적금', 한 번 예치하고 만기가 있으면 '예금', 수시 입출금이 가능한 통장·파킹통장·모임통장·MMDA 계열이면 '입출금(통장·MMDA)', 주가·환율·지수 변동에 따라 만기지급금이 달라지면 'ELD/주가·환율연동' 이다. 상품명에 '적금'·'통장' 같은 단어가 있으면 강한 근거로 쓰되, 본문의 적립방법·만기 설명과 어긋나면 본문을 따른다. 근거가 부족하면 '판단불가'.",
+          "obligation": "분류",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "product_name",
+          "label": "상품명",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/product_name",
+          "prompt": "광고 대상 금융상품의 정식 명칭만 담는다(예: 'OO적금', 'OO통장'). 은행 명칭은 별도 항목이 있으므로 상품명 앞에 붙여 쓰지 않는다 — 단, 상품명 자체에 브랜드 약칭이 포함돼 있으면 그대로 둔다. 은행 명칭만 있고 상품명이 없으면 not_found. 이벤트 명칭은 상품명이 아니므로 넣지 않는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "eligibility",
+          "label": "가입대상·가입조건",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/eligibility",
+          "prompt": "누가 가입할 수 있는지에 관한 조건. 개인/기업 구분, 연령 제한, 1인 1계좌 같은 계좌수 제한을 모두 담는다. 광고에 적힌 표현을 유지한다(예: '개인(1인 1계좌)'). 우대금리를 받기 위한 조건은 여기가 아니라 우대조건 필드에 넣는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "contract_period",
+          "label": "가입기간(계약기간)",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/contract_period",
+          "prompt": "상품의 계약기간·가입기간. 단일 값이면 그대로(예: '12개월'), 선택 가능한 여러 기간이면 전부 담는다(예: '6/12/24개월'). 이벤트 기간과 혼동하지 않는다 — 이벤트 기간은 이벤트 필드에 들어간다. 입출금 상품처럼 만기가 없으면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "subtype_not_in",
+                "values": [
+                  "입출금(통장·MMDA)"
+                ],
+                "basis": "derived",
+                "why": "계약기간(만기) 개념이 없는 수시입출식에는 성립하지 않음"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "deposit_amount",
+          "label": "가입금액·납입한도",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "deposit/deposit_amount",
+          "prompt": "가입(납입) 가능 금액의 범위나 한도. 최소·최대와 단위 조건을 함께 담는다(형태 예: 'X천원 이상 X만원 이하(원단위)'). 적금이면 월 납입한도, 파킹통장류면 우대금리가 적용되는 예치 한도금액이 여기 해당한다. 만기 예상이자 계산 예시에 등장하는 납입금액은 한도가 아니므로 넣지 않는다.",
+          "obligation": "권장",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "installment_type",
+          "label": "적립방법(적금)",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/installment_type",
+          "prompt": "적금의 적립 방식. 매월 같은 금액이면 '정액적립식', 자유롭게 넣을 수 있으면 '자유적립식'. 광고에 적힌 표현을 그대로 쓴다. 예금·입출금 상품이면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "subtype_in",
+                "values": [
+                  "적금"
+                ],
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "deposit_kind",
+          "label": "예금종류",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "deposit/installment_type",
+          "prompt": "광고에 '예금종류'로 표기된 분류명(예: '자유로우대적금'). 은행 내부 상품 분류 표기이며 상품명과 다르다. 표기가 없으면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "subtype_in",
+                "values": [
+                  "적금"
+                ],
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "tax_benefit",
+          "label": "세제혜택·제한조건",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "deposit/tax_benefit",
+          "prompt": "비과세·세금우대 등 세제 관련 혜택과 그 제한조건. 혜택만 적혀 있어도 담고, '세대당 1통장' 같은 제한조건이 함께 있으면 반드시 같이 담는다(제한조건 누락 여부가 심의 대상이다). 세제 언급이 없으면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger",
+                "why": "세제혜택을 표기한 광고에만 상세 표시 의무"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "group_id": "G2_금리",
+      "title": "금리·이자 정보",
+      "instruction": "금리와 이자에 관한 모든 수치·조건을 뽑는다. 숫자와 단위(%·%p)를 절대 바꾸지 말고 광고에 적힌 그대로 옮긴다. %와 %p 는 의미가 다르므로 구분한다.",
+      "fields": [
+        {
+          "field_key": "interest_rate_range",
+          "label": "이자율 범위·산출기준",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/interest_rate_range",
+          "prompt": "적용 이자율의 범위와 그 산출기준을 함께 담는다. 범위는 최저(기본)~최고 형태로(형태 예: '연 최저 X.XX% ~ 연 최고 X.XX%'), 산출기준은 기준일자·세전/세후 구분·연 기준 여부를 담는다(형태 예: 'YY.MM.DD 기준, 세전, 연이자율'). 최고금리만 적혀 있으면 최고금리만 담고 기본금리 누락 사실은 별도 필드(base_rate)에서 드러나게 한다 — 없는 값을 추정해 채우지 않는다.",
+          "derived": true,
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "base_rate",
+          "label": "기본금리",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/base_rate_with_max",
+          "prompt": "우대금리를 뺀 기본(기준) 금리. 광고에 '기본금리'·'기본'·'최저'로 표기된 값을 담고 기준일·세전 여부가 붙어 있으면 함께 담는다(형태 예: '연 X.XX% (YY.MM.DD 기준, 세전)'). 최고금리만 있고 기본금리 표기가 전혀 없으면 빈 문자열 + status=not_found 로 둔다(이 누락 자체가 심의 지적사항이다).",
+          "derived": true,
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "trigger_any",
+                "fields": [
+                  "max_rate"
+                ],
+                "basis": "ledger",
+                "why": "최고금리를 표시한 경우 기본금리 병기 의무"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "max_rate",
+          "label": "최고금리",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "deposit/base_rate_with_max",
+          "prompt": "기본금리에 우대금리를 모두 더한 최대 적용 금리. '최대 연 X.XX%', '최고 연 X.XX%' 처럼 표기된 값을 담는다. 단위가 %p 인 우대금리 폭과 혼동하지 않는다 — 그건 우대금리 필드다.",
+          "derived": true,
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger",
+                "why": "최고금리를 표시하지 않은 광고에는 대상이 없음"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "preferential_rate_total",
+          "label": "우대금리 총 폭",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/preferential_rate_conditions",
+          "prompt": "우대금리로 더 받을 수 있는 최대 폭. 단위가 %p 인 값이다(형태 예: '최고 연 X.X%p'). 최고금리(%)와 반드시 구분한다.",
+          "derived": true,
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "trigger_any",
+                "fields": [
+                  "preferential_rate_conditions",
+                  "preferential_rate_payment_condition"
+                ],
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "preferential_rate_conditions",
+          "label": "우대금리 조건별 내역",
+          "type": "list",
+          "item_type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/preferential_rate_conditions",
+          "prompt": "우대금리를 받는 조건을 항목별로 하나씩 분리해 배열로 담는다. 각 항목은 '우대폭 : 조건' 형태로 광고 표기를 유지한다(형태 예: 'X.X%p : (해당 조건 문구)'). 조건이 여러 개인데 하나로 뭉쳐 쓰면 안 된다 — 조건별 구분 표기 여부가 심의 대상이므로 광고에 구분돼 있으면 구분된 대로, 뭉쳐 있으면 뭉친 채로 한 항목으로 담는다. 우대조건이 없으면 빈 배열.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "trigger_any",
+                "fields": [
+                  "preferential_rate_total",
+                  "preferential_rate_payment_condition"
+                ],
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "preferential_rate_payment_condition",
+          "label": "우대금리 지급 시점 조건",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/preferential_rate_conditions",
+          "prompt": "우대금리가 언제 적용되는지에 관한 조건. 특히 '만기해지 시에만 적용'·'중도해지 시 미지급' 취지의 문구가 있으면 그대로 담는다(예: '우대조건 충족하는 경우 만기해지 시 적용'). 이 문구 누락이 심의 지적사항이므로 없으면 null + not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "trigger_any",
+                "fields": [
+                  "preferential_rate_total",
+                  "preferential_rate_conditions"
+                ],
+                "basis": "ledger"
+              },
+              {
+                "rule": "subtype_not_in",
+                "values": [
+                  "입출금(통장·MMDA)"
+                ],
+                "basis": "derived",
+                "why": "만기해지 조건부 우대금리가 성립하지 않는 유형"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "interest_calc_method",
+          "label": "이자 계산방식",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/interest_calc_method",
+          "prompt": "이자를 단리로 계산하는지 복리로 계산하는지, 복리면 어떤 주기인지(일복리·월복리·분기복리·반기복리·연복리). 광고에 '복리식'처럼 주기 없이만 적혀 있으면 그 표기 그대로 담는다(주기를 추측해 채우지 않는다 — 주기 미구분이 심의 지적사항이다). 만기와 중도해지의 계산방식이 다르게 적혀 있으면 둘 다 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger",
+                "why": "단리/복리 구분 표시는 복리 상품에 부과되는 의무"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "interest_payment_time",
+          "label": "이자 지급시기",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/interest_payment_time",
+          "prompt": "이자를 언제 주는지(예: '만기일시지급식', '월별 지급'). 광고 표기를 유지한다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "interest_payment_restriction",
+          "label": "이자 지급제한 사유",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/interest_payment_restriction",
+          "prompt": "원금·이자 지급이 제한되는 사유. 압류·가압류·질권설정·법적 지급제한조치·예금잔액증명서 발급일 등이 해당한다. 관련 문장을 그대로 담는다. 없으면 null + not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "early_termination_rate",
+          "label": "중도해지이율",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/early_termination_rate",
+          "prompt": "만기 전에 해지할 때 적용되는 이율. 구체 수치가 없고 '영업점 및 홈페이지에 고시한 이율' 처럼 참조로만 적혀 있어도 그 표기를 그대로 담는다. 중도해지 시 이율이 낮아진다는 안내 문구가 따로 있으면 함께 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "subtype_not_in",
+                "values": [
+                  "입출금(통장·MMDA)"
+                ],
+                "basis": "derived",
+                "why": "중도해지 개념이 없는 수시입출식에는 성립하지 않음"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "post_maturity_rate",
+          "label": "만기 후 이율",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/early_termination_rate",
+          "prompt": "만기가 지난 뒤 적용되는 이율. 중도해지이율과 한 문장에 같이 적혀 있는 경우가 많은데, 그럴 때도 만기 후 이율에 해당하는 부분을 담는다(문장 전체를 담아도 된다).",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "subtype_not_in",
+                "values": [
+                  "입출금(통장·MMDA)"
+                ],
+                "basis": "derived",
+                "why": "만기 개념이 없는 수시입출식에는 성립하지 않음"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "maturity_interest_example",
+          "label": "만기 수취이자 예시",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/maturity_interest_example",
+          "prompt": "만기에 실제로 받게 되는 이자 금액의 예시. 적용금리·납입금액·기간과 결과 금액을 함께 담는다(형태 예: '최고금리 X.X% 적용 시 매월 X만원 X개월 납입 시 세전이자 X원'). 금액 숫자를 절대 바꾸지 않는다. 예시 대신 이자계산기 기능을 안내하고 있으면 그 사실을 담는다. 둘 다 없으면 null + not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "subtype_not_in",
+                "values": [
+                  "입출금(통장·MMDA)"
+                ],
+                "basis": "derived",
+                "why": "만기 개념이 없는 수시입출식에는 성립하지 않음"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "rate_mentions",
+          "label": "금리 표기 전수",
+          "type": "list",
+          "item_type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/base_rate_with_max",
+          "prompt": "광고 안에서 금리·이자율이 표기된 곳을 하나도 빠뜨리지 않고 전부 배열에 담는다. 각 항목은 '표기 그대로 (region_id)' 형태로 쓴다(형태 예: '최대 연 X.X% (기본 X.X%) (p1_r002)', '기본금리 연 X.XX% (YY.MM.DD 기준, 세전) (p1_r008)'). 수식어('최대'·'최고'·'기본')와 단위(%·%p)를 절대 바꾸지 말고 그대로 옮긴다. 같은 금리가 헤드라인과 상세표에 각각 적혀 있으면 둘 다 별도 항목으로 담는다 — 같은 값이라고 합치지 마라. 표기가 서로 어긋나거나 %와 %p 가 잘못 쓰인 것처럼 보여도 고치지 말고 적힌 대로 담는다(그 불일치 자체가 심의 대상이다).",
+          "obligation": "수집",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "rate_change_possibility",
+          "label": "금리 변동 가능성 표기",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/prohibit_definitive",
+          "prompt": "적용 금리가 바뀔 수 있다는 취지의 안내(예: '세부사항 변동가능', '기준일 현재'). 확정적으로 표현했는지 판단하는 근거가 되므로, 변동 가능성을 알리는 문구가 있으면 담고 없으면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        }
+      ]
+    },
+    {
+      "group_id": "G3_의무고지",
+      "title": "의무 표시·고지 문구",
+      "instruction": "법령·심의기준상 반드시 광고에 들어가야 하는 문구들의 실제 표기를 뽑는다. 있으면 원문을 그대로, 없으면 null + not_found 로 둔다. 없는 문구를 만들어 채우면 심의 결과가 뒤집히므로 절대 생성하지 않는다.",
+      "fields": [
+        {
+          "field_key": "advertiser_bank_name",
+          "label": "은행 명칭",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "common/advertiser_bank_name",
+          "prompt": "광고 주체인 은행의 명칭 표기(예: 'NH농협은행'). 광고 어디든 한 번이라도 표기돼 있으면 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "review_stamp",
+          "label": "준법감시인 심의필",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "common/review_stamp",
+          "prompt": "준법감시인 심의필 표기 전체를 담는다 — 심의주체·심의필번호·유효기간이 모두 들어가야 한다(예: 'NH농협은행 준법감시인 심의필 2026-0000 (2026.06.00.~2026.12.31.)'). 번호나 기간 중 일부만 있으면 있는 대로 담는다(무엇이 빠졌는지는 이후 심의 단계가 판단한다).",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "compliance_procedure_declaration",
+          "label": "내부통제·심의절차 준수 자율선언문",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/compliance_pre_review",
+          "prompt": "'이 광고는 법령 및 내부통제기준에 따른 광고 관련 절차를 준수하였습니다' 류의, 광고 자체가 사전 심의·내부통제 절차를 거쳤다고 밝히는 자율선언 문구가 있으면 그대로 담는다. 심의필 번호(review_stamp)와는 다른 문구다 — 번호가 아니라 절차를 준수했다는 문장형 선언이다. 이 문구가 없다고 사전심의를 안 받은 것은 아니다(심의필 표기가 그 절차의 별도 증거이므로, 없으면 그냥 not_found).",
+          "obligation": "절차",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "read_terms_notice",
+          "label": "설명서·약관 필독 권유",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "common/read_terms_notice",
+          "prompt": "계약 체결 전에 상품설명서와 약관을 읽어보라고 권유하는 문구. 해당 문장을 그대로 담는다(예: '금융상품을 가입하시기 전에 상품설명서 및 약관을 반드시 읽어보시기 바랍니다'). 특약·상품설명서를 읽어보라는 유사 문구도 포함한다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "right_to_explanation",
+          "label": "설명받을 권리 안내",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "common/right_to_explanation",
+          "prompt": "금융소비자보호법 제19조제1항에 따라 설명을 받을 권리가 있다는 안내 문구. 해당 문장을 그대로 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "depositor_protection",
+          "label": "예금자보호 문구",
+          "type": "string",
+          "required_by_rule": true,
+          "catalog_ref": "deposit/depositor_protection",
+          "prompt": "예금자보호법에 따른 보호 여부와 보호 한도를 알리는 문구 전체를 그대로 담는다. 한도 금액(예: '1억원까지', '5천만원')을 절대 고쳐 쓰지 말고 광고에 적힌 숫자를 그대로 옮긴다 — 이 값이 규정과 맞는지는 이후 심의 단계가 판단한다. 보호 대상이 아니라는 표기(비보호상품)도 이 필드에 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "future_return_disclaimer",
+          "label": "미래수익 비보장 문구",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "deposit/future_return_disclaimer",
+          "prompt": "'예시된 지급금(수익)은 미래의 수익을 보장하지 않습니다' 라는 취지의 문장이 실제로 있을 때만 그 문장을 담는다. 주로 ELD·주가/환율연동예금처럼 만기지급금이 변동하는 상품에 붙는다. 주의: 'YY.MM.DD 기준', '세전', '세부사항 변동 가능' 같은 금리 기준일·조건 표기는 이 항목이 아니다 — 그런 문구만 있으면 not_found 로 둔다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "subtype_in",
+                "values": [
+                  "ELD/주가·환율연동"
+                ],
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "fee_and_cost",
+          "label": "수수료·부대비용",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/seller_name_product_content",
+          "prompt": "상품 이용에 따라 발생할 수 있는 수수료·부대비용 표기. 발생하지 않는다는 표기도 담는다. 언급이 없으면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "derived",
+                "why": "수수료·비용이 발생하지 않는 상품에는 표시 대상이 없음"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "stats_source",
+          "label": "통계·도표 출처",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/stats_source",
+          "prompt": "광고에 통계수치나 도표·그래프를 인용했다면 그 출처와 기준일자 표기. 인용 자체가 없으면 null(그 경우 이 항목은 심의 대상이 아니다).",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "award_cert_info",
+          "label": "수상·인증·특허 표기",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/award_cert_timeinfo",
+          "prompt": "수상·선정·인증·특허를 내세운 표기가 있으면 그 내용과 시기를 함께 담는다. 없으면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "affiliated_service_condition",
+          "label": "연계·제휴서비스 조건",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/affiliated_service_condition",
+          "prompt": "연계·제휴 서비스나 부수 혜택을 광고했다면, 그 서비스를 받기 위해 충족해야 하는 조건. 다른 회사 플랫폼을 통한 판매·제휴 고지(예: '토스는 상품 내용과 이벤트에 관여하지 않아요')도 여기에 담는다. 없으면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "endorsement_disclosure",
+          "label": "추천·보증 경제적 이해관계 공개",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/endorsement_interest_disclosure",
+          "prompt": "후기·체험담·유명인·인플루언서를 활용한 광고라면, 광고주와의 경제적 이해관계를 알리는 표기(예: '#광고', '협찬', '경제적 대가를 받았음'). 추천·보증 형식이 아니면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "ai_generated_notice",
+          "label": "생성형 AI 활용 고지",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/ai_generated_notice",
+          "prompt": "생성형 AI 로 만들었다는 고지 문구가 있으면 담는다. 없으면 null(AI 로 만들었는지 여부 자체는 광고물만 보고 판단하지 않는다 — 추측하지 말 것).",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {
+                "rule": "conditional",
+                "basis": "ledger"
+              }
+            ]
+          }
+        },
+        {
+          "field_key": "contact_info",
+          "label": "문의처",
+          "type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/seller_name_product_content",
+          "prompt": "상품 가입·상담 문의처(전화번호·센터명 등). 없으면 null.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "other_notices",
+          "label": "그 외 유의사항 문구",
+          "type": "list",
+          "item_type": "string",
+          "required_by_rule": false,
+          "catalog_ref": "common/seller_name_product_content",
+          "prompt": "위 필드들에 해당하지 않는 유의사항·안내 문구를 문장 단위로 배열에 담는다. 유의사항 영역의 문장이 어느 필드에도 배정되지 않고 사라지는 것을 막는 안전망이다. 이미 다른 필드에 담은 문장은 중복해 넣지 않는다.",
+          "obligation": "수집",
+          "applicability": {
+            "conditions": []
+          }
+        }
+      ]
+    },
+    {
+      "group_id": "G4_위험표현",
+      "title": "금지·주의 표현 관측",
+      "instruction": "값을 뽑는 그룹이 아니다. 규정상 금지·주의되는 표현이 광고에 있는지 '의심 후보'로 수집한다. 최종 위반 판정은 이후 심의 단계가 하므로, 여기서는 단정하지 말고 해당될 수 있는 문구를 근거와 함께 모은다. 해당 문구가 없으면 빈 배열로 두고 억지로 만들지 않는다.",
+      "observation_fields": [
+        {
+          "field_key": "obs_definitive_expression",
+          "label": "단정적·확정적 표현",
+          "catalog_ref": "common/prohibit_definitive",
+          "prompt": "확정되지 않은 사항을 확정적으로 말하는 표현(예: '확정', '보장', '무조건'). 금리·혜택이 조건에 따라 달라지는데 단정적으로 적었는지를 본다.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "obs_superlative",
+          "label": "근거 없는 최상급 표현",
+          "catalog_ref": "common/prohibit_superlative",
+          "prompt": "'최고·최상·최저·최초·최대·1위·제일·유일' 같은 최상급 표현. 단, 금리 수치에 붙은 '최고 연 X.X%'·'최대 연 X.X%' 같은 표기는 상품 조건 설명이므로 여기에 넣지 않는다 — 다른 상품·기관과 비교해 우위를 주장하는 맥락일 때만 담는다.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "obs_condition_generalization",
+          "label": "거래조건 일반화 오인",
+          "catalog_ref": "common/prohibit_condition_generalization",
+          "prompt": "사람마다 달라지는 조건을 누구나 받을 수 있는 것처럼 읽히게 한 표현(예: '누구나', '전원'). 우대금리처럼 조건 충족이 필요한 혜택을 조건 없이 제시했는지를 본다.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "obs_comparison",
+          "label": "근거 없는 비교우위",
+          "catalog_ref": "common/prohibit_false_exaggerate_deceive",
+          "prompt": "다른 상품·다른 금융기관보다 유리하다고 하면서 비교대상이나 기준을 밝히지 않은 표현.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "obs_exaggerate_or_conceal",
+          "label": "과장·은폐·축소 의심",
+          "catalog_ref": "common/prohibit_false_exaggerate_deceive",
+          "prompt": "혜택을 부풀리거나 불리한 사실(중도해지 시 낮은 이율, 조건 제한 등)을 감추거나 작게 다룬 것으로 의심되는 표현.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "obs_burden_understated",
+          "label": "경제적 부담 축소 오인",
+          "catalog_ref": "common/prohibit_false_exaggerate_deceive",
+          "prompt": "부담을 작아 보이게 하거나 이익을 크게 인지하게 만드는 표현.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "obs_rate_overstated",
+          "label": "이자율 과장·허위 의심",
+          "catalog_ref": "deposit/prohibit_relative_high_rate",
+          "prompt": "실제보다 이자율을 높게 보이게 하거나, 다른 상품보다 높은 이자율을 주는 것처럼 읽히게 한 표현.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "obs_special_rate_as_cash",
+          "label": "특별금리를 경품성 금전으로 오인",
+          "catalog_ref": "deposit/prohibit_special_rate_as_cash",
+          "prompt": "우대금리·특별금리를 이자가 아니라 별도의 돈(축하금·지원금 등)을 주는 것처럼 읽히게 한 표현.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        },
+        {
+          "field_key": "obs_darkpattern",
+          "label": "다크패턴 의심",
+          "catalog_ref": "common/prohibit_darkpattern",
+          "prompt": "소비자를 몰아세우거나 판단을 흐리게 만드는 표현·구성. ①근거 없이 거짓으로 주의·흥미를 끄는 것, ②중요정보를 숨기거나 작게 다뤄 비교를 어렵게 하는 것, ③가입 과정에서 관계없는 부수상품을 끼워 안내하는 것, ④첫 화면에는 유리한 숫자만 보여주고 비용·조건을 뒤에서 순차로 공개하는 것이 해당한다. 정적 이미지만으로는 화면 흐름을 알 수 없으므로, 문구에서 드러나는 경우에만 담고 확신이 없으면 why 에 '문구만으로는 불확실'이라고 적는다.",
+          "obligation": "관측",
+          "applicability": {
+            "conditions": []
+          }
+        }
+      ]
+    }
+  ]
+}
