@@ -2,12 +2,20 @@
 """골드셋 자동 채점기 — gold/*.yaml (정답) vs out/json (현재 파싱) 비교.
 
 지표:
-  1) 섹션 검출: 골드 섹션(타입+위치)이 예측 섹션과 매칭되는가 (타입 일치 + 겹침≥0.3)
+  1) 영역검출: 골드가 손으로 표시한 구획(box)마다 파싱 영역이 잡혔는가 (겹침≥0.5)
   2) 텍스트 커버리지: must_contain 문장이 파싱 라인에 존재하는가 (정규화 부분일치)
   3) 분류: product_group / ad_type 일치
 
 필드 정확도는 이 파일이 재지 않는다 — 필드는 STAGE_3(out/extracted) 단일 출처이고
 채점은 tools/verify_extract.py 가 한다. 여기는 '파싱이 화면의 글자를 다 건졌는가'만 본다.
+
+**2026-08-03: 지표 1을 '섹션 검출'에서 '영역검출'로 교체.** 예전 지표는 골드 섹션의
+`type` 이 예측 `section_type` 과 같은지까지 봤는데, 섹션(의미 묶음) 생성 자체를 파싱에서
+제거했다(불안정 + 후속 계약에 담을 자리 없음 — vlm_judge 모듈 상단 주석 참조).
+`AdPage.sections` 가 항상 빈 리스트가 되었으므로 옛 코드는 크래시 없이 조용히 전건
+실패로 채점했다. 지금은 같은 골드 box 를 **영역(region) 검출 여부**로만 쓴다 —
+"사람이 의미 있다고 표시한 구획에서 글자를 건졌는가"는 여전히 파싱 계층의 질문이다.
+⚠ 옛 '섹션 검출 37/44(84%)' 와 **직접 비교할 수 없다**(측정 대상이 다름).
 
 사용: uv run python tools/evaluate.py [--only 파일명부분]
 출력: 콘솔 스코어카드 + out/eval_report.md (실패 항목 목록 포함)
@@ -57,32 +65,39 @@ def norm(text: str) -> str:
 # (다른 지표도 통과 행에 비고를 달기 때문에 '비고 있음'으로 세면 오집계된다.)
 CAND_ONLY = "VLM 통독 후보로만 회수 (정본 lines 에는 없음)"
 # 파싱은 됐는데(out/json) STAGE_3 입력(out/llm_view)까지 못 간 경우.
-# 장식예시(2a) 격리가 대표 원인 — 격리는 '보관'이지만 LLM 관점에선 삭제와 같다.
 # 채점 대상이 out/json 이라 이 유실은 지표에 안 잡히므로 별도로 표시한다.
+# (2026-08-03 전까지 대표 원인은 장식예시 격리였는데 그 단계를 없앴다. 지금 남은 경로는
+#  build_page_view 가 '텍스트도 후보도 빈 영역'을 건너뛰는 것뿐이라 훨씬 드물어야 한다 —
+#  이 수치가 다시 커지면 llm_view 투영에 새 유실 경로가 생겼다는 신호다.)
 VIEW_DROP = "파싱됨 but STAGE_3 입력(llm_view)에서 제외됨"
 
 
 def view_norm_by_page(view: dict | None) -> dict[int, str]:
-    """llm_view(STAGE_3 페이로드)의 페이지별 정규화 텍스트 — 정본+후보+미배정 전부."""
+    """llm_view(STAGE_3 페이로드)의 페이지별 정규화 텍스트 — 정본+후보+미배정 전부.
+
+    llm_view 는 2026-08-03 부터 `pages → regions` 평면 구조다(섹션 계층 제거).
+    옛 코드는 `page["sections"]` 를 훑어 항상 빈 문자열을 만들었고, 그 결과 정상적으로
+    STAGE_3 에 실린 문장까지 전부 VIEW_DROP 으로 오표시했다.
+    """
     if not view:
         return {}
     out: dict[int, str] = {}
     for page in view.get("pages", []):
         parts: list[str] = []
-        for sec in page.get("sections", []):
-            for r in sec.get("regions", []):
-                parts.append(r.get("text") or "")
-                parts.append(r.get("vlm_reading") or "")
+        for r in page.get("regions", []):
+            parts.append(r.get("text") or "")
+            parts.append(r.get("vlm_reading") or "")
         parts.append(page.get("unassigned") or "")
         out[page.get("page_number")] = norm("".join(parts))
     return out
 
 
-def section_match(gold_box: list, pred_box: list) -> bool:
-    """섹션 박스 매칭 — 겹침 / 작은 쪽 면적 ≥ 0.5.
+def box_match(gold_box: list, pred_box: list) -> bool:
+    """골드 구획 ↔ 파싱 영역 매칭 — 겹침 / 작은 쪽 면적 ≥ 0.5.
 
-    (골드는 섹션 전체 범위, 예측은 텍스트 라인 합집합이라 더 작은 경우가
-    일반적이므로 골드 면적 기준만 쓰면 부당하게 탈락한다.)
+    양쪽 어느 쪽이 더 클지 모르므로 '작은 쪽' 기준을 쓴다. 골드 구획이 여러 영역으로
+    쪼개져 잡히면(영역이 작음) 영역 면적 기준으로, 한 영역이 여러 골드 구획을 걸치면
+    (영역이 큼) 골드 면적 기준으로 판정된다.
     """
     ix = max(0, min(gold_box[2], pred_box[2]) - max(gold_box[0], pred_box[0]))
     iy = max(0, min(gold_box[3], pred_box[3]) - max(gold_box[1], pred_box[1]))
@@ -117,24 +132,23 @@ def eval_file(gold: dict, parsed: dict, view: dict | None = None) -> dict:
             sx = ppage["canvas_w"] / gc[0]
             sy = ppage["canvas_h"] / gc[1]
 
-        # 1) 섹션 매칭
-        pred_secs = ppage.get("sections", [])
+        # 1) 영역검출 — 골드가 표시한 구획마다 파싱 영역이 잡혔는가.
+        #    타입(section_type) 일치는 더 이상 보지 않는다 — 섹션 생성을 파싱에서
+        #    제거했으므로 채점기가 요구할 대상이 없다(모듈 docstring 참조).
+        pred_boxes = [r["bbox"] for r in ppage["regions"] if r.get("bbox")]
         for gs in gpage.get("sections", []) or []:
-            cands = [s for s in pred_secs if s["section_type"] == gs["type"]]
-            matched = False
             gbox = gs.get("box")
-            if gbox:
-                gbox = [gbox[0] * sx, gbox[1] * sy, gbox[2] * sx, gbox[3] * sy]
-            if gbox and any(c.get("bbox") for c in cands):
-                matched = any(
-                    c.get("bbox") and section_match(gbox, c["bbox"])
-                    for c in cands
-                )
-            else:
-                matched = bool(cands)  # bbox 없는 골드(HWP 등)는 타입 존재만
+            label = f"p{pno} {gs['type']}#{gs.get('no', 1)}"
+            if not gbox:
+                # 좌표 없는 골드(HWP 등)는 영역검출로 채점할 수 없다. 옛 코드는 '타입
+                # 존재'로 대신 통과시켰는데 타입 자체가 없어졌으므로 무득점 스킵한다
+                # (자동 통과/실패 둘 다 수치를 왜곡한다).
+                continue
+            gbox = [gbox[0] * sx, gbox[1] * sy, gbox[2] * sx, gbox[3] * sy]
+            matched = any(box_match(gbox, pb) for pb in pred_boxes)
             rows.append(
-                ("섹션", f"p{pno} {gs['type']}#{gs.get('no', 1)}", matched,
-                 "" if matched else "동일 타입·위치의 예측 섹션 없음")
+                ("영역검출", label, matched,
+                 "" if matched else "이 구획과 겹치는 파싱 영역 없음")
             )
 
         # 2) must_contain — 정본(lines)과 VLM 통독 후보(vlm_reading)를 두 층으로 본다.
@@ -188,7 +202,7 @@ def eval_file(gold: dict, parsed: dict, view: dict | None = None) -> dict:
         #    필드 품질은 out/extracted 를 보는 tools/verify_extract.py 가 단일 창구다.
         #    두 채점기가 서로 다른 산출물을 '필드'라는 같은 이름으로 재던 것이 혼선의
         #    원인이었다 — STAGE_3 를 고쳐도 이 지표는 안 움직였다(실측).
-        #    이 파일은 파싱 품질(분류·섹션·문장)만 책임진다.
+        #    이 파일은 파싱 품질(분류·영역검출·문장)만 책임진다.
     return rows
 
 
