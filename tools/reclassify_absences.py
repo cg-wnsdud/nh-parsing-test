@@ -50,7 +50,7 @@ def main() -> None:
         result = json.loads(path.read_text(encoding="utf-8"))
         pack = load_pack(result["product_group"], result.get("ad_type"))
 
-        prune_empty_events(result)   # 유령 이벤트가 허위 지적사항을 만들지 않게 먼저 걷어낸다
+        prune_empty_events(result)   # 유령 이벤트가 허위 미표시를 만들지 않게 먼저 걷어낸다
         result["review_gaps"] = classify_absences(result, pack)
         view_path, parse_path = view_dir / path.name, parse_dir / path.name
         result["input_gap"] = (
@@ -67,9 +67,9 @@ def main() -> None:
               f"+이벤트 {c['absence_missing_in_events']} / 해당없음 {c['absence_not_applicable']}"
               f" / 판정제외 {c['absence_out_of_scope']} / 확인필요 {c['absence_needs_check']}")
         for m in result["review_gaps"]["미표시"]:
-            print(f"      [지적] {m['field_key']} ({m['obligation']})")
+            print(f"      [미표시] {m['field_key']} ({m['obligation']})")
         if result["input_gap"]:
-            print(f"   !! 입력 유실 {len(result['input_gap'])}개 영역 (위 지적에 섞였을 수 있음)")
+            print(f"   !! 입력 유실 {len(result['input_gap'])}개 영역 (위 미표시에 섞였을 수 있음)")
 
         if not args.dry_run:
             path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

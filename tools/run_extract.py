@@ -41,7 +41,7 @@ def main() -> None:
     print(f"[스키마] 호출그룹: {', '.join(cov['call_groups'])}")
     meta_problems = check_schema_metadata(load_pack("예금성", "이벤트페이지"))
     if meta_problems:
-        # 의무등급·적용조건이 빠진 필드는 '필수·전 광고'로 평가돼 없던 지적사항을 만든다
+        # 의무등급·적용조건이 빠진 필드는 '필수·전 광고'로 평가돼 없던 미표시를 만든다
         print(f"[스키마] !! 부재 판정 메타 누락 {len(meta_problems)}건: {meta_problems[:5]}")
     print()
 
@@ -81,7 +81,7 @@ def main() -> None:
               f"판정제외 {c.get('absence_out_of_scope')} / "
               f"확인필요 {c.get('absence_needs_check')}")
         for m in gaps.get("미표시", []):
-            print(f"      [지적] {m['field_key']} ({m['obligation']})")
+            print(f"      [미표시] {m['field_key']} ({m['obligation']})")
         if result.get("input_gap"):
             print(f"   !! STAGE_3 입력 유실 {len(result['input_gap'])}개 영역 — "
                   f"위 '미표시'에 입력 누락이 섞였을 수 있음 "

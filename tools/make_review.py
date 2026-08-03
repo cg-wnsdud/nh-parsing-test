@@ -306,9 +306,10 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
         "uncertain": ("warn", "확신낮음"),
     }
     # 미발견의 3분류를 그대로 보여준다. 예전엔 not_found 를 전부 "원본에 미존재 — 결함 아님"
-    # 으로 적었는데, 그 안에 '표시했어야 하는데 없음'(=심의 지적사항)이 섞여 있었다.
+    # 으로 적었는데, 그 안에 '표시했어야 하는데 없음'이 섞여 있었다. "미표시"는 위반
+    # 여부를 판정한 게 아니라 사실 관측이다 — 최종 심의는 하류(RAG/DB 엔진 + 담당자) 몫.
     absence_meta = {
-        "미표시": ("miss", "미표시 — 지적사항"),
+        "미표시": ("miss", "미표시 — 표시의무 있음, 확인 필요"),
         "해당없음": ("na", "해당없음(이 유형엔 성립 안 함)"),
         "판정제외": ("na", "판정제외"),
         "확인필요": ("warn", "확인필요"),
@@ -589,7 +590,7 @@ h2 { font-size: 17px; border-bottom: 2px solid #d0d7de; padding-bottom: 8px; }
 .stage3tbl .st.ok { color:#116329; }
 .stage3tbl .st.warn { color:#9a6700; }
 .stage3tbl .st.bad { color:#57606a; font-weight:normal; }
-/* 미표시 = 심의 지적사항(빨강, 강조) vs 해당없음 = 이 유형엔 성립 안 함(회색, 결함 아님) */
+/* 미표시 = 표시의무 있는데 없음, 확인 필요(빨강, 강조) vs 해당없음 = 이 유형엔 성립 안 함(회색, 결함 아님) */
 .stage3tbl .st.miss { color:#a40e26; }
 .stage3tbl .st.na { color:#57606a; font-weight:normal; }
 .stage3tbl tr.fieldrow.missrow { background:#fff5f5; }
