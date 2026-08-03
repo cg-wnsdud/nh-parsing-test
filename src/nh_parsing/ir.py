@@ -20,6 +20,16 @@ class Line(BaseModel):
     bbox: Optional[list[int]] = None
     confidence: Optional[float] = None
     source: Source
+    # 라인 단위 VLM 재판독 후보 — Region.vlm_reading 과 같은 원칙(B안)을 라인에도 적용한다.
+    # 원칙은 원래 Region 에만 지켜지고 라인에서는 두 단계가 정본을 갈아치우고 있었다:
+    # 스윕-OCR 중복 심판(pipeline)과 저신뢰 재판독(vlm_direct). 두 단계 다 비결정
+    # (스윕이 회수하는 문구가 실행마다 다름)이라 정본이 실행마다 흔들렸다 — 같은 코드·같은
+    # 입력 2회 실측(2026-08-03): 정본 484줄 중 2줄이 갈렸고 그 2줄이 전부 이 경로였다
+    # (002 '이벤트 기간' ↔ '이벤트 기간內', 올원e '20.2%p:...' ↔ '② 0.2%p : ...').
+    # 이제 정본은 그대로 두고 후보만 붙인다. 최종 텍스트 선택은 하류(STAGE_3/심의)가 한다.
+    vlm_reading: Optional[str] = None
+    vlm_reading_conf: Optional[float] = None
+    vlm_reading_stage: Optional[str] = None  # sweep_dedupe | lowconf_reread
 
 
 class Region(BaseModel):

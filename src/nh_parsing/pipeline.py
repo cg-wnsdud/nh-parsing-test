@@ -513,13 +513,18 @@ def _find_twin(sweep: Line, known: list[Line]) -> Line | None:
 def _resolve_sweep_duplicates(
     page: AdPage, swept: list[Line], canvas_img: Image.Image
 ) -> list[Line]:
-    """스윕 라인이 기존 OCR/디지털 라인의 다른 판독(중복)이면 크롭 재판독으로 정정.
+    """스윕 라인이 기존 OCR/디지털 라인의 다른 판독(중복)이면 크롭 재판독해 **후보를 붙인다**.
 
     스윕 자체 dedup 은 정규화 완전일치만 잡으므로, OCR 이 원문자 번호를 숫자에
     합쳐 읽거나 소수점을 잃은 경우(올원 '10.1%p' vs 스윕 '① 0.1%p')는 못 걸러
     두 판본이 공존한다. 여기서 숫자·기호를 뺀 안정 핵심부로 같은 줄임을 탐지하고,
-    그 위치를 고해상 재판독해(심판 — 규칙으로 우열을 정하지 않음) OCR 라인 텍스트를
-    정정한 뒤 중복 스윕 라인을 제거한다. 좌표는 정밀한 OCR 쪽 유지(best-of-both).
+    그 위치를 고해상 재판독해(심판 — 규칙으로 우열을 정하지 않음) `Line.vlm_reading`
+    후보로 붙인 뒤 중복 스윕 라인을 제거한다. 좌표는 정밀한 OCR 쪽 유지(best-of-both).
+
+    **정본은 덮지 않는다**(2026-08-03 변경). 예전에는 OCR 라인 텍스트에 대입했는데,
+    이 단계의 트리거가 스윕 회수 문구이고 스윕은 실행마다 다른 것을 회수하므로
+    정본이 실행마다 흔들렸다 — 같은 코드·같은 입력 2회 실측에서 갈린 정본 2줄이
+    전부 이 경로였다(ir.Line.vlm_reading 주석 참조).
 
     반환: 병합되지 않고 남은 스윕 라인들 (unassigned 로 추가될 것).
     """
@@ -552,9 +557,15 @@ def _resolve_sweep_duplicates(
         if reading and r_core and (r_core in s_core or s_core in r_core):
             old = twin.text
             if old != reading:
-                twin.text = reading
+                # 정본을 덮지 않는다(ir.Line.vlm_reading 주석 참조) — 이 단계의 트리거가
+                # 스윕 회수 문구이고 스윕은 실행마다 다른 것을 회수하므로, 여기서 대입하면
+                # '이번엔 고쳐지고 다음엔 안 고쳐지는' 정본이 된다. 후보로만 남기고 선택은
+                # 하류에 맡긴다. 스윕 라인 자체는 여전히 중복이므로 remaining 에 안 넣는다.
+                twin.vlm_reading = reading
+                twin.vlm_reading_stage = "sweep_dedupe"
                 page.notes.append(
-                    f"스윕-OCR 중복 크롭 정정: {old!r} → {reading!r} (스윕판 {s.text[:30]!r} 확인)"
+                    f"스윕-OCR 중복 재판독 후보 부착(정본 유지): 정본 {old!r} ← 후보 {reading!r} "
+                    f"(스윕판 {s.text[:30]!r} 확인)"
                 )
         else:
             remaining.append(s)

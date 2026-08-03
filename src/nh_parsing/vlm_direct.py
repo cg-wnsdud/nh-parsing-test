@@ -357,15 +357,19 @@ def _x_union_coverage(bbox: list[int], sibs: list[list[int]]) -> float:
 def reread_low_confidence_lines(
     regions: list[Region], canvas: Image.Image
 ) -> list[str]:
-    """심의 관련 영역의 저신뢰 OCR 라인을 고해상 크롭으로 재판독해 교정한다 (2b).
+    """심의 관련 영역의 저신뢰 OCR 라인을 고해상 크롭으로 재판독해 **후보를 붙인다** (2b).
 
     - 대상: role='이미지' 도 is_illustrative(예시/장식)도 아닌 영역의, source='ocr'
       이고 confidence < 임계인 라인. 디지털·스윕 라인은 제외(디지털은 신뢰, 스윕은 근사).
-    - 교체는 보수적: VLM 재판독이 비어있지 않고 형식 정상이며, 재판독 확신도가 임계
-      이상이고, 기존 텍스트와 다를 때만 교체(같으면 원값 유지). 좌표는 정밀한 OCR bbox
-      유지(best-of-both, 스윕-OCR 중복 심판과 동일 철학).
-    - 조용한 수정 금지: 모든 교체를 notes 에 기록해 감사 가능하게 한다.
-    반환: 교정/스킵 내역 노트 목록.
+    - **정본을 덮지 않는다**(2026-08-03 변경). 재판독 결과는 `Line.vlm_reading` 후보로만
+      남기고 text/confidence/source 는 OCR 원값을 유지한다. 예전에는 여기서 대입해
+      정본을 갈아치웠는데, 재판독이 VLM 이라 실행마다 달라질 수 있고 그러면 하류의
+      지적 목록까지 흔들린다(ir.Line.vlm_reading 주석의 실측 참조). 최종 텍스트 선택은
+      하류(STAGE_3/심의)가 한다 — Region.vlm_reading 과 같은 원칙(B안).
+    - 부착 조건은 보수적으로 유지: 재판독이 비어있지 않고, 확신도가 임계 이상이고,
+      기존 텍스트와 다를 때만 붙인다(같으면 후보도 안 붙임).
+    - 조용한 변경 금지: 모든 부착을 notes 에 기록해 감사 가능하게 한다.
+    반환: 부착/스킵 내역 노트 목록.
     """
     thr = SETTINGS.lowconf_reread_threshold
     min_conf = SETTINGS.lowconf_reread_min_vlm_conf
@@ -413,7 +417,7 @@ def reread_low_confidence_lines(
         return notes
     candidates.sort(key=lambda t: t[1])  # 가장 의심스러운(낮은) 것부터
 
-    corrected = 0
+    attached = 0
     for idx, (line, c) in enumerate(candidates):
         if idx >= cap:
             notes.append(f"저신뢰 재판독 상한({cap}) 도달 — 나머지 {len(candidates) - cap}줄 원값 유지")
@@ -424,19 +428,21 @@ def reread_low_confidence_lines(
         if vconf is not None and vconf < min_conf:
             continue
         if _n(reading) == _n(line.text):
-            continue  # 재판독이 같은 판독 — 교정 불필요
+            continue  # 재판독이 같은 판독 — 후보 부착 불필요
+        # 정본(text/confidence/source)을 덮지 않는다 — ir.Line.vlm_reading 주석 참조.
+        # 재판독 결과는 VLM 이라 실행마다 달라질 수 있고, 정본이 흔들리면 하류의 지적
+        # 목록까지 흔들린다. 후보로만 남기고 최종 선택은 하류에 맡긴다.
         old = line.text
-        line.text = reading
-        if vconf is not None:
-            line.confidence = vconf
-        line.source = "vlm"
-        corrected += 1
+        line.vlm_reading = reading
+        line.vlm_reading_conf = vconf
+        line.vlm_reading_stage = "lowconf_reread"
+        attached += 1
         notes.append(
-            f"저신뢰 라인 재판독 교정: {old!r}({c:.2f}) → {reading!r}"
+            f"저신뢰 라인 재판독 후보 부착(정본 유지): 정본 {old!r}({c:.2f}) ← 후보 {reading!r}"
             + (f" (VLM conf {vconf:.2f})" if vconf is not None else "")
         )
-    if corrected:
-        notes.append(f"저신뢰 라인 재판독: 후보 {len(candidates)}줄 중 {corrected}줄 교정")
+    if attached:
+        notes.append(f"저신뢰 라인 재판독: 후보 {len(candidates)}줄 중 {attached}줄에 후보 부착")
     return notes
 
 
