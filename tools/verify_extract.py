@@ -11,6 +11,10 @@ from pathlib import Path
 
 import yaml
 
+# 출력을 파일/파이프로 넘기면 stdout 이 cp949 로 잡혀 '—' 같은 문자에서 죽는다
+# (run_nhdata.py·run_extract.py 와 동일 처리). 자동화에서 채점이 통째로 날아간 실측.
+sys.stdout.reconfigure(encoding="utf-8")
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
