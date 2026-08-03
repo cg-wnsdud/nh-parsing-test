@@ -313,14 +313,33 @@ def _vertical_gap(box: list[int], other: list[int]) -> int:
     return 0
 
 
+def _column_overlap(line_box: list[int], region_box: list[int]) -> float:
+    """라인의 가로 구간이 영역의 가로 구간에 얼마나 들어가는가 (라인 폭 기준 0~1).
+
+    낱줄 귀속에서 **세로 갭만 보면 안 되는** 이유를 막는 게이트다. 가로로 나란한
+    패널(003: 표지·내지1·내지2 가 좌우 3분할)에서는 캔버스 반대쪽 영역도 세로 갭이
+    0이라, 가로를 안 보면 '내지2' 라벨(x≈1587)이 표지 영역(x≈104~491)에 붙어
+    영역 bbox 가 패널 3개를 관통한다(2026-08-03 실측: 영역 17개 폭 확대, 그중 12개가
+    캔버스 절반 이상 관통). 같은 칼럼에 있는 영역만 후보로 남긴다.
+    """
+    overlap = min(line_box[2], region_box[2]) - max(line_box[0], region_box[0])
+    width = max(1, line_box[2] - line_box[0])
+    return max(0, overlap) / width
+
+
+_MIN_COLUMN_OVERLAP = 0.5  # 라인 폭의 절반 이상이 영역 가로 구간에 들어와야 후보
+
+
 def _absorb_unassigned_into_regions(page: AdPage) -> None:
     """정밀 bbox 미배정 라인을 좌표만 보고 영역에 귀속시킨다 (VLM 무관, 결정론).
 
     - 대상: source 가 ocr/digital 인 라인만 (vlm_sweep 은 근사 밴드 bbox 라 제외)
     - 1순위: 라인 중심점을 품는 영역 — 여럿이면 가장 작은(구체적인) 영역
-    - 2순위: 품는 영역이 없으면 수직 갭이 임계 이내인 최근접 영역. 임계는
-      이 저장소가 이미 쓰던 캔버스 비례 값(max(300, canvas_h*0.15))을 그대로 쓴다
-      — 새 튜닝 상수를 만들지 않기 위해서다.
+    - 2순위: 품는 영역이 없으면 **같은 칼럼에 있는**(가로 구간이 라인 폭의 절반 이상
+      겹치는) 영역 중 수직 갭이 임계 이내인 최근접 영역. 임계는 이 저장소가 이미
+      쓰던 캔버스 비례 값(max(300, canvas_h*0.15))을 그대로 쓴다 — 새 튜닝 상수를
+      만들지 않기 위해서다. 가로 게이트는 _column_overlap 주석 참조(없으면 좌우 분할
+      패널에서 영역이 패널 경계를 관통한다).
     - 둘 다 실패하면 미배정 유지. 미배정도 llm_view 의 `unassigned` 로 STAGE_3 에
       전달되므로 텍스트가 사라지지는 않는다(근거 지목이 영역 단위로 안 될 뿐).
 
@@ -349,7 +368,23 @@ def _absorb_unassigned_into_regions(page: AdPage) -> None:
             )
             is_near = False
         elif gap_limit is not None:
-            target = min(boxed, key=lambda r: _vertical_gap(line.bbox, r.bbox))
+            # 같은 칼럼(가로 구간 겹침)에 있는 영역만 후보. 동률(세로 갭 0이 여럿)은
+            # 가로 겹침이 큰 쪽 → region_id 순으로 갈라 실행마다 같은 답이 나오게 한다.
+            cands = [
+                r for r in boxed
+                if _column_overlap(line.bbox, r.bbox) >= _MIN_COLUMN_OVERLAP
+            ]
+            if not cands:
+                remaining.append(line)
+                continue
+            target = min(
+                cands,
+                key=lambda r: (
+                    _vertical_gap(line.bbox, r.bbox),
+                    -_column_overlap(line.bbox, r.bbox),
+                    r.region_id,
+                ),
+            )
             if _vertical_gap(line.bbox, target.bbox) > gap_limit:
                 remaining.append(line)
                 continue
