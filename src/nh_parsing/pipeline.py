@@ -587,54 +587,43 @@ def _classify_into(doc: AdDocument, canvas: Image.Image) -> None:
         doc.notes.append(f"분류: {result.reason}")
 
 
-_ROLE_COLORS = {
-    "유의사항": (220, 30, 30),
-    "고지문구": (240, 140, 0),
-    "제목": (0, 160, 60),
-    "표": (150, 60, 200),
-    "이미지": (60, 120, 220),
-    "본문": (130, 130, 130),
-    "각주": (0, 170, 170),
-}
-
-
-def _load_font(size: int):
-    try:
-        from PIL import ImageFont
-
-        return ImageFont.truetype("malgun.ttf", size)  # Windows 한글 폰트
-    except Exception:
-        return None
+# 미리보기 박스 색 — **의미가 아니라 계층만** 나타낸다.
+#
+# 2026-08-03: 역할별 색상(제목=초록/유의사항=빨강/…)을 없앴다. 미리보기의 용도는
+# "이미지에서 글자를 어디서 어떻게 잡았는가"를 보이는 것이고, 그건 라인·영역 좌표로
+# 끝난다(실측 재현율 100%). 역할은 VLM 의미 판단이라 같은 입력에서도 실행마다 달라질 수
+# 있어(실측 225개 중 6개 = 97.3% 일치) 그림에 색으로 박으면 "파싱이 이렇게 잡았다"는
+# 그림이 실행마다 달라 보인다. 역할 자체는 llm_view·하류 계약(LayoutBlock.blockType)에
+# 그대로 남는다 — 그림에서만 뺀다.
+#
+# 같은 색조의 농도 차만 쓴다(다른 색조를 쓰면 그게 다시 '종류'로 읽힌다).
+_LINE_BOX_COLOR = (255, 105, 215)   # 라인(OCR 이 검출한 한 줄) — 연한 마젠타, 얇은 선
+_REGION_BOX_COLOR = (190, 0, 130)   # 영역(라인들의 묶음) — 진한 마젠타, 굵은 선
 
 
 def _save_preview(canvas: CanvasPage, page: AdPage, preview_dir: Path, doc_id: str) -> None:
+    """원본 위에 라인·영역 bbox 만 올린 검수용 이미지.
+
+    가는 선 = 라인, 굵은 선 = 영역. 의미(역할·섹션) 표시는 하지 않는다 — 위 주석 참조.
+    """
     preview_dir.mkdir(parents=True, exist_ok=True)
     img = canvas.image.copy()
     draw = ImageDraw.Draw(img)
     for region in page.regions:
         if not region.bbox:
             continue
-        color = _ROLE_COLORS.get(region.role, (130, 130, 130))
-        draw.rectangle(region.bbox, outline=color, width=4)
         for line in region.lines:
             if line.bbox:
-                draw.rectangle(line.bbox, outline=color, width=1)
-    # 섹션 = 굵은 남색 박스 + 좌상단 라벨 (골드셋 비교의 기본 단위)
-    font = _load_font(max(22, img.width // 45))
-    for section in page.sections:
-        if not section.bbox:
-            continue
-        x0, y0, x1, y1 = section.bbox
-        pad = 8
-        box = [max(0, x0 - pad), max(0, y0 - pad), min(img.width, x1 + pad), min(img.height, y1 + pad)]
-        draw.rectangle(box, outline=(20, 20, 120), width=6)
-        label = f"{section.section_type}{section.section_no if section.section_no > 1 else ''}"
-        if section.group_no:
-            label += f" G{section.group_no}"
-        if font:
-            tb = draw.textbbox((box[0], max(0, box[1] - 36)), label, font=font)
-            draw.rectangle(tb, fill=(20, 20, 120))
-            draw.text((box[0], max(0, box[1] - 36)), label, fill=(255, 255, 255), font=font)
+                draw.rectangle(line.bbox, outline=_LINE_BOX_COLOR, width=1)
+        # 영역을 라인 뒤에 그려 겹칠 때 경계가 가려지지 않게 한다
+        draw.rectangle(region.bbox, outline=_REGION_BOX_COLOR, width=3)
+    # 어느 영역에도 안 묶인 낱줄도 '잡은 글자'다 — 안 그리면 그림이 실제보다 덜 잡은
+    # 것처럼 보인다. 굵은 영역 박스가 없는 얇은 박스로 보이므로 '미배정'이 그림에서
+    # 그대로 읽힌다. vlm_sweep 은 밴드 근사 bbox(폭이 캔버스 전체)라 좌표 그림에
+    # 올리면 오해를 만들어 제외한다 — 텍스트 자체는 llm_view 의 unassigned 로 전달된다.
+    for line in page.unassigned_lines:
+        if line.bbox and line.source in ("ocr", "digital"):
+            draw.rectangle(line.bbox, outline=_LINE_BOX_COLOR, width=1)
     if img.width > 1400:
         ratio = 1400 / img.width
         img = img.resize((1400, int(img.height * ratio)))
