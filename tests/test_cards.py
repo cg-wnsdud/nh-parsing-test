@@ -184,23 +184,7 @@ def test_assign_cards_vlm_failure_returns_empty(monkeypatch):
     monkeypatch.setattr(cards, "chat_json", boom)
     assert cards.assign_cards_vlm(_page(), Image.new("RGB", (2000, 1120), "white")) == {}
 
-
-def test_judge_uses_card_assignment_as_group(monkeypatch):
-    """card_by_region 을 주면 group_no 를 VLM 눈대중 대신 카드 배정으로 확정한다."""
-    def fake_roles(parts, schema_name, schema, max_tokens):
-        # VLM 역할판정은 group_no 를 엉뚱하게(전부 1) 줘도, card_by_region 이 이긴다
-        return {"analysis": "", "regions": [
-            {"region_id": "p1_r1", "role": "본문", "section_type": "참여방법",
-             "section_no": 1, "group_no": 1, "confidence": 1.0},
-            {"region_id": "p1_r2", "role": "본문", "section_type": "참여방법",
-             "section_no": 1, "group_no": 1, "confidence": 1.0},
-        ]}
-    monkeypatch.setattr(vlm_judge, "chat_json", fake_roles)
-    page = _page()
-    secs = vlm_judge.judge_region_roles(
-        page.regions, Image.new("RGB", (2000, 1120), "white"), page.canvas_h,
-        card_by_region={"p1_r1": 1, "p1_r2": 2},
-    )
-    # 카드가 다르므로(1 vs 2) 같은 타입이어도 별도 섹션(그룹)으로 갈라져야 함
-    groups = {s.group_no for s in secs}
-    assert groups == {1, 2}
+# test_judge_uses_card_assignment_as_group 는 2026-08-03 삭제했다.
+# 카드 배정을 섹션 group_no 로 확정하던 연결이 사라졌기 때문이다(섹션 계층 제거).
+# cards 모듈 자체(개수 세기·배정·게이트)는 그대로라 위 테스트들은 유지한다 —
+# 파이프라인 배선만 끊었고 기능은 남겨 뒀다.

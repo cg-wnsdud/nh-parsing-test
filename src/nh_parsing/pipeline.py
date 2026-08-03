@@ -156,36 +156,6 @@ def _ocr_canvas_to_page(
     return page
 
 
-_ILLUSTRATIVE_SECTION_TYPES = {"장식예시"}
-
-
-def _mark_illustrative(page: AdPage) -> None:
-    """VLM 이 '장식예시'(앱 화면 예시·지폐 그림 등 심의 무관)로 판정한 섹션과 소속
-    영역을 is_illustrative 로 태깅한다 (2a).
-
-    삭제가 아니라 격리 — 심의 텍스트/필드 추출에서만 제외하고 IR·검수 화면엔
-    보관해 감사·복원이 가능하게 한다(이전 orch 가 폴백 시 원본을 structure_regions
-    로 남긴 것과 같은 철학). 판단 주체는 VLM(section_type)이며 규칙 하드코딩이 아니다.
-    """
-    if not page.sections:
-        return
-    region_by_id = {r.region_id: r for r in page.regions}
-    secs = regs = 0
-    for section in page.sections:
-        if section.section_type not in _ILLUSTRATIVE_SECTION_TYPES:
-            continue
-        section.is_illustrative = True
-        secs += 1
-        for rid in section.region_ids:
-            r = region_by_id.get(rid)
-            if r is not None and not r.is_illustrative:
-                r.is_illustrative = True
-                regs += 1
-    if secs:
-        page.notes.append(
-            f"예시/장식 격리(2a): {secs}개 섹션·{regs}개 영역을 심의 대상에서 제외(보관)"
-        )
-
 
 def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
     """VLM 이 판단 주체 (설계서 6.5): 영역 역할 판정 + 밴드 통합판독(교정+누락 회수).
@@ -195,42 +165,17 @@ def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
     """
     all_lines = [l for r in page.regions for l in r.lines] + page.unassigned_lines
 
-    # 카드-분할(§D): 카드/예시 뭉치가 한 화면에 있으면 VLM 이 개수를 세고 각 영역을 카드에
-    # 배정 → group_no 를 눈대중 대신 이 카드 배정으로 확정(003 카드 내용 섞임 방지).
-    card_by_region: dict[str, int] | None = None
-    if canvas_img is not None:
-        from .cards import assign_cards_vlm
-
-        try:
-            cards = assign_cards_vlm(page, canvas_img, votes=SETTINGS.card_split_votes)
-            if cards:
-                card_by_region = cards
-                for r in page.regions:
-                    r.card_no = cards.get(r.region_id)
-                ncards = len({c for c in cards.values() if c > 0})
-                page.notes.append(f"카드-분할(§D): {ncards}개 카드로 그룹핑 (VLM 판정, 공통요소 card_no=0)")
-        except Exception as exc:
-            page.notes.append(f"카드-분할 실패(기존 group_no 유지): {exc}")
-
+    # 영역 역할 판정 — 섹션(의미 묶음)은 2026-08-03 제거했다(vlm_judge 상단 주석).
+    # 같이 빠진 것: 카드-분할(group_no 가 섹션 전용이었음), 장식예시 격리(section_type
+    # 의존), 미배정 낱줄의 VLM 내용 귀속. 셋 다 흔들리는 의미 판정이었고 후속 계약에
+    # 담을 자리도 없었다. cards 모듈은 지우지 않고 배선만 끊어 둔다.
     try:
-        page.sections = judge_region_roles(
-            page.regions, canvas_img, page.canvas_h, card_by_region=card_by_region
-        )
+        judge_region_roles(page.regions, canvas_img, page.canvas_h)
     except Exception as exc:
-        page.notes.append(f"VLM 역할/섹션 판정 실패 → 규칙 폴백 유지(섹션 없음): {exc}")
+        page.notes.append(f"VLM 역할 판정 실패 → 규칙 폴백(_refine_role) 유지: {exc}")
 
-    # 예시/장식(앱 화면 예시 등) 격리 태깅 (2a) — 판단 주체는 VLM(section_type)
-    _mark_illustrative(page)
-
-    # 미배정 라인의 섹션 귀속 (2단):
-    # 1단(좌표) — 라인 중심이 섹션 bbox '내부'면 그 섹션에 붙인다. 근사 bbox 인
-    #   vlm_sweep 라인은 제외 (y 추정이 이웃 섹션에 오귀속되는 실측, 올원).
-    # 2단(VLM 내용) — 1단에서 남은, 어느 섹션 bbox 안에도 없는 라인은 VLM 에게
-    #   내용상 어느 섹션의 연장인지 물어 판정하고, 좌표 정합 게이트로 교차검증해
-    #   수용한다 (002 하단 이벤트 고지 3줄, 003 p2 상품유의 하단 4줄 실측).
-    _absorb_unassigned_into_sections(page)
-    if canvas_img is not None:
-        _assign_orphans_via_vlm(page, canvas_img)
+    # 미배정 라인 귀속 — 좌표만 보는 결정론 1단계로 축소(예전 2단계 중 VLM 단 제거).
+    _absorb_unassigned_into_regions(page)
 
     # VLM 직독 폴백 1: OCR/디지털이 놓친 시각 전용 텍스트 회수 (설계서 6.4).
     # 장식 타이포·벡터(패스) 텍스트는 어느 라우트에서도 빠질 수 있어 전 페이지 공통.
@@ -321,153 +266,90 @@ def _finalize_reading_order(page: AdPage) -> None:
             region.lines = sort_reading_order(region.lines)
 
 
-def _attach_line_to_section(line: Line, section: Section, region_by_id: dict[str, Region]) -> bool:
-    """미배정 라인을 섹션의 최근접 영역에 붙이고, 영역·섹션 bbox 를 확장한다.
+def _attach_line_to_region(line: Line, target: Region) -> bool:
+    """미배정 라인을 영역에 붙이고 영역 bbox 를 확장한다.
 
-    좌표 흡수(_absorb)와 VLM 판정 귀속이 공유하는 실제 부착 로직.
-    반환: 부착 성공 여부 (섹션에 bbox 있는 영역이 없으면 실패).
+    예전에는 섹션을 게이트로 두고 그 안의 최근접 영역에 붙였는데(_attach_line_to_section),
+    섹션 자체가 실행마다 흔들려 같은 낱줄이 실행마다 다른 영역에 붙었다 — 001 실측에서
+    11줄이 영역↔미배정 사이를 오갔다. 이제 영역만 보고 결정한다(순수 좌표, VLM 무관).
     """
     from .tiling import sort_reading_order
 
-    if not line.bbox:
+    if not line.bbox or not target.bbox:
         return False
-    regions = [
-        region_by_id[rid] for rid in section.region_ids
-        if rid in region_by_id and region_by_id[rid].bbox
-    ]
-    if not regions:
-        return False
-    cx = (line.bbox[0] + line.bbox[2]) / 2
-    cy = (line.bbox[1] + line.bbox[3]) / 2
-    target = min(
-        regions,
-        key=lambda r: abs((r.bbox[1] + r.bbox[3]) / 2 - cy)
-        + abs((r.bbox[0] + r.bbox[2]) / 2 - cx),
-    )
     target.lines.append(line)
     target.lines = sort_reading_order(target.lines)
     target.bbox = [
         min(target.bbox[0], line.bbox[0]), min(target.bbox[1], line.bbox[1]),
         max(target.bbox[2], line.bbox[2]), max(target.bbox[3], line.bbox[3]),
     ]
-    if section.bbox:  # 섹션 bbox 도 확장 (미배정 라인이 섹션 범위를 넓힘)
-        section.bbox = [
-            min(section.bbox[0], line.bbox[0]), min(section.bbox[1], line.bbox[1]),
-            max(section.bbox[2], line.bbox[2]), max(section.bbox[3], line.bbox[3]),
-        ]
     return True
 
 
-def _vertical_gap(box: list[int], sec: list[int]) -> int:
-    """라인 box 와 섹션 sec 사이 수직 갭(px). 겹치면 0."""
-    if box[1] > sec[3]:
-        return box[1] - sec[3]
-    if box[3] < sec[1]:
-        return sec[1] - box[3]
+def _vertical_gap(box: list[int], other: list[int]) -> int:
+    """두 박스 사이 수직 갭(px). 겹치면 0."""
+    if box[1] > other[3]:
+        return box[1] - other[3]
+    if box[3] < other[1]:
+        return other[1] - box[3]
     return 0
 
 
-def _absorb_unassigned_into_sections(page: AdPage) -> None:
-    """정밀 bbox 미배정 라인을 좌표상 감싸는 섹션의 최근접 영역에 귀속시킨다.
+def _absorb_unassigned_into_regions(page: AdPage) -> None:
+    """정밀 bbox 미배정 라인을 좌표만 보고 영역에 귀속시킨다 (VLM 무관, 결정론).
 
     - 대상: source 가 ocr/digital 인 라인만 (vlm_sweep 은 근사 밴드 bbox 라 제외)
-    - 귀속 조건: 라인 중심점이 섹션 bbox 내부 — 겹치는 섹션이 여럿이면 가장
-      작은(구체적인) 섹션. 어느 섹션에도 안 들어가면(섹션 사이 갭 등) 미배정 유지.
+    - 1순위: 라인 중심점을 품는 영역 — 여럿이면 가장 작은(구체적인) 영역
+    - 2순위: 품는 영역이 없으면 수직 갭이 임계 이내인 최근접 영역. 임계는
+      이 저장소가 이미 쓰던 캔버스 비례 값(max(300, canvas_h*0.15))을 그대로 쓴다
+      — 새 튜닝 상수를 만들지 않기 위해서다.
+    - 둘 다 실패하면 미배정 유지. 미배정도 llm_view 의 `unassigned` 로 STAGE_3 에
+      전달되므로 텍스트가 사라지지는 않는다(근거 지목이 영역 단위로 안 될 뿐).
+
+    2026-08-03 재배선: 예전에는 섹션 bbox 를 게이트로 썼는데, 섹션이 VLM 산물이라
+    실행마다 흔들렸고 그 탓에 같은 낱줄이 실행마다 다른 영역에 붙었다.
     """
-    if not page.sections:
+    boxed = [r for r in page.regions if r.bbox]
+    if not boxed:
         return
-    region_by_id = {r.region_id: r for r in page.regions}
+    gap_limit = max(300, int(page.canvas_h * 0.15)) if page.canvas_h else None
     remaining: list[Line] = []
-    absorbed = 0
+    absorbed = near = 0
     for line in page.unassigned_lines:
         if not line.bbox or line.source not in ("ocr", "digital"):
             remaining.append(line)
             continue
         cx = (line.bbox[0] + line.bbox[2]) / 2
         cy = (line.bbox[1] + line.bbox[3]) / 2
-        candidates = [
-            s for s in page.sections
-            if s.bbox and s.bbox[0] <= cx <= s.bbox[2] and s.bbox[1] <= cy <= s.bbox[3]
+        inside = [
+            r for r in boxed
+            if r.bbox[0] <= cx <= r.bbox[2] and r.bbox[1] <= cy <= r.bbox[3]
         ]
-        if not candidates:
+        if inside:
+            target = min(
+                inside, key=lambda r: (r.bbox[2] - r.bbox[0]) * (r.bbox[3] - r.bbox[1])
+            )
+            is_near = False
+        elif gap_limit is not None:
+            target = min(boxed, key=lambda r: _vertical_gap(line.bbox, r.bbox))
+            if _vertical_gap(line.bbox, target.bbox) > gap_limit:
+                remaining.append(line)
+                continue
+            is_near = True
+        else:
             remaining.append(line)
             continue
-        section = min(
-            candidates,
-            key=lambda s: (s.bbox[2] - s.bbox[0]) * (s.bbox[3] - s.bbox[1]),
-        )
-        if _attach_line_to_section(line, section, region_by_id):
+        if _attach_line_to_region(line, target):
             absorbed += 1
+            near += 1 if is_near else 0
         else:
             remaining.append(line)
     if absorbed:
         page.unassigned_lines = remaining
-        page.notes.append(f"미배정 라인 {absorbed}개를 좌표 기준 소속 섹션에 귀속")
-
-
-def _assign_orphans_via_vlm(page: AdPage, canvas_img: Image.Image | None) -> None:
-    """좌표 흡수 후에도 남은 미배정 라인의 섹션 소속을 VLM(내용)으로 판정.
-
-    _absorb 는 라인 중심이 섹션 bbox '내부'일 때만 귀속한다. 어느 섹션 bbox
-    안에도 안 들어가는 라인(섹션 사이 갭·경계 근접의 fine-print — 002 하단
-    이벤트 고지 3줄, 003 p2 상품유의 하단 4줄 실측)은 여기서 처리한다.
-
-    **역할판정 호출에 합치려다 되돌렸다(2026-07-28)** — 합치면 좌표 흡수를 아직 안 한
-    시점이라 낱줄 전부(001 기준 58개)를 프롬프트에 실어야 하고, 그 탓에 역할판정이
-    타임아웃 나 섹션이 통째로 날아갔다. 여기서 묻는 것은 흡수가 걷어내고 남은 소수다.
-
-    판정 주체는 VLM(내용), 수용은 좌표 정합 게이트와 함께 결정한다:
-    VLM 이 고른 섹션과 라인 사이 수직 갭이 캔버스 비례 임계(비연속 분할과
-    동일 기준)를 넘으면 반려하고 미배정으로 남긴다 — 내용은 맞지만 화면상
-    멀리 떨어진 별개 인스턴스를 억지로 붙여 섹션 bbox 가 비정상 팽창하는 것을
-    막는다. 근사 bbox 인 vlm_sweep 라인은 제외(좌표 게이트 신뢰 불가).
-    """
-    if not page.sections:
-        return
-    idxs = [
-        i for i, l in enumerate(page.unassigned_lines)
-        if l.text.strip() and l.bbox and l.source in ("ocr", "digital")
-    ]
-    if not idxs:
-        return
-    orphans = [page.unassigned_lines[i] for i in idxs]
-
-    from .vlm_judge import judge_orphan_sections
-
-    try:
-        assignments = judge_orphan_sections(orphans, page.sections, canvas_img, page.canvas_h)
-    except Exception as exc:
-        page.notes.append(f"VLM 미배정 섹션 판정 실패(미배정 유지): {exc}")
-        return
-
-    section_by_id = {s.section_id: s for s in page.sections}
-    region_by_id = {r.region_id: r for r in page.regions}
-    gap_limit = max(300, int(page.canvas_h * 0.15)) if page.canvas_h else None
-    consumed: set[int] = set()
-    applied: list[str] = []
-    rejected = 0
-    for k, line in enumerate(orphans):
-        sid, _conf = assignments.get(k, ("none", None))
-        section = section_by_id.get(sid) if sid and sid != "none" else None
-        if section is None or not section.bbox:
-            continue
-        gap = _vertical_gap(line.bbox, section.bbox)
-        if gap_limit is not None and gap > gap_limit:
-            rejected += 1
-            continue
-        if _attach_line_to_section(line, section, region_by_id):
-            consumed.add(idxs[k])
-            applied.append(f"'{line.text[:24]}'→{sid}")
-    if consumed:
-        page.unassigned_lines = [
-            l for i, l in enumerate(page.unassigned_lines) if i not in consumed
-        ]
         page.notes.append(
-            f"VLM 미배정 섹션 판정: {len(consumed)}개 내용 기준 귀속 ("
-            + ", ".join(applied) + ")"
+            f"미배정 라인 {absorbed}개를 좌표 기준 영역에 귀속 (포함 {absorbed - near} / 근접 {near})"
         )
-    if rejected:
-        page.notes.append(f"VLM 미배정 판정 {rejected}개 반려(좌표 정합 게이트 초과 → 미배정 유지)")
+
 
 
 _MAX_SWEEP_RESOLVE = 8  # 페이지당 스윕-OCR 중복 크롭 재판독 상한 (비용 가드)

@@ -151,7 +151,8 @@ def test_이벤트는_이벤트별로_판정한다(pack):
 
 
 def test_입력에서_빠진_영역만_유실로_보고한다():
-    view = {"pages": [{"sections": [{"regions": [{"region_id": "p1_r000", "text": "실린 영역"}]}]}]}
+    # 투영은 2026-08-03 부터 pages → regions 평면 구조 (섹션 계층 제거)
+    view = {"pages": [{"regions": [{"region_id": "p1_r000", "text": "실린 영역"}]}]}
     parse_doc = {"pages": [{"page_no": 1, "regions": [
         {"region_id": "p1_r000", "lines": [{"text": "실린 영역"}]},
         {"region_id": "p1_r001", "lines": [{"text": "빠진 문구"}], "is_illustrative": True},

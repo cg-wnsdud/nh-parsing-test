@@ -149,26 +149,21 @@ def _llm_view_html(page: dict) -> str:
 
     view = build_page_view(AdPage(**page))
     parts = []
-    for sec in view["sections"]:
-        if sec["section_id"] is None:
-            title = "섹션 미지정"
-        else:
-            grp = f"묶음{sec['group_no']} · " if sec.get("group_no") else ""
-            title = f"{grp}{sec['section_type']}#{sec['section_no']}"
-        body_lines = [
-            "  " + html.escape(t)
-            for r in sec["regions"] for t in r["text"].split("\n")
-        ]
-        body = "\n".join(body_lines) or "  (텍스트 없음)"
-        parts.append(f'<b>【{html.escape(title)}】</b>\n{body}')
+    # 섹션 계층 제거(2026-08-03) — 영역이 읽기순서로 평면 나열된다.
+    body_lines = [
+        f"  {r['region_id']} ({r.get('role', '')}): {html.escape(t)}"
+        for r in view["regions"] for t in r["text"].split("\n")
+    ]
+    if body_lines:
+        parts.append("<b>【영역 (읽기순서)】</b>\n" + "\n".join(body_lines))
     if view.get("unassigned"):
         u = "\n".join("  " + html.escape(t) for t in view["unassigned"].split("\n"))
-        parts.append(f'<b>【섹션 미지정 낱줄】</b>\n{u}')
+        parts.append(f'<b>【영역 미배정 낱줄】</b>\n{u}')
     text = "\n\n".join(parts) if parts else "(파싱 결과 없음)"
     return (
         '<div class="llmview">'
         '<div class="sechead">최종 파싱 결과 · LLM 전달 형태'
-        '<span class="meta">읽기순서·의미묶음 정렬 · bbox/신뢰도/출처 제외 · out/llm_view/*.json 과 동일</span>'
+        '<span class="meta">읽기순서 정렬 · bbox/신뢰도/출처 제외 · out/llm_view/*.json 과 동일</span>'
         '</div>'
         f'<pre class="llmtext">{text}</pre></div>'
     )

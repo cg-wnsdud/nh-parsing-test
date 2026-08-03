@@ -219,9 +219,8 @@ def input_gap(view: dict, parse_doc: dict | None) -> list[dict]:
         return []
     seen: set[str] = set()
     for page in view.get("pages", []):
-        for sec in page.get("sections", []):
-            for r in sec.get("regions", []):
-                seen.add(r["region_id"])
+        for r in page.get("regions", []):
+            seen.add(r["region_id"])
 
     gaps: list[dict] = []
     for page in parse_doc.get("pages", []):

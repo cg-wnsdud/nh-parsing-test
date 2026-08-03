@@ -100,32 +100,19 @@ def _render_doc(view: dict) -> str:
     out: list[str] = []
     for page in view.get("pages", []):
         out.append(f"### 페이지 {page.get('page_number')}")
-        for sec in page.get("sections", []):
-            stype = sec.get("section_type") or "미분류"
-            sno = sec.get("section_no")
-            gno = sec.get("group_no")
-            head = f"[{stype}"
-            if sno:
-                head += f" {sno}"
-            if gno:
-                head += f" / 카드{gno}"
-            if sec.get("illustrative"):
-                # 앱 화면 목업·지폐 그림 등 — 빼지 않고 표시만 한다. 빼면 그 안에 섞인
-                # 심의 대상 문구까지 사라진다(003 헤드라인 실측). 판단은 LLM 이 한다.
-                head += " / 예시·목업 화면"
-            head += "]"
-            out.append(head)
-            for r in sec.get("regions", []):
-                text = (r.get("text") or "").replace("\n", " / ")
-                out.append(f"  {r['region_id']} ({r.get('role','')}): {text}")
-                cand = r.get("vlm_reading")
-                if cand:
-                    # 후보에 관계 딱지를 붙인다. 안 붙이면 LLM 은 정본과 후보를 동등한
-                    # 두 선택지로 보는데, 후보가 뒤에서 잘려 있어도 표기(원문자·낫표)는
-                    # 더 예뻐서 그쪽을 고를 수 있다 — 실측 002 p1_r018 후보는 경품 금액
-                    # '네이버페이 20,000원' 이 통째로 빠진 판독이었다.
-                    tag = _RELATION_TAG.get(r.get("vlm_reading_relation") or "", "후보")
-                    out.append(f"      [{tag}] {cand.replace(chr(10), ' / ')}")
+        # 섹션(의미 묶음) 계층은 2026-08-03 제거 — 영역이 읽기순서(위→아래)로 오므로
+        # 화면 흐름 자체가 문맥이다. 자세한 근거는 vlm_judge 모듈 상단 주석.
+        for r in page.get("regions", []):
+            text = (r.get("text") or "").replace("\n", " / ")
+            out.append(f"  {r['region_id']} ({r.get('role','')}): {text}")
+            cand = r.get("vlm_reading")
+            if cand:
+                # 후보에 관계 딱지를 붙인다. 안 붙이면 LLM 은 정본과 후보를 동등한
+                # 두 선택지로 보는데, 후보가 뒤에서 잘려 있어도 표기(원문자·낫표)는
+                # 더 예뻐서 그쪽을 고를 수 있다 — 실측 002 p1_r018 후보는 경품 금액
+                # '네이버페이 20,000원' 이 통째로 빠진 판독이었다.
+                tag = _RELATION_TAG.get(r.get("vlm_reading_relation") or "", "후보")
+                out.append(f"      [{tag}] {cand.replace(chr(10), ' / ')}")
         if page.get("unassigned"):
             # 미배정 텍스트에도 근거 ID를 준다. 없으면 전수수집 배열('표기 그대로 (region_id)')에
             # 담을 수가 없어 조용히 빠진다 — 003 실측: 배너의 'NH Benefit 2025.10.01-2025.10.31'
@@ -434,10 +421,9 @@ def _region_texts(view: dict) -> dict[str, str]:
     """
     out: dict[str, str] = {}
     for page in view.get("pages", []):
-        for sec in page.get("sections", []):
-            for r in sec.get("regions", []):
-                parts = [r.get("text") or "", r.get("vlm_reading") or ""]
-                out[r["region_id"]] = " ".join(p for p in parts if p)
+        for r in page.get("regions", []):
+            parts = [r.get("text") or "", r.get("vlm_reading") or ""]
+            out[r["region_id"]] = " ".join(p for p in parts if p)
         # 미배정 덩어리도 근거로 지목할 수 있게 됐으므로(_render_doc), 대조 대상에 넣는다.
         # 안 넣으면 정상 인용이 '존재하지 않는 region_id'= 환각 신호로 잘못 잡힌다.
         if page.get("unassigned"):
@@ -559,14 +545,13 @@ def _unused_figures(view: dict, result: dict) -> list[dict]:
     seen: set[str] = set()
     out: list[dict] = []
     for page in view.get("pages", []):
-        for sec in page.get("sections", []):
-            for r in sec.get("regions", []):
-                for m in _FIGURE_RE.findall(r.get("text") or ""):
-                    fig = squash(m)
-                    if fig in seen or fig in blob:
-                        continue
-                    seen.add(fig)
-                    out.append({"figure": m.strip(), "region_id": r["region_id"]})
+        for r in page.get("regions", []):
+            for m in _FIGURE_RE.findall(r.get("text") or ""):
+                fig = squash(m)
+                if fig in seen or fig in blob:
+                    continue
+                seen.add(fig)
+                out.append({"figure": m.strip(), "region_id": r["region_id"]})
     return out
 
 
@@ -578,9 +563,8 @@ def compute_coverage(view: dict, result: dict) -> dict:
     """
     all_regions: set[str] = set()
     for page in view.get("pages", []):
-        for sec in page.get("sections", []):
-            for r in sec.get("regions", []):
-                all_regions.add(r["region_id"])
+        for r in page.get("regions", []):
+            all_regions.add(r["region_id"])
 
     cited: set[str] = set()
 

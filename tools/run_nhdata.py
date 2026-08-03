@@ -44,6 +44,7 @@ def main() -> None:
     if args.exclude:
         files = [p for p in files if args.exclude not in p.name]
 
+    failed: list[str] = []
     for path in files:
         print(f"\n{'=' * 72}\n▶ {path.name}")
         reset_stats()   # 문서별 단계 비용을 따로 본다 (안 하면 누적돼 차분을 손으로 빼야 한다)
@@ -51,7 +52,12 @@ def main() -> None:
         try:
             doc = process_file(path, preview_dir=out_prev)
         except Exception as exc:
+            # 실패하면 이 문서의 out/json·out/llm_view 는 **이전 실행 결과가 그대로 남는다**.
+            # 그걸 모르고 비교하면 "완전히 결정론적"이라는 가짜 결론이 나온다 —
+            # 2026-08-03 실측으로 당함(코드가 죽었는데 5문서 중 4문서가 옛 파일이라
+            # 100% 일치로 보였다). 그래서 실패를 종료코드로 올려 자동화가 알아채게 한다.
             print(f"  ✗ 처리 실패: {exc}")
+            failed.append(path.name)
             continue
         elapsed = time.time() - start
 
@@ -101,6 +107,10 @@ def main() -> None:
             print(f"  note: {note}")
         print(f"  라인 {total_lines}개, {elapsed:.1f}s → {json_path.name}")
 
+    if failed:
+        print(f"\n✗ {len(failed)}건 실패 — 해당 문서의 out/json·out/llm_view 는 이전 실행본이 남아 있다: "
+              + ", ".join(failed))
+        sys.exit(1)
     print("\n완료.")
 
 

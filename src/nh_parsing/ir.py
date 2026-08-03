@@ -84,7 +84,9 @@ class Section(BaseModel):
     """
 
     section_id: str
-    section_type: str               # vlm_judge.SECTION_TYPES 참조
+    # 섹션은 2026-08-03 파싱에서 제거됐다(vlm_judge 상단 주석). 모델과 AdPage.sections
+    # 필드는 남기되 파이프라인은 채우지 않는다 — 검수 도구가 조용히 비는 쪽이 낫다.
+    section_type: str
     section_no: int = 1             # 같은 타입 섹션이 여럿일 때 위→아래 순번
     group_no: Optional[int] = None  # 시각적 묶음(카드/패널/컬럼) 번호 — SNS 카드형 등.
                                     # 묶음 구조가 없는 페이지는 None (범용 계층, 특정 양식 가정 없음)

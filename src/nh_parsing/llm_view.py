@@ -2,16 +2,21 @@ from __future__ import annotations
 
 """LLM 전달용 lean 텍스트 투영 (§1A / §6).
 
-최종 파싱 결과(AdDocument)에서 bbox·신뢰도·출처 같은 기계 신호를 빼고, 읽기순서·
-의미묶음(섹션)으로 정렬한 텍스트만 남긴다. 스키마-LLM 단계(§2)에 실제로 투입할
-페이로드의 본문이자, review.html 'LLM 전달 형태' 표시의 단일 출처.
+최종 파싱 결과(AdDocument)에서 bbox·신뢰도·출처 같은 기계 신호를 빼고, 읽기순서로
+정렬한 텍스트만 남긴다. 스키마-LLM 단계(§2)에 실제로 투입할 페이로드의 본문이자,
+review.html 'LLM 전달 형태' 표시의 단일 출처.
 
 - region_id 는 유지한다 → 추출 후 이 ID 로 bbox 를 되붙여 F-011/012 하이라이트에 연결(§1A).
   (HyundaiHS 는 좌표를 아예 버려 재부착도 안 하지만, 우리는 시인성 요구 때문에 ID 를 남긴다.)
-- 장식예시(2a) 섹션은 기본 제외 — 심의 대상이 아니므로 LLM 입력에서도 뺀다.
 - B안: region.text 는 항상 결정론적 OCR/디지털 정본(읽기순서·같은 행 조각 이어붙임).
   영역별 VLM 통독(§6)이 켜진 영역엔 vlm_reading(후보 텍스트)+점수를 함께 실어,
   STAGE_3(스키마 LLM)가 raw 정본과 후보 중 더 정확한 쪽을 고르게 한다(§1A raw+candidates).
+
+**2026-08-03: 섹션(의미 묶음) 계층 제거.** 예전에는 `pages → sections → regions` 였다.
+섹션은 VLM 산물이라 실행마다 흔들렸고(같은 입력 2회에 4문서 중 3문서 불일치) 후속
+계약(NormalizedDocument v1: 문서→페이지→블록)에 담을 자리도 없었다. 이제 영역을
+읽기순서(위→아래, 좌→우)로 평면 나열한다 — 순서 자체가 화면 흐름을 담으므로
+STAGE_3 가 문맥을 잃지 않는다. 자세한 근거는 vlm_judge 모듈 상단 주석.
 """
 
 from .ir import AdDocument, AdPage, Line, Region
@@ -47,81 +52,36 @@ def _region_text(region: Region) -> str:
     return "\n".join(rows)
 
 
-def _section_blocks(page: AdPage) -> list[tuple[object, list[Region]]]:
-    """페이지를 (섹션, 영역목록) 순서로 — 묶음(카드)→섹션→영역(위→아래, 좌→우).
+def build_page_view(page: AdPage) -> dict:
+    """한 페이지의 lean 투영 — 영역 clean text 를 읽기순서로 평면 나열.
 
-    섹션에 안 든 영역은 (None, leftovers) 로 맨 뒤에 붙인다. make_review 표시 규칙과 동일.
+    bbox·신뢰도·출처는 빼고 region_id 는 남긴다(추출 후 bbox 재부착용).
+    정렬은 위→아래, 좌→오른쪽 — 화면 흐름 자체가 문맥이므로 섹션 라벨 없이도
+    STAGE_3 가 '이 유의사항이 어느 이벤트에 딸린 것인지'를 순서로 읽을 수 있다.
     """
-    region_by_id = {r.region_id: r for r in page.regions}
-    used: set[str] = set()
-    blocks: list[tuple[object, list[Region]]] = []
-
-    def sec_y(s) -> int:
-        return s.bbox[1] if s.bbox else (1 << 30)
-
-    for s in sorted(page.sections, key=lambda s: (s.group_no or 0, sec_y(s))):
-        regs = [region_by_id[rid] for rid in s.region_ids if rid in region_by_id]
-        regs.sort(key=lambda r: (r.bbox[1], r.bbox[0]) if r.bbox else (0, 0))
-        used.update(r.region_id for r in regs)
-        blocks.append((s, regs))
-
-    leftovers = [r for r in page.regions if r.region_id not in used]
-    if leftovers:
-        leftovers.sort(key=lambda r: (r.bbox[1], r.bbox[0]) if r.bbox else (0, 0))
-        blocks.append((None, leftovers))
-    return blocks
-
-
-def build_page_view(page: AdPage, *, include_illustrative: bool = True) -> dict:
-    """한 페이지의 lean 투영. 섹션→영역 clean text (bbox/신뢰도/출처 제외, region_id 유지).
-
-    장식예시(2a) 섹션은 **빼지 않고 표시만 한다**(`illustrative: true`). 예전에는 아예
-    제외했는데, 격리는 '보관'이라는 취지와 달리 LLM 관점에서는 삭제와 같았다 — 실측
-    (2026-07-28): 003 의 헤드라인+이벤트기간이 장식예시로 판정돼 통째로 빠졌고, 그 탓에
-    STAGE_3 가 그 내용을 본 적조차 없는데 '필드 미발견'으로 집계됐다. 문서 5개에서
-    33개 영역이 이렇게 사라졌다. 무엇이 예시인지는 표시해 주고 판단은 STAGE_3 에 맡긴다
-    (판단 주체는 LLM 이라는 원칙과도 맞다).
-    """
-    sections: list[dict] = []
-    for sec, regs in _section_blocks(page):
-        if sec is not None and sec.is_illustrative and not include_illustrative:
+    ordered = sorted(page.regions, key=lambda r: (r.bbox[1], r.bbox[0]) if r.bbox else (0, 0))
+    regions: list[dict] = []
+    for r in ordered:
+        text = _region_text(r)
+        if not text and not r.vlm_reading:
             continue
-        region_items = []
-        for r in regs:
-            text = _region_text(r)
-            if not text and not r.vlm_reading:
-                continue
-            item = {"region_id": r.region_id, "role": r.role, "text": text}
-            # VLM 통독 후보(§6, B안): OCR 정본과 다를 때만 후보로 병존 노출.
-            # STAGE_3 가 정밀도/커버리지를 보고 raw(text)와 후보 중 선택 (§1A).
-            if r.vlm_reading and r.vlm_reading.strip() and r.vlm_reading.strip() != text.strip():
-                item["vlm_reading"] = r.vlm_reading
-                item["vlm_reading_score"] = r.vlm_reading_score
-                item["vlm_reading_coverage"] = r.vlm_reading_coverage
-                # 점수는 숫자라 LLM 이 해석해야 하고, 토큰 겹침이라 잘린 판독이 만점을
-                # 받는다. 관계 라벨을 같이 실어 '이 후보는 뒤가 잘렸다'를 말로 알려준다.
-                if r.vlm_reading_relation:
-                    item["vlm_reading_relation"] = r.vlm_reading_relation
-            region_items.append(item)
-        if not region_items:
-            continue
-        if sec is None:
-            sections.append({
-                "section_id": None, "section_type": None, "section_no": None,
-                "group_no": None, "regions": region_items,
-            })
-        else:
-            item = {
-                "section_id": sec.section_id, "section_type": sec.section_type,
-                "section_no": sec.section_no, "group_no": sec.group_no,
-                "regions": region_items,
-            }
-            if sec.is_illustrative:
-                item["illustrative"] = True  # 심의 대상이 아닐 수 있음 — 삭제가 아니라 표시
-            sections.append(item)
+        item = {"region_id": r.region_id, "role": r.role, "text": text}
+        # VLM 통독 후보(§6, B안): OCR 정본과 다를 때만 후보로 병존 노출.
+        # STAGE_3 가 정밀도/커버리지를 보고 raw(text)와 후보 중 선택 (§1A).
+        if r.vlm_reading and r.vlm_reading.strip() and r.vlm_reading.strip() != text.strip():
+            item["vlm_reading"] = r.vlm_reading
+            item["vlm_reading_score"] = r.vlm_reading_score
+            item["vlm_reading_coverage"] = r.vlm_reading_coverage
+            # 점수는 숫자라 LLM 이 해석해야 하고, 토큰 겹침이라 잘린 판독이 만점을
+            # 받는다. 관계 라벨을 같이 실어 '이 후보는 뒤가 잘렸다'를 말로 알려준다.
+            if r.vlm_reading_relation:
+                item["vlm_reading_relation"] = r.vlm_reading_relation
+        regions.append(item)
 
-    view: dict = {"page_number": page.page_no, "sections": sections}
+    view: dict = {"page_number": page.page_no, "regions": regions}
     if page.unassigned_lines:
+        # 어느 영역에도 못 붙은 낱줄 — 근거를 영역 단위로 지목할 수 없을 뿐,
+        # 텍스트는 STAGE_3 에 전달돼야 한다(안 그러면 '본 적 없는데 미발견' 사고).
         rows = [
             r for r in _rows_from_lines(sort_reading_order(page.unassigned_lines))
             if r.strip()
@@ -131,15 +91,12 @@ def build_page_view(page: AdPage, *, include_illustrative: bool = True) -> dict:
     return view
 
 
-def build_doc_view(doc: AdDocument, *, include_illustrative: bool = True) -> dict:
+def build_doc_view(doc: AdDocument) -> dict:
     """문서 전체의 lean 투영 — 스키마-LLM 단계에 넣을 본문 페이로드."""
     return {
         "document": doc.source_file,
         "doc_id": doc.doc_id,
         "product_group": doc.product_group,
         "ad_type": doc.ad_type,
-        "pages": [
-            build_page_view(p, include_illustrative=include_illustrative)
-            for p in doc.pages
-        ],
+        "pages": [build_page_view(p) for p in doc.pages],
     }
