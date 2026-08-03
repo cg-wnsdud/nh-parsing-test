@@ -56,10 +56,19 @@ def build_page_view(page: AdPage) -> dict:
     """한 페이지의 lean 투영 — 영역 clean text 를 읽기순서로 평면 나열.
 
     bbox·신뢰도·출처는 빼고 region_id 는 남긴다(추출 후 bbox 재부착용).
-    정렬은 위→아래, 좌→오른쪽 — 화면 흐름 자체가 문맥이므로 섹션 라벨 없이도
-    STAGE_3 가 '이 유의사항이 어느 이벤트에 딸린 것인지'를 순서로 읽을 수 있다.
+    정렬은 **카드 우선(있으면) → 위→아래 → 좌→오른쪽**. 카드가 없으면(단일 세로형)
+    좌표만으로도 화면 흐름이 곧 문맥이 되지만, 좌우로 나란한 카드가 있는 문서(003
+    EVENT1/EVENT2 등)는 좌표만 보면 y 가 비슷한 두 카드의 문장이 한 줄씩 번갈아
+    나온다 — 카드 번호를 1순위 정렬키로 둬서 카드 경계를 넘어 안 섞이게 한다.
     """
-    ordered = sorted(page.regions, key=lambda r: (r.bbox[1], r.bbox[0]) if r.bbox else (0, 0))
+    ordered = sorted(
+        page.regions,
+        key=lambda r: (
+            r.card_no or 0,
+            r.bbox[1] if r.bbox else 0,
+            r.bbox[0] if r.bbox else 0,
+        ),
+    )
     regions: list[dict] = []
     for r in ordered:
         text = _region_text(r)

@@ -165,10 +165,28 @@ def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
     """
     all_lines = [l for r in page.regions for l in r.lines] + page.unassigned_lines
 
+    # 카드-분할(§D): 좌우로 나란히 배치된 카드(003 EVENT1/EVENT2 등)가 있으면 카드
+    # 단위로 먼저 묶는다. 2026-08-03 섹션 제거 때 "group_no 는 섹션 전용"이라고 잘못
+    # 판단해 이 호출을 통째로 껐었는데, 실제로는 **읽기순서**(llm_view 정렬)가 카드
+    # 경계를 넘어 섞이지 않게 하는 데도 쓰이고 있었다 — 실측(003): 카드 배정 없이
+    # 좌표만으로 정렬하면 EVENT1/EVENT2 문장이 y좌표가 비슷해 한 줄씩 번갈아 나온다.
+    # 스크롤·단일패널은 게이트에서 호출 자체를 안 한다(assign_cards_vlm 내부).
+    if canvas_img is not None:
+        from .cards import assign_cards_vlm
+
+        try:
+            cards = assign_cards_vlm(page, canvas_img, votes=SETTINGS.card_split_votes)
+            for r in page.regions:
+                r.card_no = cards.get(r.region_id)
+            ncards = len({c for c in cards.values() if c > 0})
+            if ncards:
+                page.notes.append(f"카드-분할(§D): {ncards}개 카드로 그룹핑 (VLM 판정, 읽기순서용)")
+        except Exception as exc:
+            page.notes.append(f"카드-분할 실패(좌표 순서 유지): {exc}")
+
     # 영역 역할 판정 — 섹션(의미 묶음)은 2026-08-03 제거했다(vlm_judge 상단 주석).
-    # 같이 빠진 것: 카드-분할(group_no 가 섹션 전용이었음), 장식예시 격리(section_type
-    # 의존), 미배정 낱줄의 VLM 내용 귀속. 셋 다 흔들리는 의미 판정이었고 후속 계약에
-    # 담을 자리도 없었다. cards 모듈은 지우지 않고 배선만 끊어 둔다.
+    # 같이 빠진 것: 장식예시 격리(section_type 의존), 미배정 낱줄의 VLM 내용 귀속.
+    # 둘 다 흔들리는 의미 판정이었고 후속 계약에 담을 자리도 없었다.
     try:
         judge_region_roles(page.regions, canvas_img, page.canvas_h)
     except Exception as exc:
