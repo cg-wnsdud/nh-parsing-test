@@ -228,7 +228,7 @@ def _llm_view_html(page: dict) -> tuple[str, int, int]:
         blocks.append(
             f'<div class="lvrow cand">{head}'
             f'<div class="lvcols">'
-            f'<div class="lvcol ocr"><div class="lvhd">text — OCR 정본 (이 값이 쓰인다)</div>'
+            f'<div class="lvcol ocr"><div class="lvhd">text — 파싱 정본 (기록·재현의 기준)</div>'
             f'<pre>{text_html}</pre></div>'
             f'<div class="lvcol vlm"><div class="lvhd">vlm_reading — VLM 통독 후보</div>'
             f'<pre>{html.escape(cand)}</pre></div>'
@@ -286,9 +286,9 @@ def _region_vlm_compare_html(page: dict) -> str:
             f'<span class="rel {cls}">{html.escape(label)}</span> '
             f'<span class="meta">정밀도 {prec} · 커버리지 {cov}</span></div>'
             '<div class="cmpcols">'
-            '<div class="cmpcol ocr"><div class="cmphd">OCR 정본 (이 값이 쓰인다)</div>'
+            '<div class="cmpcol ocr"><div class="cmphd">OCR 정본 — 파싱이 확정한 값</div>'
             f'<pre>{html.escape(ocr_txt) or "(없음)"}</pre></div>'
-            '<div class="cmpcol vlm"><div class="cmphd">VLM 통독 후보 (STAGE_3 가 선택)</div>'
+            '<div class="cmpcol vlm"><div class="cmphd">VLM 통독 후보 — 필드 값으로는 STAGE_3 가 고를 수 있음</div>'
             f'<pre>{html.escape(cand)}</pre></div>'
             '</div></div>'))
     if not rows:
@@ -303,10 +303,13 @@ def _region_vlm_compare_html(page: dict) -> str:
     )
     body = _intro(
         '같은 자리를 <b>OCR 이 읽은 것과 VLM 이 다시 읽은 것이 갈린 영역</b>만 모았습니다. '
-        'VLM 판독이 더 정확해 보여도 <b>정본을 덮어쓰지 않습니다</b> — 실행마다 값이 바뀌면 '
-        '재현이 안 되기 때문입니다. 대신 후보로 나란히 실어 보내고 최종 선택은 STAGE_3 가 '
-        '합니다. 딱지 뜻: <b>뒷부분 잘림·불일치</b>=정본을 믿을 것(먼저 확인), '
-        '<b>정본보다 많이 읽음</b>=OCR 이 놓친 글자를 후보가 건진 경우, <b>표기 차이</b>=무해.'
+        'VLM 판독이 더 정확해 보여도 <b>정본(text)을 덮어쓰지 않습니다</b> — 실행마다 값이 '
+        '바뀌면 재현이 안 되기 때문입니다. 그래서 <b>파싱이 확정해 기록·감사·재현의 기준으로 '
+        '쓰는 값은 항상 왼쪽(정본)</b>이고, 후보는 별도 필드로 나란히 전달만 됩니다. '
+        '단 <b>스키마 필드에 넣을 값</b>은 STAGE_3 가 둘을 보고 고르므로 오른쪽이 채택될 수 '
+        '있습니다(그때도 정본은 안 바뀝니다). 딱지 뜻: <b>뒷부분 잘림·불일치</b>=정본을 믿을 것'
+        '(먼저 확인), <b>정본보다 많이 읽음</b>=OCR 이 놓친 글자를 후보가 건진 경우, '
+        '<b>표기 차이</b>=무해.'
     ) + '<div class="regcmp">' + "".join(h for _, h in rows) + '</div>'
     return _details(summary, body, cls="regcmpwrap")
 
@@ -338,11 +341,18 @@ def _region_label_overlay(page: dict) -> str:
 
     페이지마다 체크박스로 표시/숨김. 영역이 70개 넘는 페이지도 있어(001 p1=76개)
     항상 켜두면 글자가 겹쳐 원본이 안 보이므로 끌 수 있어야 한다.
+
+    **글자가 안 붙은 영역은 흐리게, 그리고 먼저 그린다**(2026-08-04). PP-StructureV3 가
+    거의 같은 자리에 레이아웃 박스를 두 번 내는 일이 있고(올원e `r017`[113,2949,1055,3051]
+    ↔ `r019`[113,2950,1056,3050]) 우리 중복 제거는 bbox 완전일치만 걸러서 1px 다른
+    쌍은 둘 다 남는다. 라인은 한쪽에만 붙고 다른 쪽은 빈 껍데기가 되는데(224개 중 24개,
+    11%), 라벨이 같은 좌표에 겹쳐 그려져 **빈 껍데기 이름이 실제 영역 이름을 덮었다** —
+    그림에는 `r019`, 오른쪽 파싱 결과에는 `r017` 로 보여 번호가 틀린 것처럼 읽혔다.
     """
     cw, ch = page.get("canvas_w"), page.get("canvas_h")
     if not (cw and ch):
         return ""
-    out = []
+    empty_html, real_html = [], []
     for r in page.get("regions", []):
         if not r.get("bbox"):
             continue
@@ -350,12 +360,17 @@ def _region_label_overlay(page: dict) -> str:
         # 화면 폭을 아끼려고 `p1_` 접두는 뺀다(페이지는 블록 머리줄에 이미 있다).
         short = r["region_id"].split("_", 1)[-1]
         role = html.escape(str(r.get("role") or "?"))
+        has_lines = bool(r.get("lines"))
         title = f'{r["region_id"]} · 역할 {role} · bbox {r["bbox"]}'
-        out.append(
-            f'<span class="rlbl" style="left:{l:.2f}%;top:{t:.2f}%" title="{html.escape(title)}">'
-            f'{html.escape(short)} <i>{role}</i></span>'
+        if not has_lines:
+            title += " · 글자가 안 붙은 빈 검출 박스 (거의 같은 자리 중복 검출)"
+        body = f'{html.escape(short)} <i>{role}</i>' if has_lines else f'{html.escape(short)} <i>빈 박스</i>'
+        span = (
+            f'<span class="rlbl{"" if has_lines else " empty"}" '
+            f'style="left:{l:.2f}%;top:{t:.2f}%" title="{html.escape(title)}">{body}</span>'
         )
-    return "".join(out)
+        (real_html if has_lines else empty_html).append(span)
+    return "".join(empty_html) + "".join(real_html)
 
 
 def _norm_box(bbox: list[int], cw: int, ch: int) -> tuple[float, float, float, float]:
@@ -756,6 +771,7 @@ details.toggle > summary.sechead { display:flex; flex-wrap:wrap; align-items:bas
 .lblchk:not(:checked) ~ .imgstack .rlbl { display:none; }
 .rlbl { position:absolute; transform:translateY(-1px); font-size:8px; line-height:1.25; padding:0 2px; background:rgba(190,0,130,0.88); color:#fff; white-space:nowrap; border-radius:2px; pointer-events:auto; cursor:help; }
 .rlbl i { font-style:normal; opacity:0.82; }
+.rlbl.empty { background:rgba(120,120,130,0.6); }
 .summary { background:#fff; border:1px solid #d0d7de; border-radius:8px; padding:12px 16px; margin-bottom:24px; }
 .summary .warncell { color:#a40e26; font-weight:600; }
 .summary table { border-collapse: collapse; width: 100%; font-size: 13px; }
