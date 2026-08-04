@@ -76,6 +76,23 @@
 
 판정 기준: 텍스트 20자 미만이거나 U+FFFD 비율이 높으면 텍스트 레이어 불신.
 
+> **PDF vs HWP — 이 판정을 누가, 언제 하나.** 자주 헷갈리는 지점이라 명시해 둔다.
+>
+> - **PDF**: 판정(triage)은 **렌더링 전에**, PDF 파일 내부 데이터(텍스트 오브젝트·이미지
+>   오브젝트 목록)를 직접 읽어서 한다 — 그림으로 찍어보고 글자를 찾는 게 아니다.
+>   판정 뒤에 **모든 페이지를 판정과 무관하게 렌더링**한다(structured 도 포함 — 미리보기·
+>   VLM 크롭용). 판정은 **페이지마다** 따로 나온다(003: p1·p2=scan_like, p3=structured).
+> - **HWP**: 이런 판정 자체가 없다. **무조건 document-processor**로 텍스트·표를 뽑고,
+>   내장 이미지는 **asset 단위로 하나씩** 꺼내(`iter_assets`) 장식용(크기 필터)이
+>   아니면 PNG 와 **같은 OCR/VLM 경로**를 별도 페이지(p2~)로 태운다([hwp_ingest.py](../../src/nh_parsing/hwp_ingest.py)).
+>
+> **PDF 의 `structured` 도 document-processor 로 처리하지 않는다** — document-processor 는
+> PDF 도 지원하지만(초기 설계는 오히려 이걸 쓰기로 했었다, `docs/previous/parsing-pipeline-design_v0.1_2026-07-16.md`
+> §11), 이 PoC 는 어차피 미리보기·VLM용으로 페이지를 직접 렌더링해야 해서 **이중
+> 렌더(document-processor 가 한 번, 우리 렌더가 또 한 번)와 좌표계 불일치**를 피하려고
+> `pypdfium2`로 직접 재구현했다([triage.py](../../src/nh_parsing/triage.py) 상단 주석).
+> 프로덕션에서는 이 자리를 사내 파서 probe 로 그대로 감싸도 된다고 명시돼 있다.
+
 ### 1. 글자 획득 — 여기가 OCR
 
 **① 밀도 기반 타일 분할** ⬛ — [bands.py](../../src/nh_parsing/bands.py)
