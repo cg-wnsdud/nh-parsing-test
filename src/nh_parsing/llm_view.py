@@ -52,23 +52,38 @@ def _region_text(region: Region) -> str:
     return "\n".join(rows)
 
 
+def region_order_key(region: Region) -> tuple[int, int, int]:
+    """읽기순서 정렬 키 — **카드 → 위→아래 → 좌→우**.
+
+    카드가 1순위인 이유: 좌우로 나란한 카드가 있는 문서(003 EVENT1/EVENT2 등)는 좌표만
+    보면 y 가 비슷한 두 카드의 문장이 한 줄씩 번갈아 나온다. 카드 경계를 넘어 안 섞이게 한다.
+
+    y·x 는 **영역 bbox 가 아니라 그 안 라인들의 최소 좌표**를 쓴다(2026-08-04 수정).
+    레이아웃 검출 박스는 서로 겹치거나 한쪽이 다른 쪽을 품는 일이 있어서, bbox 상단으로
+    정렬하면 실제 글자가 아래에 있는 영역이 위 영역보다 먼저 나온다.
+    실측(001 p1): `r069`(bbox 상단 5963, 실제 글자 6047~)이 `r065`(bbox 상단 5963,
+    글자 5965~)를 감싸는 형태여서 우대조건 **③이 ①②보다 먼저** 출력됐다. 5문서 중
+    4페이지에서 순서가 어긋났다. 라인 좌표로 정렬하면 화면에 보이는 순서와 일치한다.
+
+    라인이 없는 영역(검출만 되고 글자가 안 붙은 박스)은 bbox 로 폴백한다 — 이런 영역은
+    llm_view 에서 어차피 빠지지만(텍스트 없음) 검수 화면에는 나오므로 키가 필요하다.
+    """
+    boxes = [l.bbox for l in region.lines if l.bbox]
+    if boxes:
+        top, left = min(b[1] for b in boxes), min(b[0] for b in boxes)
+    else:
+        top = region.bbox[1] if region.bbox else 0
+        left = region.bbox[0] if region.bbox else 0
+    return (region.card_no or 0, top, left)
+
+
 def build_page_view(page: AdPage) -> dict:
     """한 페이지의 lean 투영 — 영역 clean text 를 읽기순서로 평면 나열.
 
     bbox·신뢰도·출처는 빼고 region_id 는 남긴다(추출 후 bbox 재부착용).
-    정렬은 **카드 우선(있으면) → 위→아래 → 좌→오른쪽**. 카드가 없으면(단일 세로형)
-    좌표만으로도 화면 흐름이 곧 문맥이 되지만, 좌우로 나란한 카드가 있는 문서(003
-    EVENT1/EVENT2 등)는 좌표만 보면 y 가 비슷한 두 카드의 문장이 한 줄씩 번갈아
-    나온다 — 카드 번호를 1순위 정렬키로 둬서 카드 경계를 넘어 안 섞이게 한다.
+    정렬 규칙은 `region_order_key` 참조 — 검수 화면(make_review)도 같은 키를 쓴다.
     """
-    ordered = sorted(
-        page.regions,
-        key=lambda r: (
-            r.card_no or 0,
-            r.bbox[1] if r.bbox else 0,
-            r.bbox[0] if r.bbox else 0,
-        ),
-    )
+    ordered = sorted(page.regions, key=region_order_key)
     regions: list[dict] = []
     for r in ordered:
         text = _region_text(r)

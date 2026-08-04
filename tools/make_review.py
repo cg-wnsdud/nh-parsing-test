@@ -30,6 +30,7 @@ AdPageIR JSON 은 수천 줄이라 "어디까지 잡혔나"를 눈으로 확인�
 
 import argparse
 import base64
+import hashlib
 import html
 import json
 import sys
@@ -38,7 +39,8 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-from nh_parsing.ir import Line              # noqa: E402
+from nh_parsing.ir import Line, Region      # noqa: E402
+from nh_parsing.llm_view import region_order_key  # noqa: E402
 from nh_parsing.tiling import sort_reading_order  # noqa: E402
 
 
@@ -52,6 +54,22 @@ def _details(summary_html: str, body_html: str, cls: str = "", open_: bool = Fal
         f'<details class="toggle {cls}"{" open" if open_ else ""}>'
         f'<summary class="sechead">{summary_html}</summary>{body_html}</details>'
     )
+
+
+def _src(path: str, fields: str = "") -> str:
+    """이 블록의 값이 **어느 산출물 파일의 어느 필드**에서 온 것인지 딱지.
+
+    2026-08-04: 산출물 보고서(docs/notion_파싱파이프라인-output)가 json 3개를 기준으로
+    쓰였는데 화면엔 파일 출처가 없어서, 보고서와 화면을 대조할 때 "이 표가 어느
+    파일이냐"를 매번 되물어야 했다. 블록마다 파일명·필드명을 같이 적는다.
+    """
+    f = f'<span class="srcfields">{html.escape(fields)}</span>' if fields else ""
+    return f'<span class="srcfile">{html.escape(path)}</span>{f}'
+
+
+def _intro(text: str) -> str:
+    """토글을 펼쳤을 때 맨 위에 붙는 한두 문장 설명 — 발표·인수인계용(2026-08-04)."""
+    return f'<p class="blkintro">{text}</p>'
 
 
 # 출처 태그 → (약어, 색, 설명)
@@ -78,14 +96,7 @@ def _region_evidence_html(page: dict) -> tuple[str, int, int]:
 
     반환: (html, 영역 개수, 미배정 줄 수) — 뒤 둘은 접힌 summary 표시용.
     """
-    ordered = sorted(
-        page.get("regions", []),
-        key=lambda r: (
-            r.get("card_no") or 0,
-            r["bbox"][1] if r.get("bbox") else 0,
-            r["bbox"][0] if r.get("bbox") else 0,
-        ),
-    )
+    ordered = sorted(page.get("regions", []), key=lambda r: region_order_key(Region(**r)))
     blocks = []
     for r in ordered:
         raw = r.get("lines", [])
@@ -248,11 +259,18 @@ def _region_vlm_compare_html(page: dict) -> str:
     rows.sort(key=lambda x: x[0])
     bad = sum(1 for o, _ in rows if o == 0)
     summary = (
-        f'OCR 정본 ↔ VLM 통독 후보 대조'
-        f'<span class="meta">갈린 영역 {len(rows)}개 (그중 확인 필요 {bad}개) · '
-        '정본은 안 덮어쓴다 — 최종 선택은 STAGE_3 몫</span>'
+        f'③ OCR 정본 ↔ VLM 통독 후보 대조'
+        f'<span class="meta">갈린 영역 {len(rows)}개 (그중 확인 필요 {bad}개)</span>'
+        + _src("out/json/*.json",
+               "regions[] : lines[].text(정본) ↔ vlm_reading(후보) · 다를 때만 llm_view 에도 실림")
     )
-    body = '<div class="regcmp">' + "".join(h for _, h in rows) + '</div>'
+    body = _intro(
+        '같은 자리를 <b>OCR 이 읽은 것과 VLM 이 다시 읽은 것이 갈린 영역</b>만 모았습니다. '
+        'VLM 판독이 더 정확해 보여도 <b>정본을 덮어쓰지 않습니다</b> — 실행마다 값이 바뀌면 '
+        '재현이 안 되기 때문입니다. 대신 후보로 나란히 실어 보내고 최종 선택은 STAGE_3 가 '
+        '합니다. 딱지 뜻: <b>뒷부분 잘림·불일치</b>=정본을 믿을 것(먼저 확인), '
+        '<b>정본보다 많이 읽음</b>=OCR 이 놓친 글자를 후보가 건진 경우, <b>표기 차이</b>=무해.'
+    ) + '<div class="regcmp">' + "".join(h for _, h in rows) + '</div>'
     return _details(summary, body, cls="regcmpwrap")
 
 
@@ -270,6 +288,37 @@ def _load_extracted(extracted_dir: Path, doc_id: str) -> dict | None:
 
 def _page_region_bboxes(page: dict) -> dict[str, list[int]]:
     return {r["region_id"]: r["bbox"] for r in page.get("regions", []) if r.get("bbox")}
+
+
+def _region_label_overlay(page: dict) -> str:
+    """영역 박스 왼쪽 위에 `r002 이미지`(=region_id + 역할) 라벨을 얹는다.
+
+    2026-08-04 요청. **JPG 에 굽지 않고 HTML 절대좌표 div 로 올린다** — 이유 둘:
+      ① 역할은 VLM 판단이라 실행 간 97.3% 일치(225개 중 6개 변동)다. 좌표 그림 자체에
+         구워 넣으면 "같은 광고인데 실행마다 다른 그림"이 남는다(pipeline._save_preview
+         주석과 같은 이유). div 는 켜고 끌 수 있어 좌표 원본을 오염시키지 않는다.
+      ② 라벨을 굽자고 전체 재파싱(OCR+VLM 15분)을 돌릴 필요가 없다.
+
+    페이지마다 체크박스로 표시/숨김. 영역이 70개 넘는 페이지도 있어(001 p1=76개)
+    항상 켜두면 글자가 겹쳐 원본이 안 보이므로 끌 수 있어야 한다.
+    """
+    cw, ch = page.get("canvas_w"), page.get("canvas_h")
+    if not (cw and ch):
+        return ""
+    out = []
+    for r in page.get("regions", []):
+        if not r.get("bbox"):
+            continue
+        l, t, _w, _h = _norm_box(r["bbox"], cw, ch)
+        # 화면 폭을 아끼려고 `p1_` 접두는 뺀다(페이지는 블록 머리줄에 이미 있다).
+        short = r["region_id"].split("_", 1)[-1]
+        role = html.escape(str(r.get("role") or "?"))
+        title = f'{r["region_id"]} · 역할 {role} · bbox {r["bbox"]}'
+        out.append(
+            f'<span class="rlbl" style="left:{l:.2f}%;top:{t:.2f}%" title="{html.escape(title)}">'
+            f'{html.escape(short)} <i>{role}</i></span>'
+        )
+    return "".join(out)
 
 
 def _norm_box(bbox: list[int], cw: int, ch: int) -> tuple[float, float, float, float]:
@@ -422,13 +471,18 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
     parts.append("</tbody></table>")
 
     summary = (
-        f'STAGE_3 스키마 추출 결과'
+        f'② STAGE_3 스키마 추출 결과'
         f'<span class="meta">있음 {counts["ok"]} · 없음 {counts["na"]} · '
         f'확신낮음 {counts["warn"]} · <b class="miss-inline">미표시 {counts["miss"]}</b> · '
-        f'근거커버리지={extracted.get("coverage", {}).get("region_coverage")} · '
-        f'행에 마우스를 올리면 왼쪽 이미지에 근거 영역이 표시됩니다</span>'
+        f'근거커버리지={extracted.get("coverage", {}).get("region_coverage")}</span>'
+        + _src("out/extracted/*.json", "fields{} / events[] / unmapped[] : value · status · evidence · absence")
     )
-    body = f'<div class="stage3">{"".join(parts)}</div>'
+    body = _intro(
+        '①의 글자를 <b>심의 스키마 필드</b>(상품명·금리·의무고지 등)에 채운 결과입니다. '
+        '<b>값이 있는지 / 없으면 왜 없는지</b>까지만 판단하고, 규정 위반 여부는 판정하지 '
+        '않습니다. <b>행에 마우스를 올리면</b> 왼쪽 이미지에서 그 값을 뽑아온 위치가 '
+        '하이라이트됩니다(근거 추적).'
+    ) + f'<div class="stage3">{"".join(parts)}</div>'
     return _details(summary, body, cls="stage3wrap", open_=True), "".join(overlay_divs)
 
 
@@ -446,10 +500,17 @@ def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | No
 
     stage3_table, stage3_overlay = _stage3_html(page, extracted, is_first_page=(pno == 1))
 
-    # 미리보기 이미지 (있으면 내장) — STAGE_3 근거 하이라이트는 이미지 위에 절대좌표 오버레이
+    # 미리보기 이미지 (있으면 내장) — STAGE_3 근거 하이라이트·영역 라벨은 절대좌표 오버레이
     uri = _img_data_uri(preview_dir / f"{doc_id}_p{pno}.jpg")
     if uri:
-        img_html = f'<div class="imgstack"><img src="{uri}" alt="p{pno} preview">{stage3_overlay}</div>'
+        # id 는 ASCII 만 — doc_id 에 한글·괄호·공백이 섞여 있어 해시로 만든다(실행 간 고정).
+        chk = f"lbl_{hashlib.md5(doc_id.encode('utf-8')).hexdigest()[:8]}_{pno}"
+        img_html = (
+            f'<input type="checkbox" class="lblchk" id="{chk}" checked>'
+            f'<label class="lblctl" for="{chk}">영역 이름·역할 라벨</label>'
+            f'<div class="imgstack"><img src="{uri}" alt="p{pno} preview">'
+            f'{stage3_overlay}{_region_label_overlay(page)}</div>'
+        )
     else:
         img_html = '<div class="noimg">이미지 없음<br>(HWP 디지털 추출 — 좌표 없음)</div>'
 
@@ -472,9 +533,16 @@ def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | No
 
     llmview_body, region_n = _llm_view_html(page)
     llmview = _details(
-        f'최종 파싱 결과 · LLM 전달 형태'
-        f'<span class="meta">영역 {region_n}개 · 읽기순서 정렬 · out/llm_view/*.json 과 동일</span>',
-        llmview_body, cls="llmviewwrap",
+        f'① 최종 파싱 결과 (LLM 에 넘기는 형태)'
+        f'<span class="meta">영역 {region_n}개 · 읽기순서 정렬</span>'
+        + _src("out/llm_view/*.json", "pages[].regions[] : region_id · role · text"),
+        _intro(
+            '파싱의 <b>최종 산출물</b>입니다. 좌표·신뢰도 같은 기계 신호를 다 빼고 '
+            '<b>읽는 순서</b>(카드 → 위→아래 → 좌→우)로 텍스트만 남긴 것이며, 다음 단계'
+            '(STAGE_3 스키마 추출)에 이 글자가 그대로 들어갑니다. '
+            '<code>p1_r002 (이미지)</code> = 영역 ID + 그 영역의 역할이고, 왼쪽 그림의 '
+            '같은 이름 박스가 그 위치입니다.'
+        ) + llmview_body, cls="llmviewwrap",
     )
 
     parts = [cov, llmview]
@@ -490,26 +558,48 @@ def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | No
     evidence_body, ev_region_n, ev_unassigned_n = _region_evidence_html(page)
     unassigned_note = f" · 미배정 {ev_unassigned_n}줄" if ev_unassigned_n else ""
     parts.append(_details(
-        f'감사용 원본 증거층'
-        f'<span class="meta">영역 {ev_region_n}개{unassigned_note} · 출처·신뢰도 태그 포함, 교정 전 raw 라인</span>',
-        evidence_body, cls="evidencewrap",
+        f'④ 감사용 원본 증거층 — 한 줄씩 쪼갠 그대로'
+        f'<span class="meta">영역 {ev_region_n}개{unassigned_note}</span>'
+        + _src("out/json/*.json", "regions[].lines[] : text · source · confidence · bbox"),
+        _intro(
+            '①이 <b>사람이 읽기 좋게 다듬은 결과</b>라면, 이건 <b>다듬기 전 원자료</b>입니다. '
+            '①에서 한 문장으로 이어 붙인 줄이 실제로는 OCR 박스 몇 개였는지, 각 조각을 '
+            '<b>무엇이 잡았고</b>(O=OCR / D=디지털텍스트 / V·S·R=VLM) '
+            '<b>얼마나 확신했는지</b>(0~1, 0.8 미만은 노란 배경) 가 그대로 보입니다. '
+            '"이 값 어디서 나왔냐"는 추궁에 답하는 층이라 <b>감사용</b>이고, 평소 검토에는 '
+            '①만 봐도 됩니다. 맨 아래 <b>미배정</b>은 어느 영역 박스에도 못 붙은 낱줄로, '
+            '글자는 다음 단계로 전달되지만 근거 좌표를 영역 단위로 지목할 수 없습니다.'
+        ) + evidence_body, cls="evidencewrap",
     ))
 
-    # 노트
+    # 노트 — 파이프라인이 스스로 남긴 결정 기록
     notes = page.get("notes", [])
     if notes:
         items = "".join(f"<li>{html.escape(n)}</li>" for n in notes)
         parts.append(_details(
-            f'파이프라인 판단 로그<span class="meta">{len(notes)}건</span>',
-            f'<div class="notes"><ul>{items}</ul></div>', cls="noteswrap",
+            f'⑤ 파이프라인 판단 로그<span class="meta">{len(notes)}건</span>'
+            + _src("out/json/*.json", "pages[].notes[]"),
+            _intro(
+                '파이프라인이 <b>스스로 남긴 처리 기록</b>입니다. 몇 개 타일로 잘랐는지, '
+                '낱줄 몇 개를 어떤 근거로(포함/근접) 영역에 붙였는지, VLM 통독이 실패했거나 '
+                '뒤가 잘렸는지, 어떤 저신뢰 글자를 재판독했는지가 시간순으로 적힙니다. '
+                '결과가 이상할 때 <b>어느 단계에서 그렇게 됐는지</b>를 여기서 찾습니다 — '
+                '조용히 실패하지 않게 하려고 만든 층이라, 실패도 성공도 다 남깁니다.'
+            ) + f'<div class="notes"><ul>{items}</ul></div>', cls="noteswrap",
         ))
 
+    # 머리줄 항목마다 title 로 뜻을 달아 둔다 — 발표 중 마우스만 올려도 설명이 나오게(2026-08-04).
     return (
         f'<div class="page">'
-        f'<div class="phead">p{pno} · route=<b>{html.escape(str(page.get("parse_route")))}</b> '
-        f'· status={html.escape(str(page.get("parse_status")))} '
-        f'· canvas {page.get("canvas_w")}×{page.get("canvas_h")}{triage_txt} '
-        f'· 총 {st["total"]}줄</div>'
+        f'<div class="phead"><b>p{pno}</b> · '
+        f'<span title="이 페이지를 읽은 경로: ocr=전부 OCR / digital=디지털 텍스트 정본 / hybrid=병행">'
+        f'route=<b>{html.escape(str(page.get("parse_route")))}</b></span> · '
+        f'<span title="이 페이지 파싱 성패: ok / unreadable(판독 불가)">'
+        f'status={html.escape(str(page.get("parse_status")))}</span> · '
+        f'<span title="처리 기준 이미지 크기(px, 가로×세로). 모든 bbox 좌표가 이 좌표계다">'
+        f'canvas {page.get("canvas_w")}×{page.get("canvas_h")}</span>{triage_txt} · '
+        f'<span title="이 페이지에서 잡은 라인 수 = 영역에 붙은 줄 + 미배정 줄">'
+        f'총 {st["total"]}줄</span></div>'
         f'<div class="cols"><div class="imgcol">{img_html}</div>'
         f'<div class="txtcol">{"".join(parts)}</div></div>'
         f'</div>'
@@ -554,20 +644,53 @@ header.top .legend .tag { margin-left: 10px; }
 .pipeline-overview { background:#fff; border:1px solid #d0d7de; border-radius:8px; padding:18px 22px; margin-bottom:20px; }
 .pipeline-overview h2 { margin:0 0 8px; font-size:16px; }
 .pipeline-overview > p { margin:0 0 16px; font-size:13px; color:#57606a; line-height:1.65; }
-.flow { display:flex; align-items:stretch; gap:0; margin-bottom:16px; flex-wrap:wrap; }
-.flowstep { flex:1; min-width:150px; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:10px 12px; }
-.flowstep.highlight { background:#e6f4e6; border-color:#1a7f37; }
-.fsno { font-size:10px; font-weight:700; color:#8b949e; margin-bottom:2px; }
-.fstitle { font-weight:700; font-size:13px; color:#0550ae; margin-bottom:4px; }
-.flowstep.highlight .fstitle { color:#116329; }
-.fsdesc { font-size:11.5px; color:#57606a; line-height:1.5; }
-.flowarrow { display:flex; align-items:center; justify-content:center; padding:0 8px; color:#8b949e; font-size:16px; flex:0 0 auto; }
-.outputs-label { font-size:12px; color:#57606a; margin-bottom:8px; }
-.outputs { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
-.outbox { flex:1; min-width:180px; border:1px solid #eaecef; border-radius:6px; padding:8px 12px; font-size:12px; color:#57606a; background:#fafbfc; }
+.ovhead { font-size:13px; font-weight:700; color:#1f2328; margin:18px 0 8px; padding-bottom:5px; border-bottom:1px solid #eaecef; }
+.actlegend { float:right; font-weight:normal; font-size:11px; color:#8b949e; }
+.actlegend .act { margin-left:12px; }
+.act { display:inline-block; font-size:9.5px; font-weight:700; padding:1px 5px; border-radius:3px; vertical-align:middle; }
+.act-code { background:#eaecef; color:#424a53; }
+.act-paddle { background:#ddf4ff; color:#0550ae; }
+.act-vlm { background:#fbefff; color:#8250df; }
+.phases { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; align-items:flex-start; }
+.phase { flex:1 1 300px; min-width:280px; border:1px solid #d0d7de; border-radius:6px; overflow:hidden; background:#fff; }
+.phhead { background:#f6f8fa; border-bottom:1px solid #d0d7de; padding:7px 10px; font-size:13px; font-weight:700; }
+.phno { display:inline-block; background:#0550ae; color:#fff; font-size:11px; width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; margin-right:6px; }
+.phdesc { display:block; font-weight:normal; font-size:11px; color:#8b949e; margin-top:2px; }
+ul.steps { margin:0; padding:6px 10px 8px; list-style:none; }
+ul.steps li { padding:4px 0; border-top:1px dotted #eaecef; font-size:11.5px; line-height:1.55; }
+ul.steps li:first-child { border-top:none; }
+.stno { color:#8b949e; font-weight:700; margin-right:4px; }
+.stname { font-weight:700; color:#0550ae; margin-right:5px; }
+.stdesc { display:block; color:#57606a; margin-top:1px; }
+.outputs { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; align-items:stretch; }
+.outbox { flex:1 1 240px; min-width:220px; border:1px solid #eaecef; border-radius:6px; padding:9px 12px; font-size:11.5px; color:#57606a; background:#fafbfc; line-height:1.55; }
 .outbox.highlight { border-color:#1a7f37; background:#f0fdf1; }
-.outbox b { display:block; color:#1f2328; font-size:13px; margin-bottom:2px; }
-.howto { font-size:12px; color:#57606a; line-height:1.75; background:#f6f8fa; border-radius:6px; padding:10px 14px; margin:0; }
+/* 파일명만 블록 — `.outbox > b` 로 잡으면 설명문 안의 강조 <b> 까지 줄바꿈된다(실측) */
+.outbox b.fname { display:block; color:#1f2328; font-size:13px; font-family:Consolas,monospace; }
+.outbox .of { display:block; font-size:11px; font-weight:700; color:#0550ae; margin:1px 0 3px; }
+.outbox code { display:block; margin-top:5px; font-size:10.5px; color:#8b949e; word-break:break-all; }
+.howto { font-size:12px; color:#57606a; line-height:1.75; background:#f6f8fa; border-radius:6px; padding:10px 14px; margin:0 0 4px; }
+details.termswrap { margin-top:14px; }
+details.termswrap > summary { background:#f6f8fa; padding:6px 10px; font-size:13px; }
+table.terms { border-collapse:collapse; width:100%; font-size:11.5px; }
+table.terms th, table.terms td { border-top:1px solid #eaecef; padding:5px 9px; text-align:left; vertical-align:top; line-height:1.5; }
+table.terms th { background:#fafbfc; color:#57606a; font-size:11px; }
+table.terms .tm { white-space:nowrap; font-weight:700; color:#0550ae; }
+table.terms .tw { color:#8b949e; }
+.summary .sumnote { font-size:11.5px; color:#57606a; line-height:1.7; margin:8px 0 0; }
+.blkintro { font-size:11.5px; color:#57606a; line-height:1.7; margin:0; padding:8px 12px; background:#fafbfc; border-bottom:1px solid #eaecef; }
+/* 토글 제목줄: [▸ 제목] [요약숫자] ...밀어냄... [파일명] / 다음 줄 [필드경로]
+   기본 .sechead 는 space-between 2단 배치라 항목이 4개가 되면 흩어진다 — 여기만 재정의. */
+details.toggle > summary.sechead { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 8px; justify-content:flex-start; }
+.srcfile { margin-left:auto; font-size:10px; font-family:Consolas,monospace; color:#57606a; background:#eaecef; padding:1px 6px; border-radius:3px; }
+.srcfields { margin-left:auto; font-size:9.5px; color:#8b949e; font-weight:normal; }
+.lblchk { display:none; }
+.lblctl { display:inline-block; font-size:11px; color:#57606a; cursor:pointer; margin-bottom:6px; user-select:none; }
+.lblctl::before { content:'☑ '; }
+.lblchk:not(:checked) ~ .lblctl::before { content:'☐ '; }
+.lblchk:not(:checked) ~ .imgstack .rlbl { display:none; }
+.rlbl { position:absolute; transform:translateY(-1px); font-size:8px; line-height:1.25; padding:0 2px; background:rgba(190,0,130,0.88); color:#fff; white-space:nowrap; border-radius:2px; pointer-events:auto; cursor:help; }
+.rlbl i { font-style:normal; opacity:0.82; }
 .summary { background:#fff; border:1px solid #d0d7de; border-radius:8px; padding:12px 16px; margin-bottom:24px; }
 .summary .warncell { color:#a40e26; font-weight:600; }
 .summary table { border-collapse: collapse; width: 100%; font-size: 13px; }
@@ -691,33 +814,152 @@ document.querySelectorAll('.stage3tbl tr.hoverable').forEach(function(row) {
 """
 
 
+# 처리 단계 — docs/architecture/pipeline-map.md 와 같은 번호(①~⑮). 문서와 화면의
+# 단계 번호가 어긋나면 인수인계에서 서로 다른 것을 가리키게 되므로 반드시 같이 고친다.
+# 주체: code=순수 코드(모델 호출 없음) / paddle=PaddleX OCR / vlm=Gemma VLM.
+_ACTOR_META = {
+    "code": ("코드", "act-code", "순수 코드 — 좌표 계산·규칙·픽셀 통계. 모델 호출 없음"),
+    "paddle": ("OCR", "act-paddle", "PaddleX PP-StructureV3 — 글자 검출·인식·레이아웃 블록"),
+    "vlm": ("VLM", "act-vlm", "Gemma VLM — 의미 판단(역할·카드·교정·분류)"),
+}
+
+_PHASES: list[tuple[str, str, str, list[tuple[str, str, str, str]]]] = [
+    ("0", "라우팅", "이 페이지를 어떻게 읽을지 먼저 정한다", [
+        ("0", "트리아지", "code",
+         "PDF는 페이지마다 structured / hybrid / scan_like 판정. 디지털 텍스트를 믿을 수 있으면 "
+         "OCR 을 아예 안 돌린다(정확·무료). HWP는 텍스트·표를 사내 파서 정본으로 쓰고 내장 이미지만 OCR."),
+    ]),
+    ("1", "글자 획득", "여기가 OCR — 글자와 좌표를 뽑는다", [
+        ("①", "밀도 기반 타일 분할", "code",
+         "세로로 긴 광고(6000px+)는 한 번에 못 보내 잘라야 한다. 글자량이 고르게 나뉘는 자리를 찾아 "
+         "글자 없는 행에 스냅해 자른다 — 기계적으로 1600px마다 자르면 글자가 반토막 났다."),
+        ("②", "레이아웃 + OCR", "paddle",
+         "타일당 1회. 글자 박스·인식 텍스트·레이아웃 블록(제목/본문/표/그림)을 한 번에 받는다."),
+        ("③", "좌표 복원 · 중복 제거", "code",
+         "타일 좌표를 원본 이미지 좌표로 되돌리고, 타일이 200px 겹치는 구간의 중복 검출을 지운다."),
+        ("④", "디지털 우선 병합", "code",
+         "PDF·HWP의 디지털 텍스트와 OCR 결과가 같은 자리에서 겹치면 디지털을 정본으로 쓴다."),
+        ("⑤", "영역 조립", "code",
+         "레이아웃 블록에 라인을 좌표로 분배해 <b>영역</b>을 만든다. 어느 블록에도 안 들어간 라인이 "
+         "<b>미배정 낱줄</b>이 되고, 이것이 ⑨가 존재하는 이유다."),
+    ]),
+    ("2", "구조 정리", "글자를 화면 구조에 맞게 묶는다", [
+        ("⑥", "카드 게이트", "code",
+         "세로 스크롤형(높이/폭 ≥ 2)이거나 단일 패널이면 카드 판정을 <b>호출조차 안 한다</b> — 헛호출 차단."),
+        ("⑦", "카드 배정", "vlm",
+         "한 이미지에 광고 패널이 좌우로 여러 장일 때 묶음을 나눈다. <b>개수는 픽셀 밀도가 결정론적으로 세고</b> "
+         "배정은 VLM — 전폭 헤드라인처럼 어느 컬럼에도 안 속하는 요소는 좌표로 못 정하기 때문. 밀도 관측을 증거로 실어 1회만 묻는다."),
+        ("⑧", "역할 판정", "vlm",
+         "영역마다 <b>역할</b>(제목·본문·유의사항·고지문구·각주·표·이미지·버튼·기타) 하나를 정한다. "
+         "왼쪽 그림 박스 옆 라벨의 괄호 값이 이것. OCR 정본만 보고 판정한다(VLM 후보는 안 씀 — 비결정성 격리)."),
+        ("⑨", "미배정 낱줄 귀속", "code",
+         "⑤에서 남은 낱줄을 <b>좌표만 보고</b> 붙인다(VLM 호출 없음). ㉠ 포함: 중심점을 품는 가장 작은 영역 → "
+         "㉡ 근접: <b>같은 칼럼</b>(가로 50% 이상 겹침) 중 수직 갭 최근접. 둘 다 실패하면 미배정 유지."),
+    ]),
+    ("3", "통합 판독", "OCR 이 놓치거나 잘못 읽은 글자를 VLM 이 재확인 — 정본은 안 덮는다", [
+        ("⑩", "밴드 통합판독", "vlm",
+         "OCR 이 본 것과 <b>같은 크롭</b>을 VLM 에도 주고 \"이 영역들을 고쳐라 + 목록에 없는 문구를 찾아라\"를 "
+         "한 번에 묻는다(두 단계를 합쳐 호출 122→65회). 결과는 <b>후보</b>(vlm_reading)로만 붙는다."),
+        ("⑪", "통짜 스윕", "vlm",
+         "타일이 원래 못 잡는 대형 장식 타이포를 페이지 전체 1회 통짜로 회수(실측: 002 '행운의 777 이벤트')."),
+        ("⑫", "스윕-OCR 중복 정정", "vlm",
+         "같은 자리를 다르게 읽은 경우(<code>1O.1%p</code> vs <code>① 0.1%p</code>) 그 자리만 고해상 재판독해 "
+         "<b>VLM 이 심판</b>한다. 코드가 규칙으로 우열을 정하지 않는다."),
+        ("⑬", "저신뢰 재판독", "vlm",
+         "OCR 신뢰도 0.80 미만 라인을 다시 읽는다(실측: '생학해대' → '생활형태'). 역시 후보로만 부착."),
+        ("⑭", "읽기순서 정렬 · 진단", "code",
+         "카드 → 위→아래 → 좌→우 로 정렬한다. 레이아웃이 <b>통째로 놓친 덩어리</b>가 있으면 판단 로그에 남긴다."),
+        ("⑮", "광고 분류", "vlm", "상품군(예금성·대출성)과 광고 유형을 문서당 1회 판정 — 어느 스키마를 쓸지 결정."),
+    ]),
+    ("4", "스키마 추출 (STAGE_3)", "심의 스키마 필드에 값을 채운다 — 별도 프로세스", [
+        ("", "5그룹 분할 호출", "vlm",
+         "상품기본 / 금리 / 의무고지 / 위험표현 / 이벤트 로 나눠 문서당 5회. 한 번에 57필드를 다 물으면 "
+         "응답이 길어져 배열이 비는 퇴행이 난다."),
+        ("", "부재 4분류", "code",
+         "값이 없을 때 <b>미표시 / 해당없음 / 확인필요 / 판정제외</b>를 스키마 메타데이터로 코드가 가른다 — "
+         "모델 호출 0회. '없음'을 다 똑같이 두면 진짜 누락이 묻힌다."),
+        ("", "근거 bbox 재부착", "code",
+         "필드가 지목한 region_id 로 좌표를 되붙여 이 화면의 hover 하이라이트에 연결한다."),
+    ]),
+]
+
+# 발표·인수인계용 용어 사전 — 화면에 실제로 찍히는 표기만 넣는다.
+_TERMS: list[tuple[str, str, str]] = [
+    ("라인 (line)", "OCR·디지털 텍스트가 잡은 <b>글자 한 조각</b>. 한 시각적 줄이 여러 조각으로 쪼개지기도 한다",
+     "그림의 <b>가는</b> 마젠타 박스 / 요약표 '라인'"),
+    ("영역 (region)", "붙어 있는 라인들을 묶은 <b>레이아웃 단위</b>. <code>p1_r002</code> = 1페이지의 3번째(000부터) 영역",
+     "그림의 <b>굵은</b> 마젠타 박스 / 요약표 '영역'"),
+    ("역할 (role)", "그 영역이 무엇인지 — 제목·본문·유의사항·고지문구·각주·표·이미지·버튼·기타 9종 (⑧ VLM 판정)",
+     "박스 라벨의 괄호 값 / <code>p1_r002 (이미지)</code>"),
+    ("카드 (card_no)", "한 이미지 안에 광고 패널이 좌우로 여러 장일 때의 묶음 번호 (⑦)", "증거층 영역 머리줄 '카드1'"),
+    ("미배정", "어느 영역 박스에도 못 붙은 낱줄. <b>글자는 다음 단계로 전달되지만</b> 근거를 영역 단위로 지목할 수 없다",
+     "요약표 '미배정' / 증거층 맨 아래"),
+    ("정본", "최종적으로 <b>실제 쓰는 값</b> = OCR·디지털 텍스트. VLM 판독은 후보일 뿐 이 값을 덮지 않는다", "③ 대조 패널 왼쪽 칸"),
+    ("후보 (vlm_reading)", "VLM 이 다시 읽어 본 결과. 정본과 나란히 전달되고 <b>선택은 STAGE_3</b>가 한다", "③ 대조 패널 오른쪽 칸"),
+    ("route", "이 페이지를 읽은 경로 — <code>ocr</code>(전부 OCR) / <code>digital</code>(디지털 텍스트) / <code>hybrid</code>(병행)",
+     "페이지 머리줄"),
+    ("status", "그 페이지 파싱 성패 — <code>ok</code> / <code>unreadable</code>(판독 불가)", "페이지 머리줄"),
+    ("canvas", "처리 기준 이미지 크기(px, 가로×세로). 모든 bbox 좌표가 이 좌표계다", "페이지 머리줄"),
+    ("총 n줄", "그 페이지에서 잡은 라인 수 = 영역에 붙은 줄 + 미배정 줄", "페이지 머리줄 / 요약표 '라인'"),
+    ("conf", "OCR 인식 신뢰도 0~1. <b>0.8 미만이면 노란 배경</b>으로 표시하고 ⑬ 재판독 대상이 된다", "증거층 각 줄 앞 숫자"),
+    ("found / not_found", "스키마 필드에 값을 채웠나 / 광고에서 그 값을 못 찾았나. <b>not_found 는 결함이 아니다</b> — 원래 없을 수도 있다",
+     "요약표 'found/not_found' / ② 표 '상태'"),
+    ("미표시", "<b>표시 의무가 있는데 값이 없는</b> 경우. 위반 판정이 아니라 <b>사실 관측</b>이며, 최종 심의는 다음 단계 몫",
+     "요약표 '미표시'(빨강) / ② 표"),
+    ("해당없음", "이 상품·광고 유형에는 그 개념이 <b>원래 성립하지 않는</b> 경우(예: 적금에 대출한도). 확인할 필요 없다", "② 표 '상태'"),
+]
+
+
 def _pipeline_overview_html() -> str:
     """처음 보는 사람용 오리엔테이션 — 페이지 맨 위 고정. 접지 않는다.
 
     2026-08-04: 팀 공유 때 이 화면 하나로 "뭘 하는 시스템이고 어떻게 읽으면 되는지"가
     잡히게 해달라는 요청으로 추가. 외부 이미지·라이브러리 없이 순수 HTML/CSS 로만
     흐름도를 그린다(폐쇄망 제약과 동일한 이유).
+
+    같은 날 2차: 4칸 요약으로는 "중간에 무슨 일이 일어나는지"가 안 보인다는 지적을 받아
+    ①~⑮ 전 단계를 주체(코드/OCR/VLM) 딱지와 함께 펼쳤다. 이 화면으로 발표하므로
+    용어 사전도 같이 넣는다 — 화면에 찍히는 표기와 1:1로만 적는다.
     """
-    steps = [
-        ("0~1", "글자 획득", "PDF/PNG/HWP 에서 OCR·디지털 텍스트로 글자와 좌표를 뽑는다", False),
-        ("2", "구조 정리", "좌우 카드 구분, 영역별 역할(제목/유의사항 등) 판정", False),
-        ("3", "통합 판독", "OCR 이 놓친 글자를 VLM 이 재확인 — 정본은 안 덮어씀", False),
-        ("4", "스키마 추출", "상품명·금리 등 값 채우기 + 근거 위치 지목 (STAGE_3)", True),
-    ]
-    flow = "".join(
-        (f'<div class="flowarrow">→</div>' if i else "")
-        + f'<div class="flowstep{" highlight" if hi else ""}">'
-        f'<div class="fsno">{no}</div><div class="fstitle">{html.escape(title)}</div>'
-        f'<div class="fsdesc">{html.escape(desc)}</div></div>'
-        for i, (no, title, desc, hi) in enumerate(steps)
+    actor_legend = " ".join(
+        f'<span class="act {cls}">{lab}</span> {html.escape(desc)}'
+        for lab, cls, desc in _ACTOR_META.values()
     )
+    phases = []
+    for pno, ptitle, pdesc, steps in _PHASES:
+        rows = "".join(
+            f'<li><span class="stno">{sno}</span>'
+            f'<span class="stname">{html.escape(sname)}</span>'
+            f'<span class="act {_ACTOR_META[actor][1]}">{_ACTOR_META[actor][0]}</span>'
+            f'<span class="stdesc">{sdesc}</span></li>'
+            for sno, sname, actor, sdesc in steps
+        )
+        phases.append(
+            f'<div class="phase"><div class="phhead"><span class="phno">{pno}</span>'
+            f'{html.escape(ptitle)}<span class="phdesc">{html.escape(pdesc)}</span></div>'
+            f'<ul class="steps">{rows}</ul></div>'
+        )
+    _OUTPUTS = [
+        ("out/json", "전체 기록",
+         "파싱이 본 모든 것 — 라인마다 좌표·신뢰도·출처, 영역마다 역할·카드·후보판독, "
+         "페이지마다 판단 로그. <b>감사·재현용</b>이라 아무것도 버리지 않는다.",
+         "pages[].regions[].lines[] · unassigned_lines[] · notes[]", False),
+        ("out/llm_view", "정제 텍스트",
+         "좌표·신뢰도를 다 빼고 읽기순서 텍스트만 남긴 것. "
+         "<b>다음 단계(STAGE_3)에 실제로 들어가는 입력</b>이다.",
+         "pages[].regions[] : region_id · role · text · vlm_reading", False),
+        ("out/extracted", "구조화 필드",
+         "스키마 필드에 값·상태·근거를 채운 결과. 이 화면의 <b>② STAGE_3 표가 이 파일</b>이다.",
+         "fields{} · events[] · unmapped[] · coverage{}", True),
+    ]
     outputs = "".join(
-        f'<div class="outbox{" highlight" if hi else ""}"><b>{name}</b>{html.escape(desc)}</div>'
-        for name, desc, hi in [
-            ("out/json", "전체 기록 — 좌표·신뢰도·출처, 감사용", False),
-            ("out/llm_view", "정제 텍스트만 — 다음 단계(스키마 추출) 입력", False),
-            ("out/extracted", "구조화 필드 — 이 화면 STAGE_3 표가 이 값", True),
-        ]
+        f'<div class="outbox{" highlight" if hi else ""}"><b class="fname">{name}</b>'
+        f'<span class="of">{label}</span>{desc}<code>{html.escape(keys)}</code></div>'
+        for name, label, desc, keys, hi in _OUTPUTS
+    )
+    terms = "".join(
+        f'<tr><td class="tm">{t}</td><td class="td1">{d}</td><td class="tw">{w}</td></tr>'
+        for t, d, w in _TERMS
     )
     return (
         '<section class="pipeline-overview">'
@@ -727,16 +969,27 @@ def _pipeline_overview_html() -> str:
         '않습니다</b> — 값이 있는지, 없으면 왜 없는지(표시 의무 누락인지 / 이 상품 유형엔 '
         '원래 없는 개념인지)까지만 파악하고, 최종 판단은 규정과 대조하는 다음 단계 '
         '(RAG/DB 엔진 + 심의 담당자) 몫입니다.</p>'
-        f'<div class="flow">{flow}</div>'
-        '<div class="outputs-label">한 문서를 처리하면 산출물이 3개 나옵니다 — 목적이 서로 달라 합치지 않습니다</div>'
+        '<div class="ovhead">처리 단계 — 입력 1건이 아래 순서를 그대로 지나갑니다'
+        f'<span class="actlegend">{actor_legend}</span></div>'
+        f'<div class="phases">{"".join(phases)}</div>'
+        '<p class="howto"><b>이 배치가 원칙입니다</b> — <b>의미 판단은 모델이, 검산은 코드가</b> 합니다. '
+        '카드 개수는 픽셀 밀도가 세고(⑦), 낱줄 귀속은 좌표 게이트가 막고(⑨), 통독 후보는 관계 딱지로 '
+        '교차검증합니다(⑩). 반대로 코드가 규칙으로 값의 우열을 정하지는 않습니다(⑫). '
+        '그리고 <b>VLM 판독은 정본을 절대 덮지 않습니다</b> — 덮으면 같은 광고를 두 번 돌렸을 때 값이 달라져 '
+        '재현이 안 되기 때문입니다(실측: 역할 판정은 실행 간 97.3% 일치, 정본 텍스트·좌표는 100% 일치).</p>'
+        '<div class="ovhead">산출물 3개 — 목적이 서로 달라 합치지 않습니다</div>'
         f'<div class="outputs">{outputs}</div>'
         '<p class="howto"><b>이 화면 보는 법</b> — 문서마다 페이지별로 왼쪽엔 원본 이미지에 '
         '파싱이 잡은 위치를 <b>마젠타 박스</b>로 표시합니다(가는 선=한 줄, 굵은 선=여러 줄을 '
-        '묶은 한 영역 — 역할별 색은 안 씁니다, 모델 판단이라 실행마다 미세하게 바뀔 수 있어서). '
-        '오른쪽엔 그 페이지의 처리 결과가 <b>토글로 접혀서</b> 나열됩니다 — 제목을 누르면 펼쳐집니다. '
-        'STAGE_3 표에서 <b>found</b>=값 찾음, <b>not_found</b>=값 없음(정상일 수도 있음), '
-        '<b>미표시</b>=표시 의무가 있는데 없어서 확인이 필요한 값입니다. 표 행에 마우스를 올리면 '
-        '왼쪽 이미지에 그 값의 근거 위치가 하이라이트됩니다.</p>'
+        '묶은 한 영역). 박스 왼쪽 위 <b><code>r002 이미지</code></b> 라벨은 영역 ID와 역할이고, '
+        '위쪽 체크박스로 껐다 켤 수 있습니다 — 역할별 <b>색</b>은 쓰지 않습니다(모델 판단이라 '
+        '실행마다 미세하게 바뀔 수 있어 좌표 그림에 굽지 않습니다). '
+        '오른쪽엔 ①~⑤ 결과가 <b>토글로 접혀</b> 있고 제목을 누르면 펼쳐집니다. 접힌 상태에서도 '
+        '핵심 숫자와 <b>어느 산출물 파일에서 온 값인지</b>가 제목 줄에 적혀 있습니다.</p>'
+        f'<details class="toggle termswrap"><summary class="sechead">용어 사전 — 화면에 찍히는 표기'
+        '<span class="meta">발표·인수인계용. 이 표에 있는 말만 화면에 씁니다</span></summary>'
+        '<table class="terms"><thead><tr><th>표기</th><th>뜻</th><th>어디에 나오나</th></tr></thead>'
+        f'<tbody>{terms}</tbody></table></details>'
         '</section>'
     )
 
@@ -780,12 +1033,25 @@ def main() -> None:
         f'<span class="tag" style="background:{c}">{a}</span> {d}'
         for a, c, d in SOURCE_META.values()
     )
+    # 컬럼마다 뜻을 title 로 달고, 표 아래에 한 줄 해설을 붙인다 — 이 화면으로 발표한다(2026-08-04).
+    cols = [
+        ("파일", "문서 하나. 눌러서 아래 상세로 이동"),
+        ("페이지", "그 문서의 페이지 수"),
+        ("영역", "레이아웃 단위 개수(굵은 박스). 많다고 좋은 게 아니라 화면 구성에 따라 달라진다"),
+        ("라인", "잡은 글자 줄 수 = 영역에 붙은 줄 + 미배정 줄. 이 숫자가 '얼마나 읽었나'다"),
+        ("미배정", "어느 영역에도 못 붙은 줄 수. 낮을수록 좋다(글자는 전달되지만 근거 좌표를 지목 못 함)"),
+        ("found/not_found", "스키마 필드 중 값을 채운 개수 / 광고에서 못 찾은 개수. not_found 는 결함이 아니다"),
+        ("미표시", "표시 의무가 있는데 값이 없는 개수. 위반 판정이 아니라 확인이 필요하다는 관측"),
+    ]
+    head = "".join(f'<th title="{html.escape(d)}">{h}</th>' for h, d in cols)
     summary = (
-        '<div class="summary"><b>파일별 요약</b> — 각 항목을 눌러 아래 상세로 이동. '
-        '미배정↓ · found↑ · 미표시(표시의무 누락)는 실제로 확인할 가치가 있는 것만.'
-        '<table><thead><tr><th>파일</th><th>페이지</th><th>영역</th><th>라인</th>'
-        '<th>미배정</th><th>found/not_found</th><th>미표시</th></tr></thead>'
-        f'<tbody>{"".join(summary_rows)}</tbody></table></div>'
+        '<div class="summary"><b>파일별 요약</b> — 문서 이름을 누르면 아래 상세로 이동합니다.'
+        f'<table><thead><tr>{head}</tr></thead>'
+        f'<tbody>{"".join(summary_rows)}</tbody></table>'
+        '<p class="sumnote"><b>보는 방향</b> — <b>라인</b>은 많이 읽었을수록, <b>미배정</b>은 낮을수록, '
+        '<b>found</b>는 높을수록 좋습니다. <b>not_found 는 결함이 아닙니다</b>(광고에 원래 없는 값일 수 있음). '
+        '<b>미표시</b>(빨강)만 실제로 사람이 확인할 값이며, 이것도 <b>위반 판정이 아니라 사실 관측</b>입니다. '
+        '컬럼 제목에 마우스를 올리면 뜻이 나옵니다.</p></div>'
     )
 
     doc = (
