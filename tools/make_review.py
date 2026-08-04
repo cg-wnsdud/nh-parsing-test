@@ -181,31 +181,68 @@ def _rows_from_lines(lines: list[dict]) -> list[str]:
     return [" ".join(x.get("text", "") for x in row).strip() for row in rows]
 
 
-def _llm_view_html(page: dict) -> tuple[str, int]:
+def _llm_view_html(page: dict) -> tuple[str, int, int]:
     """최종 파싱 결과를 'LLM 전달 형태'로 렌더 — 실제 산출물과 같은 lean 투영을 쓴다.
 
     라이브러리 llm_view.build_page_view 를 단일 출처로 재사용(out/llm_view/*.json 과
     글자 그대로 동일). 2026-08-03 부터 섹션 계층이 없어 영역이 읽기순서(카드→위아래→
     좌우)로 평면 나열된다 — 장식예시 필터도 같은 시점에 없앴다(더는 걸러내지 않는다).
 
-    반환: (내용 html, 영역 개수) — 개수는 접힌 summary 에 표시한다.
+    2026-08-04: **통독 후보가 있는 영역은 그 자리에서 나란히 보여준다.** 예전에는 정본만
+    나열하고 후보 대조는 아래 별도 블록(③)에만 있었는데, ③은 위험한 것부터 재정렬해
+    보여주므로 "이 영역에 후보가 붙어 있었나"를 읽기순서대로 확인할 수 없었다. 여기서는
+    llm_view 에 실린 그대로(순서·필드 전부) 보여주는 것이 목적이므로 재정렬하지 않는다.
+
+    후보는 **영역 단위**다(라인 단위가 아니다) — llm_view 의 한 항목이 영역 하나이고
+    `text` 안에 줄바꿈으로 여러 줄이 들어간다. 라인 단위 후보(⑫⑬ 재판독)는 out/json 에만
+    있고 llm_view 로는 안 넘어간다.
+
+    반환: (내용 html, 영역 개수, 후보 있는 영역 수) — 뒤 둘은 접힌 summary 표시용.
     """
     from nh_parsing.ir import AdPage
     from nh_parsing.llm_view import build_page_view
 
     view = build_page_view(AdPage(**page))
-    parts = []
-    body_lines = [
-        f"  {r['region_id']} ({r.get('role', '')}): {html.escape(t)}"
-        for r in view["regions"] for t in r["text"].split("\n")
-    ]
-    if body_lines:
-        parts.append("<b>【영역 (읽기순서)】</b>\n" + "\n".join(body_lines))
+    blocks, n_cand = [], 0
+    for r in view["regions"]:
+        head = (
+            f'<div class="lvid"><b>{html.escape(r["region_id"])}</b>'
+            f'<span class="lvrole">{html.escape(str(r.get("role") or ""))}</span>'
+        )
+        text_html = html.escape(r["text"])
+        cand = (r.get("vlm_reading") or "").strip()
+        if not cand:
+            blocks.append(
+                f'<div class="lvrow">{head}</div>'
+                f'<pre class="lvtext">{text_html}</pre></div>'
+            )
+            continue
+        n_cand += 1
+        rel = r.get("vlm_reading_relation") or "same"
+        label, cls = _RELATION_VIEW.get(rel, ("판정 없음", "rel-ok"))
+        head += (
+            f'<span class="rel {cls}">{html.escape(label)}</span>'
+            f'<span class="meta">정밀도 {r.get("vlm_reading_score")} · '
+            f'커버리지 {r.get("vlm_reading_coverage")}</span></div>'
+        )
+        blocks.append(
+            f'<div class="lvrow cand">{head}'
+            f'<div class="lvcols">'
+            f'<div class="lvcol ocr"><div class="lvhd">text — OCR 정본 (이 값이 쓰인다)</div>'
+            f'<pre>{text_html}</pre></div>'
+            f'<div class="lvcol vlm"><div class="lvhd">vlm_reading — VLM 통독 후보</div>'
+            f'<pre>{html.escape(cand)}</pre></div>'
+            f'</div></div>'
+        )
+
     if view.get("unassigned"):
-        u = "\n".join("  " + html.escape(t) for t in view["unassigned"].split("\n"))
-        parts.append(f'<b>【영역 미배정 낱줄】</b>\n{u}')
-    text = "\n\n".join(parts) if parts else "(파싱 결과 없음)"
-    return f'<pre class="llmtext">{text}</pre>', len(view["regions"])
+        blocks.append(
+            '<div class="lvrow"><div class="lvid"><b>unassigned</b>'
+            '<span class="lvrole">영역 미배정 낱줄</span></div>'
+            f'<pre class="lvtext">{html.escape(view["unassigned"])}</pre></div>'
+        )
+    body = "".join(blocks) or '<p class="evidence-label">(파싱 결과 없음)</p>'
+    return f'<div class="llmview">{body}</div>', len(view["regions"]), n_cand
 
 
 # 판독 관계(truncation.classify_reading) → 검수화면 표시. 딱지와 색이 곧 우선순위다.
@@ -531,17 +568,22 @@ def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | No
         f'</div>'
     )
 
-    llmview_body, region_n = _llm_view_html(page)
+    llmview_body, region_n, cand_n = _llm_view_html(page)
     llmview = _details(
         f'① 최종 파싱 결과 (LLM 에 넘기는 형태)'
-        f'<span class="meta">영역 {region_n}개 · 읽기순서 정렬</span>'
-        + _src("out/llm_view/*.json", "pages[].regions[] : region_id · role · text"),
+        f'<span class="meta">영역 {region_n}개 · 읽기순서 정렬 · 통독 후보 {cand_n}개</span>'
+        + _src("out/llm_view/*.json",
+               "pages[].regions[] : region_id · role · text · vlm_reading"),
         _intro(
             '파싱의 <b>최종 산출물</b>입니다. 좌표·신뢰도 같은 기계 신호를 다 빼고 '
             '<b>읽는 순서</b>(카드 → 위→아래 → 좌→우)로 텍스트만 남긴 것이며, 다음 단계'
             '(STAGE_3 스키마 추출)에 이 글자가 그대로 들어갑니다. '
-            '<code>p1_r002 (이미지)</code> = 영역 ID + 그 영역의 역할이고, 왼쪽 그림의 '
-            '같은 이름 박스가 그 위치입니다.'
+            '<code>p1_r002</code> = 영역 ID, 옆의 <code>이미지</code> = 그 영역의 역할이고, '
+            '왼쪽 그림의 같은 이름 박스가 그 위치입니다. '
+            '<b>한 항목 = 영역 하나</b>이며(라인 단위가 아닙니다) 한 항목의 <code>text</code> 안에 '
+            '여러 줄이 줄바꿈으로 들어갑니다. VLM 통독 후보(<code>vlm_reading</code>)가 붙은 '
+            '영역은 <b>정본과 나란히</b> 보여줍니다 — 후보도 영역 단위이고, 라인 단위 재판독 '
+            '후보(⑫⑬)는 <code>out/json</code> 에만 있고 여기로는 넘어가지 않습니다.'
         ) + llmview_body, cls="llmviewwrap",
     )
 
@@ -651,6 +693,29 @@ header.top .legend .tag { margin-left: 10px; }
 .act-code { background:#eaecef; color:#424a53; }
 .act-paddle { background:#ddf4ff; color:#0550ae; }
 .act-vlm { background:#fbefff; color:#8250df; }
+/* 도식 — 인라인 SVG(폐쇄망: 외부 도식 라이브러리 금지). 좁은 화면에서는 가로 스크롤. */
+.svgwrap { overflow-x:auto; margin-bottom:10px; }
+svg.pipesvg { width:100%; min-width:1000px; height:auto; display:block; }
+svg.pipesvg text { font-family:'Malgun Gothic','Segoe UI',sans-serif; }
+svg.pipesvg .lanelbl { font-size:11.5px; font-weight:700; fill:#57606a; }
+svg.pipesvg .lanerule { stroke:#eaecef; stroke-width:1; }
+svg.pipesvg .bt { font-size:12px; font-weight:700; fill:#1f2328; }
+svg.pipesvg .bs { font-size:10px; fill:#57606a; }
+svg.pipesvg .arw { stroke:#57606a; stroke-width:1.4; fill:none; }
+svg.pipesvg .arw.dash { stroke:#8250df; stroke-dasharray:5 3; }
+svg.pipesvg .edgelbl { font-size:10px; fill:#8250df; }
+svg.pipesvg .edgebg { fill:#fff; }
+svg.pipesvg .bx rect { stroke-width:1.2; }
+svg.pipesvg .code rect { fill:#f6f8fa; stroke:#afb8c1; }
+svg.pipesvg .paddle rect { fill:#ddf4ff; stroke:#54aeff; }
+svg.pipesvg .vlm rect { fill:#faf0ff; stroke:#c297ff; }
+svg.pipesvg .out rect { fill:#f0fdf1; stroke:#4ac26b; }
+svg.pipesvg .io rect { fill:#fff; stroke:#8b949e; stroke-dasharray:4 3; }
+svg.pipesvg .note rect { fill:#fff8c5; stroke:#d4a72c; }
+svg.pipesvg .note .bt { fill:#7d4e00; }
+details.stepswrap { margin-bottom:14px; }
+details.stepswrap > summary { background:#f6f8fa; padding:6px 10px; font-size:12.5px; }
+details.stepswrap .phases { padding:10px; margin-bottom:0; }
 .phases { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; align-items:flex-start; }
 .phase { flex:1 1 300px; min-width:280px; border:1px solid #d0d7de; border-radius:6px; overflow:hidden; background:#fff; }
 .phhead { background:#f6f8fa; border-bottom:1px solid #d0d7de; padding:7px 10px; font-size:13px; font-weight:700; }
@@ -750,8 +815,21 @@ details.evidencewrap > summary, details.noteswrap > summary { background:#f6f8fa
 .pill.ok { background:#dafbe1; color:#116329; }
 .pill.warn { background:#fff8c5; color:#7d4e00; }
 .pill.bad { background:#ffebe9; color:#a40e26; }
-.llmtext { margin:0; padding:10px 12px; font-family:'Malgun Gothic','Segoe UI',sans-serif; font-size:13px; line-height:1.65; white-space:pre-wrap; word-break:break-word; background:#f7fbff; color:#1f2328; }
-.llmtext b { color:#0550ae; display:inline-block; margin-top:6px; }
+/* ① LLM 전달 형태 — 영역 하나가 한 행. 통독 후보가 있으면 그 자리에서 2단 대조. */
+.llmview { background:#f7fbff; padding:6px 8px; }
+.lvrow { border-top:1px solid #e3eefc; padding:5px 4px; }
+.lvrow:first-child { border-top:none; }
+.lvrow.cand { background:#fff; border:1px solid #c8e1ff; border-radius:5px; margin:5px 0; padding:6px 8px; }
+.lvid { font-size:11.5px; color:#57606a; display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; }
+.lvid b { color:#0550ae; font-family:Consolas,monospace; }
+.lvrole { background:#eaecef; color:#424a53; font-size:10px; padding:1px 6px; border-radius:8px; }
+.lvtext, .lvcol pre { margin:2px 0 0; font-family:'Malgun Gothic','Segoe UI',sans-serif; font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word; color:#1f2328; }
+.lvcols { display:flex; gap:8px; margin-top:4px; }
+.lvcol { flex:1; min-width:0; border:1px solid #eaecef; border-radius:4px; overflow:hidden; }
+.lvcol.ocr { border-color:#c8d7ff; }
+.lvcol.vlm { border-color:#d8b9ff; }
+.lvhd { font-size:9.5px; padding:2px 7px; background:#f6f8fa; color:#57606a; border-bottom:1px solid #eaecef; font-family:Consolas,monospace; }
+.lvcol pre { padding:4px 7px; font-size:12.5px; }
 .evidence-label { font-size:11px; color:#8b949e; margin:0 0 6px; }
 .cmprow { border-top:1px solid #d5eef2; padding:6px 10px; }
 .cmpid { font-size:12px; font-weight:600; color:#075e6b; margin-bottom:4px; }
@@ -910,6 +988,139 @@ _TERMS: list[tuple[str, str, str]] = [
 ]
 
 
+# 도식 — 텍스트 단계표(_PHASES)와 같은 내용을 그림으로. 순수 인라인 SVG 로 그린다:
+# 폐쇄망이라 외부 도식 라이브러리(mermaid 등)를 못 쓰고, PNG 로 굽는 것보다 SVG 가
+# 확대해도 안 깨지고 diff 도 된다. (id, 주체, 제목, 부제줄들, 폭) — id 는 특수 화살표
+# (structured 우회 / 미배정 되돌림)가 좌표를 찾을 때 쓴다.
+_LANES: list[tuple[str, list[tuple[str, str, str, list[str], int]]]] = [
+    ("0 라우팅", [
+        ("in", "io", "입력", ["PDF · PNG · HWP"], 130),
+        ("triage", "code", "⓿ 트리아지", ["디지털 텍스트를 믿을 수 있나", "structured / hybrid / scan_like"], 210),
+    ]),
+    ("1 글자 획득", [
+        ("tile", "code", "① 타일 분할", ["글자 없는 행에서 자른다"], 165),
+        ("ocr", "paddle", "② OCR + 레이아웃", ["글자·좌표·레이아웃 블록", "타일당 1회"], 185),
+        ("merge", "code", "③④ 좌표복원·병합", ["중복 제거 · 디지털 우선"], 185),
+        ("region", "code", "⑤ 영역 조립", ["블록에 라인 배정", "= 굵은 박스"], 165),
+    ]),
+    ("2 구조 정리", [
+        ("card", "vlm", "⑥⑦ 카드 배정", ["개수=밀도(코드)", "배정=VLM"], 165),
+        ("role", "vlm", "⑧ 역할 판정", ["제목·유의사항 등 9종", "= 박스 라벨 괄호"], 185),
+        ("absorb", "code", "⑨ 낱줄 귀속", ["포함 → 같은 칼럼 근접", "좌표만, VLM 없음"], 185),
+    ]),
+    ("3 통합 판독", [
+        ("band", "vlm", "⑩ 밴드 통독", ["OCR 과 같은 크롭으로", "교정 + 누락 회수"], 175),
+        ("sweep", "vlm", "⑪ 통짜 스윕", ["대형 장식 타이포"], 150),
+        ("reread", "vlm", "⑫⑬ 재판독", ["중복·저신뢰 라인"], 150),
+        ("keep", "note", "정본은 안 덮는다", ["후보(vlm_reading)로만 부착", "선택은 STAGE_3 몫"], 200),
+    ]),
+    ("4 정렬 · 산출물", [
+        ("sort", "code", "⑭ 읽기순서 정렬", ["카드 → 위아래 → 좌우", "라인 좌표 기준"], 175),
+        ("json", "out", "out/json", ["전체 기록 — 좌표·신뢰도", "출처·판단 로그 (감사용)"], 190),
+        ("view", "out", "out/llm_view", ["정제 텍스트 + 통독 후보", "= STAGE_3 입력"], 190),
+    ]),
+    ("5 스키마 추출", [
+        ("s3", "vlm", "STAGE_3 5그룹 호출", ["상품기본·금리·의무고지", "위험표현·이벤트"], 190),
+        ("absence", "code", "부재 4분류 · bbox 재부착", ["미표시/해당없음/확인필요", "/판정제외 — 모델 호출 0"], 210),
+        ("ext", "out", "out/extracted", ["값·상태·근거 필드"], 175),
+    ]),
+]
+
+_SVG_LANE_H = 108      # 레인 하나의 높이
+_SVG_BOX_H = 66
+_SVG_X0 = 118          # 레인 이름 칸 폭
+_SVG_GAP = 34          # 박스 사이 화살표 자리
+
+
+def _pipeline_svg() -> str:
+    """레인(단계) x 박스(세부단계) 도식. 특수 화살표 2개를 곡선으로 얹는다."""
+    pos: dict[str, tuple[float, float, float, float]] = {}   # id → (x, y, w, h)
+    body: list[str] = []
+    for li, (lane, boxes) in enumerate(_LANES):
+        cy = 30 + li * _SVG_LANE_H + _SVG_BOX_H / 2
+        top = cy - _SVG_BOX_H / 2
+        body.append(
+            f'<text class="lanelbl" x="8" y="{cy + 4:.0f}">{html.escape(lane)}</text>'
+            f'<line class="lanerule" x1="0" y1="{cy + _SVG_LANE_H / 2 - 4:.0f}" '
+            f'x2="1180" y2="{cy + _SVG_LANE_H / 2 - 4:.0f}"/>'
+        )
+        x = _SVG_X0
+        for bi, (bid, actor, title, subs, w) in enumerate(boxes):
+            if bi:
+                body.append(
+                    f'<path class="arw" d="M{x - _SVG_GAP + 4} {cy} H{x - 5}" marker-end="url(#ah)"/>'
+                )
+            pos[bid] = (x, top, w, _SVG_BOX_H)
+            sub_y = top + 36
+            subs_svg = "".join(
+                f'<text class="bs" x="{x + w / 2:.0f}" y="{sub_y + i * 13:.0f}" '
+                f'text-anchor="middle">{html.escape(s)}</text>'
+                for i, s in enumerate(subs)
+            )
+            body.append(
+                f'<g class="bx {actor}"><rect x="{x}" y="{top:.0f}" width="{w}" '
+                f'height="{_SVG_BOX_H}" rx="7"/>'
+                f'<text class="bt" x="{x + w / 2:.0f}" y="{top + 21:.0f}" '
+                f'text-anchor="middle">{html.escape(title)}</text>{subs_svg}</g>'
+            )
+            x += w + _SVG_GAP
+        # 레인 사이 연결: 마지막 박스 아래 → 다음 레인 첫 박스 위
+        if li + 1 < len(_LANES):
+            lx, _, lw, _h = pos[boxes[-1][0]]
+            from_x, from_y = lx + lw / 2, top + _SVG_BOX_H
+            to_x = _SVG_X0 + _LANES[li + 1][1][0][4] / 2
+            mid = from_y + (_SVG_LANE_H - _SVG_BOX_H) / 2
+            body.append(
+                f'<path class="arw" d="M{from_x:.0f} {from_y:.0f} V{mid:.0f} '
+                f'H{to_x:.0f} V{from_y + _SVG_LANE_H - _SVG_BOX_H - 5:.0f}" marker-end="url(#ah)"/>'
+            )
+
+    def edge_label(x: float, y: float, text: str) -> str:
+        """점선 위에 얹는 설명. 선이 글자를 관통하지 않게 흰 받침을 깐다(실측 겹침)."""
+        w = len(text) * 6.2 + 8
+        return (
+            f'<rect class="edgebg" x="{x - 4:.0f}" y="{y - 10:.0f}" width="{w:.0f}" height="13"/>'
+            f'<text class="edgelbl" x="{x:.0f}" y="{y:.0f}">{html.escape(text)}</text>'
+        )
+
+    # ㉠ structured 우회 — 디지털 텍스트가 정본이면 ①② 를 건너뛴다
+    tx, ty, tw, th = pos["triage"]
+    rx, ry, rw, _rh = pos["region"]
+    body.append(
+        f'<path class="arw dash" d="M{tx + tw} {ty + th / 2:.0f} H{rx + rw - 24:.0f} '
+        f'V{ry - 5:.0f}" marker-end="url(#ah2)"/>'
+        + edge_label(tx + tw + 10, ty + th / 2 - 6, "structured → OCR 생략 (디지털 텍스트가 정본)")
+    )
+    # ㉡ ⑤ 에서 남은 미배정 낱줄이 ⑨ 로 되돌아온다
+    ax, ay, aw, _ah = pos["absorb"]
+    loop_y = ry + _SVG_BOX_H + 17
+    body.append(
+        f'<path class="arw dash" d="M{rx + 24} {ry + _SVG_BOX_H} V{loop_y:.0f} '
+        f'H{ax + aw / 2:.0f} V{ay - 5:.0f}" marker-end="url(#ah2)"/>'
+        + edge_label(rx + 34, loop_y + 4, "⑤ 에서 어느 영역에도 못 붙은 미배정 낱줄")
+    )
+
+    legend = "".join(
+        f'<g class="bx {a}"><rect x="{118 + i * 150}" y="668" width="18" height="12" rx="3"/></g>'
+        f'<text class="edgelbl" x="{140 + i * 150}" y="678">{lab}</text>'
+        for i, (a, lab) in enumerate(
+            [("code", "순수 코드"), ("paddle", "PaddleX OCR"), ("vlm", "Gemma VLM"),
+             ("out", "산출물 파일"), ("io", "입·출력")]
+        )
+    )
+    return (
+        '<svg class="pipesvg" viewBox="0 0 1190 692" role="img" '
+        'aria-label="파싱 파이프라인 처리 단계 도식">'
+        '<defs>'
+        '<marker id="ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" '
+        'orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#57606a"/></marker>'
+        '<marker id="ah2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" '
+        'orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#8250df"/></marker>'
+        '</defs>'
+        f'{"".join(body)}{legend}</svg>'
+    )
+
+
 def _pipeline_overview_html() -> str:
     """처음 보는 사람용 오리엔테이션 — 페이지 맨 위 고정. 접지 않는다.
 
@@ -971,7 +1182,10 @@ def _pipeline_overview_html() -> str:
         '(RAG/DB 엔진 + 심의 담당자) 몫입니다.</p>'
         '<div class="ovhead">처리 단계 — 입력 1건이 아래 순서를 그대로 지나갑니다'
         f'<span class="actlegend">{actor_legend}</span></div>'
-        f'<div class="phases">{"".join(phases)}</div>'
+        f'<div class="svgwrap">{_pipeline_svg()}</div>'
+        '<details class="toggle stepswrap"><summary class="sechead">단계별 설명 (글로 보기)'
+        '<span class="meta">위 그림의 각 상자가 왜 필요한지 · 실측 근거</span></summary>'
+        f'<div class="phases">{"".join(phases)}</div></details>'
         '<p class="howto"><b>이 배치가 원칙입니다</b> — <b>의미 판단은 모델이, 검산은 코드가</b> 합니다. '
         '카드 개수는 픽셀 밀도가 세고(⑦), 낱줄 귀속은 좌표 게이트가 막고(⑨), 통독 후보는 관계 딱지로 '
         '교차검증합니다(⑩). 반대로 코드가 규칙으로 값의 우열을 정하지는 않습니다(⑫). '
