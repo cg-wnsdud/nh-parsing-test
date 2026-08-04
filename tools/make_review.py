@@ -15,6 +15,14 @@ AdPageIR JSON 은 수천 줄이라 "어디까지 잡혔나"를 눈으로 확인�
 - 이미지는 base64 로 내장 → 단일 HTML 파일(자체완결). 브라우저로 바로 열면 됨.
 - 폐쇄망 고려: 외부 리소스·업로드 없음(로컬 파일만 생성).
 
+2026-08-04: 처음 보는 사람도 훑어볼 수 있게 두 가지를 더했다.
+- 페이지 맨 위 **파이프라인 개요**(무엇을 하는지 + 4단계 흐름 + 3산출물 + 화면 읽는 법).
+  회의·공유 때 이 화면 하나로 전체 그림이 잡히게 하는 것이 목적.
+- 문서별 상세 블록(파싱 결과·STAGE_3 표·OCR/VLM 대조·감사용 원본 증거층·판단 로그)을
+  `<details>`로 접었다. 라이브러리 없이 브라우저 내장 토글만 쓴다(폐쇄망 제약과 같은
+  이유로 외부 JS 라이브러리 금지). 문서 5개를 한 화면에 다 펴두면 스크롤이 수천 px가
+  되어 "전체 그림"이 오히려 안 보였다.
+
 사용:
   uv run python tools/make_review.py                # 전체 → out/review.html
   uv run python tools/make_review.py --only 003     # 파일명 부분 일치
@@ -34,15 +42,17 @@ from nh_parsing.ir import Line              # noqa: E402
 from nh_parsing.tiling import sort_reading_order  # noqa: E402
 
 
-def _sorted_section_lines(regs: list[dict]) -> list[dict]:
-    """섹션의 모든 영역 라인을 모아 국소 읽기순서 재정렬 (영역 간 순서 교정).
+def _details(summary_html: str, body_html: str, cls: str = "", open_: bool = False) -> str:
+    """`<details>` 토글 래퍼 — 라이브러리 없이 브라우저 내장 기능만 쓴다.
 
-    영역별 bbox 로 나열하면 상단 y 가 같은 영역들이 x 로 뒤집힌다(올원 실측).
-    섹션 범위로 모아 정렬하면 실제 라인 위치대로 읽힌다.
+    문서 5개를 전부 펴서 그리면 스크롤이 수천 px 가 되어 "전체 그림"이 안 보인다
+    (2026-08-04). summary 에는 접힌 채로도 판단할 수 있게 핵심 숫자를 넣는다.
     """
-    lines = [l for r in regs for l in r.get("lines", [])]
-    ordered = sort_reading_order([Line(**l) for l in lines])
-    return [o.model_dump() for o in ordered]
+    return (
+        f'<details class="toggle {cls}"{" open" if open_ else ""}>'
+        f'<summary class="sechead">{summary_html}</summary>{body_html}</details>'
+    )
+
 
 # 출처 태그 → (약어, 색, 설명)
 SOURCE_META = {
@@ -54,53 +64,70 @@ SOURCE_META = {
 }
 
 
-def _section_blocks(page: dict):
-    """페이지를 (제목, 영역목록) 시퀀스로 — 묶음(카드) → 섹션 → 영역 순.
+def _region_evidence_html(page: dict) -> tuple[str, int, int]:
+    """감사용 원본 증거층 — 영역별 라인(출처·신뢰도 태그)을 읽기순서로 평면 나열.
 
-    dump_text._section_blocks 와 동일 규칙(재사용). 섹션 메타도 함께 반환한다.
+    2026-08-04: 섹션(의미 묶음) 기반 트리를 없앴다. `page["sections"]` 가 항상 빈
+    리스트라(섹션 생성 자체를 파싱에서 제거, vlm_judge 모듈 주석 참조) 예전 렌더러는
+    모든 영역이 "섹션 미지정" 단일 버킷으로 몰려 QA 지표로 쓸모가 없었다. 정렬 규칙은
+    llm_view.build_page_view 와 동일(카드 → 위→아래 → 좌→우) — 화면에 보이는 순서가
+    실제 STAGE_3 입력 순서와 일치해야 눈으로 대조할 수 있다.
+
+    미배정 낱줄도 같은 블록 끝에 붙인다(2026-08-04, 예전엔 별도 블록) — 토글 하나로
+    "이 페이지에서 진짜 파싱이 잡은 전부"를 한 번에 펼쳐보게 한다.
+
+    반환: (html, 영역 개수, 미배정 줄 수) — 뒤 둘은 접힌 summary 표시용.
     """
-    regions = {r["region_id"]: r for r in page.get("regions", [])}
-    sections = page.get("sections", [])
-
-    def sec_y(s: dict) -> int:
-        return s["bbox"][1] if s.get("bbox") else (1 << 30)
-
+    ordered = sorted(
+        page.get("regions", []),
+        key=lambda r: (
+            r.get("card_no") or 0,
+            r["bbox"][1] if r.get("bbox") else 0,
+            r["bbox"][0] if r.get("bbox") else 0,
+        ),
+    )
     blocks = []
-    used: set[str] = set()
-    for s in sorted(sections, key=lambda s: (s.get("group_no") or 0, sec_y(s))):
-        regs = [regions[rid] for rid in s.get("region_ids", []) if rid in regions]
-        regs.sort(key=lambda r: (r["bbox"][1], r["bbox"][0]) if r.get("bbox") else (0, 0))
-        used.update(r["region_id"] for r in regs)
-        blocks.append((s, regs))
+    for r in ordered:
+        raw = r.get("lines", [])
+        lines = sort_reading_order([Line(**l) for l in raw]) if len(raw) > 1 else [Line(**l) for l in raw]
+        line_html = "".join(_line_html(l.model_dump()) for l in lines) or '<div class="line empty">(텍스트 없음)</div>'
+        meta_bits = [f"역할 {html.escape(str(r.get('role', '')))}"]
+        if r.get("role_confidence") is not None:
+            meta_bits.append(f"conf {r['role_confidence']}")
+        if r.get("card_no"):
+            meta_bits.append(f"카드{r['card_no']}")
+        if r.get("bbox"):
+            meta_bits.append(f"bbox {r['bbox']}")
+        head = (
+            f'<div class="sechead"><b>{html.escape(r["region_id"])}</b>'
+            f'<span class="meta">{" · ".join(meta_bits)}</span></div>'
+        )
+        blocks.append(f'<div class="sec">{head}{line_html}</div>')
 
-    leftovers = [r for r in page.get("regions", []) if r["region_id"] not in used]
-    if leftovers:
-        leftovers.sort(key=lambda r: (r["bbox"][1], r["bbox"][0]) if r.get("bbox") else (0, 0))
-        blocks.append((None, leftovers))  # 섹션 미지정
-    return blocks
+    unassigned = page.get("unassigned_lines", [])
+    if unassigned:
+        u_html = "".join(_line_html(l) for l in unassigned)
+        blocks.append(
+            '<div class="sec unassigned">'
+            f'<div class="sechead bad">⚠ 미배정 — 어느 영역에도 귀속 안 됨 ({len(unassigned)}줄)</div>'
+            f'{u_html}</div>'
+        )
+    return ("".join(blocks) or '<p class="evidence-label">(영역 없음)</p>'), len(ordered), len(unassigned)
 
 
 def _page_stats(page: dict) -> dict:
     regions = page.get("regions", [])
-    in_section_ids = {rid for s in page.get("sections", []) for rid in s.get("region_ids", [])}
-    sec_lines = sum(len(r.get("lines", [])) for r in regions if r["region_id"] in in_section_ids)
-    free_lines = sum(len(r.get("lines", [])) for r in regions if r["region_id"] not in in_section_ids)
+    total_lines = sum(len(r.get("lines", [])) for r in regions)
     unassigned = len(page.get("unassigned_lines", []))
-    illus = sum(len(r.get("lines", [])) for r in regions if r.get("is_illustrative"))
     low_conf = 0
     for r in regions:
-        if r.get("is_illustrative"):
-            continue  # 예시/장식은 저신뢰 집계에서 제외 (심의 무관)
         for l in r.get("lines", []):
             c = l.get("confidence")
             if c is not None and c < 0.8:
                 low_conf += 1
-    total = sec_lines + free_lines + unassigned
     return {
-        "total": total, "sec": sec_lines, "free": free_lines,
-        "unassigned": unassigned, "low_conf": low_conf, "illus": illus,
-        "sections": len(page.get("sections", [])),
-        "fields": len(page.get("extracted_fields", [])),
+        "regions": len(regions), "total": total_lines + unassigned,
+        "unassigned": unassigned, "low_conf": low_conf,
     }
 
 
@@ -143,18 +170,20 @@ def _rows_from_lines(lines: list[dict]) -> list[str]:
     return [" ".join(x.get("text", "") for x in row).strip() for row in rows]
 
 
-def _llm_view_html(page: dict) -> str:
+def _llm_view_html(page: dict) -> tuple[str, int]:
     """최종 파싱 결과를 'LLM 전달 형태'로 렌더 — 실제 산출물과 같은 lean 투영을 쓴다.
 
     라이브러리 llm_view.build_page_view 를 단일 출처로 재사용(out/llm_view/*.json 과
-    글자 그대로 동일). 장식예시는 build_page_view 가 이미 제외하므로 여기에도 안 나온다.
+    글자 그대로 동일). 2026-08-03 부터 섹션 계층이 없어 영역이 읽기순서(카드→위아래→
+    좌우)로 평면 나열된다 — 장식예시 필터도 같은 시점에 없앴다(더는 걸러내지 않는다).
+
+    반환: (내용 html, 영역 개수) — 개수는 접힌 summary 에 표시한다.
     """
     from nh_parsing.ir import AdPage
     from nh_parsing.llm_view import build_page_view
 
     view = build_page_view(AdPage(**page))
     parts = []
-    # 섹션 계층 제거(2026-08-03) — 영역이 읽기순서로 평면 나열된다.
     body_lines = [
         f"  {r['region_id']} ({r.get('role', '')}): {html.escape(t)}"
         for r in view["regions"] for t in r["text"].split("\n")
@@ -165,13 +194,7 @@ def _llm_view_html(page: dict) -> str:
         u = "\n".join("  " + html.escape(t) for t in view["unassigned"].split("\n"))
         parts.append(f'<b>【영역 미배정 낱줄】</b>\n{u}')
     text = "\n\n".join(parts) if parts else "(파싱 결과 없음)"
-    return (
-        '<div class="llmview">'
-        '<div class="sechead">최종 파싱 결과 · LLM 전달 형태'
-        '<span class="meta">읽기순서 정렬 · bbox/신뢰도/출처 제외 · out/llm_view/*.json 과 동일</span>'
-        '</div>'
-        f'<pre class="llmtext">{text}</pre></div>'
-    )
+    return f'<pre class="llmtext">{text}</pre>', len(view["regions"])
 
 
 # 판독 관계(truncation.classify_reading) → 검수화면 표시. 딱지와 색이 곧 우선순위다.
@@ -224,14 +247,13 @@ def _region_vlm_compare_html(page: dict) -> str:
         return ""
     rows.sort(key=lambda x: x[0])
     bad = sum(1 for o, _ in rows if o == 0)
-    return (
-        '<div class="regcmp">'
-        '<div class="sechead">OCR 정본 ↔ VLM 통독 후보 대조'
-        f'<span class="meta">갈린 영역 {len(rows)}개 (그중 확인 필요 {bad}개). '
+    summary = (
+        f'OCR 정본 ↔ VLM 통독 후보 대조'
+        f'<span class="meta">갈린 영역 {len(rows)}개 (그중 확인 필요 {bad}개) · '
         '정본은 안 덮어쓴다 — 최종 선택은 STAGE_3 몫</span>'
-        '</div>'
-        + "".join(h for _, h in rows) + '</div>'
     )
+    body = '<div class="regcmp">' + "".join(h for _, h in rows) + '</div>'
+    return _details(summary, body, cls="regcmpwrap")
 
 
 def _load_extracted(extracted_dir: Path, doc_id: str) -> dict | None:
@@ -320,6 +342,7 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
         "확인필요": ("warn", "확인필요"),
     }
     any_row = False
+    counts = {"ok": 0, "na": 0, "warn": 0, "miss": 0}
     for key, v in (extracted.get("fields") or {}).items():
         ev = v.get("evidence") or []
         on_this_page = any(rid.startswith(prefix) for rid in ev)
@@ -330,6 +353,7 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
             if not (v.get("status") == "not_found" and is_first_page):
                 continue
         cls, label = _status_label(v, status_meta, absence_meta)
+        counts[cls] = counts.get(cls, 0) + 1
         has_box = add_overlay(key, ev, f"st-{'bad' if cls == 'miss' else cls}")
         val = v.get("value")
         val_txt = " | ".join(val) if isinstance(val, list) else str(val or "")
@@ -352,6 +376,7 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
                 continue
             gkey = f"event{i}.{key}"
             cls, label = _status_label(v, status_meta, absence_meta)
+            counts[cls] = counts.get(cls, 0) + 1
             has_box = add_overlay(gkey, ev, f"st-{'bad' if cls == 'miss' else cls}")
             val = v.get("value")
             val_txt = " | ".join(val) if isinstance(val, list) else str(val or "")
@@ -385,11 +410,6 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
         return "", ""
 
     parts = [
-        '<div class="stage3">',
-        '<div class="sechead">STAGE_3 스키마 추출 결과',
-        '<span class="meta">행에 마우스를 올리면 왼쪽 이미지에 근거 영역이 표시됩니다 · '
-        f'스키마={html.escape(str(extracted.get("schema_id")))} · '
-        f'근거커버리지={extracted.get("coverage",{}).get("region_coverage")}</span></div>',
         '<table class="stage3tbl"><thead><tr><th>필드</th><th>값</th><th>상태</th><th>비고</th></tr></thead><tbody>',
         "".join(rows),
     ]
@@ -399,8 +419,17 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
     if unmapped_rows:
         parts.append('<tr class="grouphead"><td colspan="4">미배정(스키마 공백 후보 포함)</td></tr>')
         parts.append("".join(unmapped_rows))
-    parts.append("</tbody></table></div>")
-    return "".join(parts), "".join(overlay_divs)
+    parts.append("</tbody></table>")
+
+    summary = (
+        f'STAGE_3 스키마 추출 결과'
+        f'<span class="meta">있음 {counts["ok"]} · 없음 {counts["na"]} · '
+        f'확신낮음 {counts["warn"]} · <b class="miss-inline">미표시 {counts["miss"]}</b> · '
+        f'근거커버리지={extracted.get("coverage", {}).get("region_coverage")} · '
+        f'행에 마우스를 올리면 왼쪽 이미지에 근거 영역이 표시됩니다</span>'
+    )
+    body = f'<div class="stage3">{"".join(parts)}</div>'
+    return _details(summary, body, cls="stage3wrap", open_=True), "".join(overlay_divs)
 
 
 def _img_data_uri(path: Path) -> str | None:
@@ -431,19 +460,24 @@ def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | No
         if triage.get("reasons"):
             triage_txt += f' ({html.escape("; ".join(triage["reasons"]))})'
 
-    # 커버리지 요약 막대
+    # 커버리지 요약 막대 — 항상 보이는 한 줄. 상세는 아래 토글에서.
     cov = (
         f'<div class="cov">'
-        f'<span class="pill ok">섹션 귀속 {st["sec"]}줄</span>'
-        f'<span class="pill warn">섹션 미지정 {st["free"]}줄</span>'
-        f'<span class="pill bad">미배정 {st["unassigned"]}줄</span>'
-        f'<span class="pill">저신뢰(&lt;0.8) {st["low_conf"]}줄</span>'
-        f'<span class="pill illus">예시/장식 {st["illus"]}줄(심의제외)</span>'
-        f'<span class="pill">섹션 {st["sections"]}개 · 필드 {st["fields"]}개</span>'
+        f'<span class="pill">영역 {st["regions"]}개</span>'
+        f'<span class="pill">라인 {st["total"]}줄</span>'
+        f'<span class="pill{" bad" if st["unassigned"] else ""}">미배정 {st["unassigned"]}줄</span>'
+        f'<span class="pill{" warn" if st["low_conf"] else ""}">저신뢰(&lt;0.8) {st["low_conf"]}줄</span>'
         f'</div>'
     )
 
-    parts = [cov, _llm_view_html(page)]
+    llmview_body, region_n = _llm_view_html(page)
+    llmview = _details(
+        f'최종 파싱 결과 · LLM 전달 형태'
+        f'<span class="meta">영역 {region_n}개 · 읽기순서 정렬 · out/llm_view/*.json 과 동일</span>',
+        llmview_body, cls="llmviewwrap",
+    )
+
+    parts = [cov, llmview]
     if stage3_table:
         parts.append(stage3_table)
 
@@ -452,73 +486,23 @@ def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | No
     if regcmp:
         parts.append(regcmp)
 
-    # 섹션 트리 (감사용 원본 증거층 — 출처/신뢰도 태그 포함)
-    parts.append('<p class="evidence-label">▼ 아래는 감사용 원본 증거층 (출처·신뢰도 태그 포함, 교정 전 raw 라인)</p>')
-    for sec, regs in _section_blocks(page):
-        sec_lines = _sorted_section_lines(regs)
-        line_count = len(sec_lines)
-        illus = bool(sec and sec.get("is_illustrative"))
-        if sec is None:
-            head = '<div class="sechead free">섹션 미지정 영역</div>'
-        else:
-            grp = f'묶음{sec["group_no"]} · ' if sec.get("group_no") else ""
-            conf = sec.get("confidence")
-            conf_b = f' · conf {conf}' if conf is not None else ""
-            bbox = sec.get("bbox")
-            bbox_b = f' · bbox {bbox}' if bbox else ""
-            badge = '<span class="ibadge">예시·장식 · 심의제외</span>' if illus else ""
-            head = (
-                f'<div class="sechead{" illus" if illus else ""}">'
-                f'<b>{html.escape(grp)}{html.escape(sec["section_type"])}#{sec["section_no"]}</b>{badge}'
-                f'<span class="meta">{line_count}줄{conf_b}{bbox_b}</span>'
-                f'</div>'
-            )
-        lines = "".join(
-            _line_html(l) for l in sec_lines
-        ) or '<div class="line empty">(텍스트 없음)</div>'
-        parts.append(f'<div class="sec{" illus" if illus else ""}">{head}{lines}</div>')
-
-    # 미배정 라인 (강조)
-    unassigned = page.get("unassigned_lines", [])
-    if unassigned:
-        lines = "".join(_line_html(l) for l in unassigned)
-        parts.append(
-            f'<div class="sec unassigned">'
-            f'<div class="sechead bad">⚠ 미배정 — 어느 섹션에도 귀속 안 됨 ({len(unassigned)}줄)</div>'
-            f'{lines}</div>'
-        )
-
-    # 필드 표
-    fields = page.get("extracted_fields", [])
-    if fields:
-        rows = []
-        for f in fields:
-            flags = []
-            if f.get("extractor"):
-                flags.append(html.escape(str(f["extractor"])))
-            if f.get("ocr_backed") is False:
-                flags.append('<span class="flag bad">ocr_backed=False</span>')
-            if f.get("crop_verified"):
-                flags.append('<span class="flag ok">crop_verified</span>')
-            if f.get("obs_count"):
-                flags.append(f'obs×{f["obs_count"]}')
-            rows.append(
-                f'<tr><td class="k">{html.escape(f["key"])}</td>'
-                f'<td class="v">{html.escape(str(f["value"]))}</td>'
-                f'<td class="fl">{" · ".join(flags)}</td></tr>'
-            )
-        parts.append(
-            f'<div class="fields"><div class="sechead">최종 추출 필드 · 구조화 결과 ({len(fields)}개) '
-            f'<span class="meta">수치 재확인·복수관측 병합 반영된 정답값</span></div>'
-            f'<table><thead><tr><th>key</th><th>value</th><th>신뢰 신호</th></tr></thead>'
-            f'<tbody>{"".join(rows)}</tbody></table></div>'
-        )
+    # 감사용 원본 증거층 (영역별 raw 라인, 출처·신뢰도 태그 포함 + 미배정)
+    evidence_body, ev_region_n, ev_unassigned_n = _region_evidence_html(page)
+    unassigned_note = f" · 미배정 {ev_unassigned_n}줄" if ev_unassigned_n else ""
+    parts.append(_details(
+        f'감사용 원본 증거층'
+        f'<span class="meta">영역 {ev_region_n}개{unassigned_note} · 출처·신뢰도 태그 포함, 교정 전 raw 라인</span>',
+        evidence_body, cls="evidencewrap",
+    ))
 
     # 노트
     notes = page.get("notes", [])
     if notes:
         items = "".join(f"<li>{html.escape(n)}</li>" for n in notes)
-        parts.append(f'<div class="notes"><div class="sechead">파이프라인 판단 로그 (notes)</div><ul>{items}</ul></div>')
+        parts.append(_details(
+            f'파이프라인 판단 로그<span class="meta">{len(notes)}건</span>',
+            f'<div class="notes"><ul>{items}</ul></div>', cls="noteswrap",
+        ))
 
     return (
         f'<div class="page">'
@@ -538,11 +522,15 @@ def _doc_html(parsed: dict, preview_dir: Path, extracted_dir: Path) -> tuple[str
     pages_html = "".join(
         _page_html(parsed, p, preview_dir, extracted) for p in parsed.get("pages", [])
     )
-    agg = {"pages": len(parsed.get("pages", [])), "sec": 0, "free": 0, "unassigned": 0, "fields": 0}
+    agg = {"pages": len(parsed.get("pages", [])), "regions": 0, "lines": 0, "unassigned": 0}
     for p in parsed.get("pages", []):
         st = _page_stats(p)
-        agg["sec"] += st["sec"]; agg["free"] += st["free"]
-        agg["unassigned"] += st["unassigned"]; agg["fields"] += st["fields"]
+        agg["regions"] += st["regions"]; agg["lines"] += st["total"]
+        agg["unassigned"] += st["unassigned"]
+    cov = (extracted or {}).get("coverage") or {}
+    agg["found"] = cov.get("fields_found")
+    agg["not_found"] = cov.get("fields_not_found")
+    agg["miss"] = (cov.get("absence_missing") or 0) + (cov.get("absence_missing_in_events") or 0)
     badge = (
         f'{html.escape(str(parsed.get("product_group")))}/'
         f'{html.escape(str(parsed.get("ad_type")))}'
@@ -563,7 +551,25 @@ header.top h1 { margin: 0 0 4px; font-size: 18px; }
 header.top .legend { font-size: 12px; color: #9da7b3; }
 header.top .legend .tag { margin-left: 10px; }
 .wrap { padding: 20px 24px 80px; max-width: 1600px; margin: 0 auto; }
+.pipeline-overview { background:#fff; border:1px solid #d0d7de; border-radius:8px; padding:18px 22px; margin-bottom:20px; }
+.pipeline-overview h2 { margin:0 0 8px; font-size:16px; }
+.pipeline-overview > p { margin:0 0 16px; font-size:13px; color:#57606a; line-height:1.65; }
+.flow { display:flex; align-items:stretch; gap:0; margin-bottom:16px; flex-wrap:wrap; }
+.flowstep { flex:1; min-width:150px; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:10px 12px; }
+.flowstep.highlight { background:#e6f4e6; border-color:#1a7f37; }
+.fsno { font-size:10px; font-weight:700; color:#8b949e; margin-bottom:2px; }
+.fstitle { font-weight:700; font-size:13px; color:#0550ae; margin-bottom:4px; }
+.flowstep.highlight .fstitle { color:#116329; }
+.fsdesc { font-size:11.5px; color:#57606a; line-height:1.5; }
+.flowarrow { display:flex; align-items:center; justify-content:center; padding:0 8px; color:#8b949e; font-size:16px; flex:0 0 auto; }
+.outputs-label { font-size:12px; color:#57606a; margin-bottom:8px; }
+.outputs { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+.outbox { flex:1; min-width:180px; border:1px solid #eaecef; border-radius:6px; padding:8px 12px; font-size:12px; color:#57606a; background:#fafbfc; }
+.outbox.highlight { border-color:#1a7f37; background:#f0fdf1; }
+.outbox b { display:block; color:#1f2328; font-size:13px; margin-bottom:2px; }
+.howto { font-size:12px; color:#57606a; line-height:1.75; background:#f6f8fa; border-radius:6px; padding:10px 14px; margin:0; }
 .summary { background:#fff; border:1px solid #d0d7de; border-radius:8px; padding:12px 16px; margin-bottom:24px; }
+.summary .warncell { color:#a40e26; font-weight:600; }
 .summary table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .summary th, .summary td { border-bottom:1px solid #eaecef; padding:6px 10px; text-align:left; }
 .summary th { color:#57606a; font-weight:600; }
@@ -585,8 +591,20 @@ h2 { font-size: 17px; border-bottom: 2px solid #d0d7de; padding-bottom: 8px; }
 .hlbox.st-warn { border-color:#9a6700; background:rgba(154,103,0,0.18); }
 .hlbox.st-bad { border-color:#cf222e; background:rgba(207,34,46,0.18); }
 .hlbox.st-muted { border-color:#57606a; background:rgba(87,96,106,0.16); }
-.stage3 { margin-bottom:16px; border:1px solid #c6e6c6; border-radius:6px; overflow:hidden; }
-.stage3 .sechead { background:#e6f4e6; color:#116329; display:block; }
+details.toggle { margin-bottom:14px; border:1px solid #eaecef; border-radius:6px; overflow:hidden; }
+details.toggle > summary { cursor:pointer; list-style:none; }
+details.toggle > summary::-webkit-details-marker { display:none; }
+details.toggle > summary::before { content:'▸ '; color:#8b949e; font-size:11px; }
+details.toggle[open] > summary::before { content:'▾ '; }
+details.toggle > summary:hover { filter:brightness(0.97); }
+details.stage3wrap { border-color:#c6e6c6; }
+details.stage3wrap > summary { background:#e6f4e6; color:#116329; }
+details.stage3wrap .miss-inline { color:#a40e26; }
+details.llmviewwrap { border-color:#c8e1ff; }
+details.llmviewwrap > summary { background:#ddf4ff; color:#0550ae; }
+details.regcmpwrap { border-color:#7fd4e0; }
+details.regcmpwrap > summary { background:#e0f7fb; color:#075e6b; }
+details.evidencewrap > summary, details.noteswrap > summary { background:#f6f8fa; color:#1f2328; }
 .stage3tbl { border-collapse:collapse; width:100%; font-size:12.5px; }
 .stage3tbl th, .stage3tbl td { border:1px solid #eaecef; padding:5px 8px; text-align:left; vertical-align:top; }
 .stage3tbl th { background:#f6f8fa; color:#57606a; }
@@ -609,13 +627,9 @@ h2 { font-size: 17px; border-bottom: 2px solid #d0d7de; padding-bottom: 8px; }
 .pill.ok { background:#dafbe1; color:#116329; }
 .pill.warn { background:#fff8c5; color:#7d4e00; }
 .pill.bad { background:#ffebe9; color:#a40e26; }
-.llmview { margin-bottom:16px; border:1px solid #c8e1ff; border-radius:6px; overflow:hidden; }
-.llmview .sechead { background:#ddf4ff; color:#0550ae; display:block; }
 .llmtext { margin:0; padding:10px 12px; font-family:'Malgun Gothic','Segoe UI',sans-serif; font-size:13px; line-height:1.65; white-space:pre-wrap; word-break:break-word; background:#f7fbff; color:#1f2328; }
 .llmtext b { color:#0550ae; display:inline-block; margin-top:6px; }
 .evidence-label { font-size:11px; color:#8b949e; margin:0 0 6px; }
-.regcmp { margin-bottom:16px; border:1px solid #7fd4e0; border-radius:6px; overflow:hidden; }
-.regcmp .sechead { background:#e0f7fb; color:#075e6b; display:block; }
 .cmprow { border-top:1px solid #d5eef2; padding:6px 10px; }
 .cmpid { font-size:12px; font-weight:600; color:#075e6b; margin-bottom:4px; }
 .rel { font-size:10px; font-weight:700; padding:1px 6px; border-radius:9px; }
@@ -654,8 +668,8 @@ h2 { font-size: 17px; border-bottom: 2px solid #d0d7de; padding-bottom: 8px; }
 .fields .fl { font-size:11px; color:#8b949e; }
 .flag.bad { color:#a40e26; }
 .flag.ok { color:#116329; }
-.notes { margin-top:14px; }
-.notes ul { margin:6px 0 0; padding-left:20px; font-size:12px; color:#57606a; }
+.notes { padding:8px 12px 2px; }
+.notes ul { margin:0; padding-left:20px; font-size:12px; color:#57606a; }
 .notes li { margin:2px 0; }
 """
 
@@ -675,6 +689,56 @@ document.querySelectorAll('.stage3tbl tr.hoverable').forEach(function(row) {
   });
 });
 """
+
+
+def _pipeline_overview_html() -> str:
+    """처음 보는 사람용 오리엔테이션 — 페이지 맨 위 고정. 접지 않는다.
+
+    2026-08-04: 팀 공유 때 이 화면 하나로 "뭘 하는 시스템이고 어떻게 읽으면 되는지"가
+    잡히게 해달라는 요청으로 추가. 외부 이미지·라이브러리 없이 순수 HTML/CSS 로만
+    흐름도를 그린다(폐쇄망 제약과 동일한 이유).
+    """
+    steps = [
+        ("0~1", "글자 획득", "PDF/PNG/HWP 에서 OCR·디지털 텍스트로 글자와 좌표를 뽑는다", False),
+        ("2", "구조 정리", "좌우 카드 구분, 영역별 역할(제목/유의사항 등) 판정", False),
+        ("3", "통합 판독", "OCR 이 놓친 글자를 VLM 이 재확인 — 정본은 안 덮어씀", False),
+        ("4", "스키마 추출", "상품명·금리 등 값 채우기 + 근거 위치 지목 (STAGE_3)", True),
+    ]
+    flow = "".join(
+        (f'<div class="flowarrow">→</div>' if i else "")
+        + f'<div class="flowstep{" highlight" if hi else ""}">'
+        f'<div class="fsno">{no}</div><div class="fstitle">{html.escape(title)}</div>'
+        f'<div class="fsdesc">{html.escape(desc)}</div></div>'
+        for i, (no, title, desc, hi) in enumerate(steps)
+    )
+    outputs = "".join(
+        f'<div class="outbox{" highlight" if hi else ""}"><b>{name}</b>{html.escape(desc)}</div>'
+        for name, desc, hi in [
+            ("out/json", "전체 기록 — 좌표·신뢰도·출처, 감사용", False),
+            ("out/llm_view", "정제 텍스트만 — 다음 단계(스키마 추출) 입력", False),
+            ("out/extracted", "구조화 필드 — 이 화면 STAGE_3 표가 이 값", True),
+        ]
+    )
+    return (
+        '<section class="pipeline-overview">'
+        '<h2>이 화면은 무엇인가</h2>'
+        '<p>광고 이미지(PDF·PNG·HWP)에서 글자를 뽑고, 심의 스키마에 맞춰 값을 채운 결과를 '
+        '원본과 나란히 놓고 검토하는 화면입니다. <b>"이 광고가 규정 위반인가"는 판정하지 '
+        '않습니다</b> — 값이 있는지, 없으면 왜 없는지(표시 의무 누락인지 / 이 상품 유형엔 '
+        '원래 없는 개념인지)까지만 파악하고, 최종 판단은 규정과 대조하는 다음 단계 '
+        '(RAG/DB 엔진 + 심의 담당자) 몫입니다.</p>'
+        f'<div class="flow">{flow}</div>'
+        '<div class="outputs-label">한 문서를 처리하면 산출물이 3개 나옵니다 — 목적이 서로 달라 합치지 않습니다</div>'
+        f'<div class="outputs">{outputs}</div>'
+        '<p class="howto"><b>이 화면 보는 법</b> — 문서마다 페이지별로 왼쪽엔 원본 이미지에 '
+        '파싱이 잡은 위치를 <b>마젠타 박스</b>로 표시합니다(가는 선=한 줄, 굵은 선=여러 줄을 '
+        '묶은 한 영역 — 역할별 색은 안 씁니다, 모델 판단이라 실행마다 미세하게 바뀔 수 있어서). '
+        '오른쪽엔 그 페이지의 처리 결과가 <b>토글로 접혀서</b> 나열됩니다 — 제목을 누르면 펼쳐집니다. '
+        'STAGE_3 표에서 <b>found</b>=값 찾음, <b>not_found</b>=값 없음(정상일 수도 있음), '
+        '<b>미표시</b>=표시 의무가 있는데 없어서 확인이 필요한 값입니다. 표 행에 마우스를 올리면 '
+        '왼쪽 이미지에 그 값의 근거 위치가 하이라이트됩니다.</p>'
+        '</section>'
+    )
 
 
 def main() -> None:
@@ -703,11 +767,13 @@ def main() -> None:
         doc_html, agg = _doc_html(parsed, preview_dir, extracted_dir)
         docs_html.append(doc_html)
         did = parsed["doc_id"]
+        found_txt = f'{agg["found"]} / {agg["not_found"]}' if agg["found"] is not None else "—"
         summary_rows.append(
             f'<tr><td><a href="#{html.escape(did)}">{html.escape(did)}</a></td>'
-            f'<td>{agg["pages"]}</td>'
-            f'<td>{agg["sec"]}</td><td>{agg["free"]}</td>'
-            f'<td>{agg["unassigned"]}</td><td>{agg["fields"]}</td></tr>'
+            f'<td>{agg["pages"]}</td><td>{agg["regions"]}</td><td>{agg["lines"]}</td>'
+            f'<td{" class=\"warncell\"" if agg["unassigned"] else ""}>{agg["unassigned"]}</td>'
+            f'<td>{found_txt}</td>'
+            f'<td{" class=\"warncell\"" if agg["miss"] else ""}>{agg["miss"] if agg["found"] is not None else "—"}</td></tr>'
         )
 
     legend = " ".join(
@@ -715,10 +781,10 @@ def main() -> None:
         for a, c, d in SOURCE_META.values()
     )
     summary = (
-        '<div class="summary"><b>파일별 요약</b> — 섹션 귀속/미지정/미배정 줄 수로 '
-        '"의미 단위까지 얼마나 잡혔나"를 봅니다. 미배정↓ + 섹션귀속↑ 이 좋은 파싱.'
-        '<table><thead><tr><th>파일</th><th>페이지</th><th>섹션귀속</th>'
-        '<th>섹션미지정</th><th>미배정</th><th>필드</th></tr></thead>'
+        '<div class="summary"><b>파일별 요약</b> — 각 항목을 눌러 아래 상세로 이동. '
+        '미배정↓ · found↑ · 미표시(표시의무 누락)는 실제로 확인할 가치가 있는 것만.'
+        '<table><thead><tr><th>파일</th><th>페이지</th><th>영역</th><th>라인</th>'
+        '<th>미배정</th><th>found/not_found</th><th>미표시</th></tr></thead>'
         f'<tbody>{"".join(summary_rows)}</tbody></table></div>'
     )
 
@@ -728,12 +794,9 @@ def main() -> None:
         '<title>NH 광고심의 파싱 리뷰</title>'
         f'<style>{CSS}</style></head><body>'
         '<header class="top"><h1>NH 광고심의 파싱 결과 리뷰</h1>'
-        f'<div class="legend">왼쪽=원본+bbox(<b>마젠타</b>: 가는 선=라인, 굵은 선=영역 — 역할 색 아님) '
-        f'/ 초록·주황·회색 하이라이트=STAGE_3 근거 영역(표 hover 시 표시) · '
-        f'오른쪽=파싱결과(LLM 전달 형태) → STAGE_3 스키마 추출 표(found=초록·not_found=회색·uncertain=주황) → 구조화 필드 · '
-        f'하단=감사용 원본 증거층 · 출처: {legend}</div>'
+        f'<div class="legend">라인 출처 태그: {legend}</div>'
         '</header>'
-        f'<div class="wrap">{summary}{"".join(docs_html)}</div>'
+        f'<div class="wrap">{_pipeline_overview_html()}{summary}{"".join(docs_html)}</div>'
         f'<script>{HOVER_JS}</script>'
         '</body></html>'
     )
