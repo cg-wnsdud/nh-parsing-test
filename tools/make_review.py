@@ -118,18 +118,32 @@ def _region_evidence_html(page: dict) -> tuple[str, int, int]:
     unassigned = page.get("unassigned_lines", [])
     if unassigned:
         u_html = "".join(_line_html(l) for l in unassigned)
+        sweep = sum(1 for l in unassigned if l.get("source") == "vlm_sweep")
         blocks.append(
             '<div class="sec unassigned">'
-            f'<div class="sechead bad">⚠ 미배정 — 어느 영역에도 귀속 안 됨 ({len(unassigned)}줄)</div>'
+            f'<div class="sechead bad">미배정 — 어느 영역에도 안 붙은 낱줄 ({len(unassigned)}줄)'
+            f'<span class="meta">S 태그 {sweep}줄 = OCR 이 못 읽어 VLM 이 건진 문구'
+            f'(밴드 근사 좌표라 일부러 안 붙임) · O/D 태그 {len(unassigned) - sweep}줄 = '
+            '붙일 영역을 못 찾은 것</span></div>'
             f'{u_html}</div>'
         )
     return ("".join(blocks) or '<p class="evidence-label">(영역 없음)</p>'), len(ordered), len(unassigned)
 
 
 def _page_stats(page: dict) -> dict:
+    """페이지 커버리지 숫자.
+
+    미배정을 **출처별로 가른다**(2026-08-04). 그냥 "미배정 13줄"로 보이면 "13줄을 못
+    붙였다 = 결함"으로 읽히는데, 실측은 정반대였다 — 전체 미배정 21줄 중 20줄이
+    `vlm_sweep`(⑪ 통짜 스윕이 **OCR 이 아예 못 읽어서 새로 건져온** 문구)이고, OCR
+    출처는 1줄(002 `0ㅇ` 노이즈)뿐이다. 스윕 라인은 밴드 근사 좌표라 ⑨ 귀속에서 일부러
+    제외한다(좌표를 신뢰할 수 없어서). 즉 **미배정 대부분은 실패가 아니라 추가 회수분**
+    이고, 진짜 결함 신호는 `unassigned_ocr` 쪽이다.
+    """
     regions = page.get("regions", [])
     total_lines = sum(len(r.get("lines", [])) for r in regions)
-    unassigned = len(page.get("unassigned_lines", []))
+    un = page.get("unassigned_lines", [])
+    un_sweep = sum(1 for l in un if l.get("source") == "vlm_sweep")
     low_conf = 0
     for r in regions:
         for l in r.get("lines", []):
@@ -137,8 +151,9 @@ def _page_stats(page: dict) -> dict:
             if c is not None and c < 0.8:
                 low_conf += 1
     return {
-        "regions": len(regions), "total": total_lines + unassigned,
-        "unassigned": unassigned, "low_conf": low_conf,
+        "regions": len(regions), "total": total_lines + len(un),
+        "unassigned": len(un), "unassigned_sweep": un_sweep,
+        "unassigned_ocr": len(un) - un_sweep, "low_conf": low_conf,
     }
 
 
@@ -574,11 +589,22 @@ def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | No
             triage_txt += f' ({html.escape("; ".join(triage["reasons"]))})'
 
     # 커버리지 요약 막대 — 항상 보이는 한 줄. 상세는 아래 토글에서.
+    # 미배정은 출처를 갈라 보여준다 — VLM 스윕 회수분은 '못 붙인 실패'가 아니라
+    # 'OCR 이 못 읽어 새로 건진 글자'다(_page_stats 주석의 실측 참조).
+    un_detail = ""
+    if st["unassigned"]:
+        un_detail = (
+            f'<span class="sub">VLM 회수 {st["unassigned_sweep"]} · '
+            f'OCR {st["unassigned_ocr"]}</span>'
+        )
     cov = (
         f'<div class="cov">'
         f'<span class="pill">영역 {st["regions"]}개</span>'
         f'<span class="pill">라인 {st["total"]}줄</span>'
-        f'<span class="pill{" bad" if st["unassigned"] else ""}">미배정 {st["unassigned"]}줄</span>'
+        f'<span class="pill{" bad" if st["unassigned_ocr"] else ""}" '
+        f'title="어느 영역에도 안 붙은 낱줄. VLM 회수분은 밴드 근사 좌표라 일부러 안 붙인 것이고, '
+        f'텍스트는 다음 단계로 전달된다. 결함 신호는 OCR 쪽 숫자다.">'
+        f'미배정 {st["unassigned"]}줄{un_detail}</span>'
         f'<span class="pill{" warn" if st["low_conf"] else ""}">저신뢰(&lt;0.8) {st["low_conf"]}줄</span>'
         f'</div>'
     )
@@ -663,17 +689,21 @@ def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | No
     )
 
 
-def _doc_html(parsed: dict, preview_dir: Path, extracted_dir: Path) -> tuple[str, dict]:
+def _doc_html(parsed: dict, preview_dir: Path, extracted_dir: Path,
+              parsing_only: bool = False) -> tuple[str, dict]:
     doc_id = parsed["doc_id"]
-    extracted = _load_extracted(extracted_dir, doc_id)
+    # parsing_only: STAGE_3 결과를 아예 안 읽는다 → ② 표·근거 하이라이트가 사라진다.
+    # 스키마가 확정 전인데 필드 표를 띄우면 논의가 "미완인 스키마" 쪽으로 끌려간다.
+    extracted = None if parsing_only else _load_extracted(extracted_dir, doc_id)
     pages_html = "".join(
         _page_html(parsed, p, preview_dir, extracted) for p in parsed.get("pages", [])
     )
-    agg = {"pages": len(parsed.get("pages", [])), "regions": 0, "lines": 0, "unassigned": 0}
+    agg = {"pages": len(parsed.get("pages", [])), "regions": 0, "lines": 0,
+           "unassigned": 0, "unassigned_ocr": 0}
     for p in parsed.get("pages", []):
         st = _page_stats(p)
         agg["regions"] += st["regions"]; agg["lines"] += st["total"]
-        agg["unassigned"] += st["unassigned"]
+        agg["unassigned"] += st["unassigned"]; agg["unassigned_ocr"] += st["unassigned_ocr"]
     cov = (extracted or {}).get("coverage") or {}
     agg["found"] = cov.get("fields_found")
     agg["not_found"] = cov.get("fields_not_found")
@@ -720,6 +750,8 @@ svg.pipesvg .arw { stroke:#57606a; stroke-width:1.4; fill:none; }
 svg.pipesvg .arw.dash { stroke:#8250df; stroke-dasharray:5 3; }
 svg.pipesvg .edgelbl { font-size:10px; fill:#8250df; }
 svg.pipesvg .edgebg { fill:#fff; }
+svg.pipesvg .dimmed { opacity:0.35; }
+svg.pipesvg .todaycut { font-size:10.5px; font-weight:700; fill:#9a6700; }
 svg.pipesvg .bx rect { stroke-width:1.2; }
 svg.pipesvg .code rect { fill:#f6f8fa; stroke:#afb8c1; }
 svg.pipesvg .paddle rect { fill:#ddf4ff; stroke:#54aeff; }
@@ -758,6 +790,8 @@ table.terms th { background:#fafbfc; color:#57606a; font-size:11px; }
 table.terms .tm { white-space:nowrap; font-weight:700; color:#0550ae; }
 table.terms .tw { color:#8b949e; }
 .summary .sumnote { font-size:11.5px; color:#57606a; line-height:1.7; margin:8px 0 0; }
+header.top .scopetag { font-size:11px; font-weight:normal; background:#fff8c5; color:#7d4e00; padding:2px 8px; border-radius:10px; vertical-align:middle; margin-left:6px; }
+.pipeline-overview .scopebar { background:#fff8c5; border-left:3px solid #d4a72c; border-radius:4px; padding:9px 13px; font-size:12.5px; color:#57606a; line-height:1.7; margin:0 0 12px; }
 .blkintro { font-size:11.5px; color:#57606a; line-height:1.7; margin:0; padding:8px 12px; background:#fafbfc; border-bottom:1px solid #eaecef; }
 /* 토글 제목줄: [▸ 제목] [요약숫자] ...밀어냄... [파일명] / 다음 줄 [필드경로]
    기본 .sechead 는 space-between 2단 배치라 항목이 4개가 되면 흩어진다 — 여기만 재정의. */
@@ -831,6 +865,8 @@ details.evidencewrap > summary, details.noteswrap > summary { background:#f6f8fa
 .pill.ok { background:#dafbe1; color:#116329; }
 .pill.warn { background:#fff8c5; color:#7d4e00; }
 .pill.bad { background:#ffebe9; color:#a40e26; }
+.pill .sub { font-size:10px; opacity:0.75; margin-left:5px; }
+.summary .subcell { display:block; font-size:10px; color:#8b949e; font-weight:normal; }
 /* ① LLM 전달 형태 — 영역 하나가 한 행. 통독 후보가 있으면 그 자리에서 2단 대조. */
 .llmview { background:#f7fbff; padding:6px 8px; }
 .lvrow { border-top:1px solid #e3eefc; padding:5px 4px; }
@@ -1048,15 +1084,26 @@ _SVG_X0 = 118          # 레인 이름 칸 폭
 _SVG_GAP = 34          # 박스 사이 화살표 자리
 
 
-def _pipeline_svg() -> str:
-    """레인(단계) x 박스(세부단계) 도식. 특수 화살표 2개를 곡선으로 얹는다."""
+def _pipeline_svg(dim_from_lane: int | None = None) -> str:
+    """레인(단계) x 박스(세부단계) 도식. 특수 화살표 2개를 곡선으로 얹는다.
+
+    dim_from_lane: 그 인덱스부터의 레인을 흐리게 — 파싱만 보여줄 때 "여기까지가 오늘
+    범위"를 그림에서 바로 읽히게 한다(스키마 단계를 지우면 전체 그림이 안 보이므로
+    지우지 않고 흐린다).
+    """
     pos: dict[str, tuple[float, float, float, float]] = {}   # id → (x, y, w, h)
     body: list[str] = []
     for li, (lane, boxes) in enumerate(_LANES):
+        dim = " dimmed" if dim_from_lane is not None and li >= dim_from_lane else ""
         cy = 30 + li * _SVG_LANE_H + _SVG_BOX_H / 2
         top = cy - _SVG_BOX_H / 2
+        if dim and li == dim_from_lane:
+            body.append(
+                f'<text class="todaycut" x="8" y="{top - 8:.0f}">'
+                '↓ 여기부터는 오늘 범위 밖 (스키마 미완)</text>'
+            )
         body.append(
-            f'<text class="lanelbl" x="8" y="{cy + 4:.0f}">{html.escape(lane)}</text>'
+            f'<text class="lanelbl{dim}" x="8" y="{cy + 4:.0f}">{html.escape(lane)}</text>'
             f'<line class="lanerule" x1="0" y1="{cy + _SVG_LANE_H / 2 - 4:.0f}" '
             f'x2="1180" y2="{cy + _SVG_LANE_H / 2 - 4:.0f}"/>'
         )
@@ -1074,7 +1121,7 @@ def _pipeline_svg() -> str:
                 for i, s in enumerate(subs)
             )
             body.append(
-                f'<g class="bx {actor}"><rect x="{x}" y="{top:.0f}" width="{w}" '
+                f'<g class="bx {actor}{dim}"><rect x="{x}" y="{top:.0f}" width="{w}" '
                 f'height="{_SVG_BOX_H}" rx="7"/>'
                 f'<text class="bt" x="{x + w / 2:.0f}" y="{top + 21:.0f}" '
                 f'text-anchor="middle">{html.escape(title)}</text>{subs_svg}</g>'
@@ -1137,7 +1184,7 @@ def _pipeline_svg() -> str:
     )
 
 
-def _pipeline_overview_html() -> str:
+def _pipeline_overview_html(parsing_only: bool = False) -> str:
     """처음 보는 사람용 오리엔테이션 — 페이지 맨 위 고정. 접지 않는다.
 
     2026-08-04: 팀 공유 때 이 화면 하나로 "뭘 하는 시스템이고 어떻게 읽으면 되는지"가
@@ -1176,8 +1223,10 @@ def _pipeline_overview_html() -> str:
          "<b>다음 단계(STAGE_3)에 실제로 들어가는 입력</b>이다.",
          "pages[].regions[] : region_id · role · text · vlm_reading", False),
         ("out/extracted", "구조화 필드",
-         "스키마 필드에 값·상태·근거를 채운 결과. 이 화면의 <b>② STAGE_3 표가 이 파일</b>이다.",
-         "fields{} · events[] · unmapped[] · coverage{}", True),
+         ("스키마 필드에 값·상태·근거를 채운 결과. <b>스키마 확정 전이라 오늘 화면에서는 뺐습니다.</b>"
+          if parsing_only else
+          "스키마 필드에 값·상태·근거를 채운 결과. 이 화면의 <b>② STAGE_3 표가 이 파일</b>이다."),
+         "fields{} · events[] · unmapped[] · coverage{}", not parsing_only),
     ]
     outputs = "".join(
         f'<div class="outbox{" highlight" if hi else ""}"><b class="fname">{name}</b>'
@@ -1191,14 +1240,19 @@ def _pipeline_overview_html() -> str:
     return (
         '<section class="pipeline-overview">'
         '<h2>이 화면은 무엇인가</h2>'
-        '<p>광고 이미지(PDF·PNG·HWP)에서 글자를 뽑고, 심의 스키마에 맞춰 값을 채운 결과를 '
+        + ('<p class="scopebar"><b>이 화면은 파싱(OCR) 결과까지만 봅니다.</b> 광고 이미지에서 '
+           '<b>글자를 정확히·빠짐없이 뽑았는가</b>가 오늘의 주제입니다. 뽑은 글자를 심의 스키마 '
+           '필드에 채우는 단계(STAGE_3)는 <b>스키마가 아직 확정 전</b>이라 이 화면에서 뺐습니다 — '
+           '기능이 없는 게 아니라 <b>보여줄 만큼 굳지 않았습니다</b>.</p>'
+           if parsing_only else "")
+        + '<p>광고 이미지(PDF·PNG·HWP)에서 글자를 뽑고, 심의 스키마에 맞춰 값을 채운 결과를 '
         '원본과 나란히 놓고 검토하는 화면입니다. <b>"이 광고가 규정 위반인가"는 판정하지 '
         '않습니다</b> — 값이 있는지, 없으면 왜 없는지(표시 의무 누락인지 / 이 상품 유형엔 '
         '원래 없는 개념인지)까지만 파악하고, 최종 판단은 규정과 대조하는 다음 단계 '
         '(RAG/DB 엔진 + 심의 담당자) 몫입니다.</p>'
         '<div class="ovhead">처리 단계 — 입력 1건이 아래 순서를 그대로 지나갑니다'
         f'<span class="actlegend">{actor_legend}</span></div>'
-        f'<div class="svgwrap">{_pipeline_svg()}</div>'
+        f'<div class="svgwrap">{_pipeline_svg(dim_from_lane=5 if parsing_only else None)}</div>'
         '<details class="toggle stepswrap"><summary class="sechead">단계별 설명 (글로 보기)'
         '<span class="meta">위 그림의 각 상자가 왜 필요한지 · 실측 근거</span></summary>'
         f'<div class="phases">{"".join(phases)}</div></details>'
@@ -1214,8 +1268,11 @@ def _pipeline_overview_html() -> str:
         '묶은 한 영역). 박스 왼쪽 위 <b><code>r002 이미지</code></b> 라벨은 영역 ID와 역할이고, '
         '위쪽 체크박스로 껐다 켤 수 있습니다 — 역할별 <b>색</b>은 쓰지 않습니다(모델 판단이라 '
         '실행마다 미세하게 바뀔 수 있어 좌표 그림에 굽지 않습니다). '
-        '오른쪽엔 ①~⑤ 결과가 <b>토글로 접혀</b> 있고 제목을 누르면 펼쳐집니다. 접힌 상태에서도 '
-        '핵심 숫자와 <b>어느 산출물 파일에서 온 값인지</b>가 제목 줄에 적혀 있습니다.</p>'
+        + ('오른쪽엔 ①③④⑤ 결과가 <b>토글로 접혀</b> 있고 제목을 누르면 펼쳐집니다(② STAGE_3 는 '
+           '오늘 범위 밖이라 없습니다). 접힌 상태에서도 '
+           if parsing_only else
+           '오른쪽엔 ①~⑤ 결과가 <b>토글로 접혀</b> 있고 제목을 누르면 펼쳐집니다. 접힌 상태에서도 ')
+        + '핵심 숫자와 <b>어느 산출물 파일에서 온 값인지</b>가 제목 줄에 적혀 있습니다.</p>'
         f'<details class="toggle termswrap"><summary class="sechead">용어 사전 — 화면에 찍히는 표기'
         '<span class="meta">발표·인수인계용. 이 표에 있는 말만 화면에 씁니다</span></summary>'
         '<table class="terms"><thead><tr><th>표기</th><th>뜻</th><th>어디에 나오나</th></tr></thead>'
@@ -1232,6 +1289,10 @@ def main() -> None:
         "--src", type=Path, default=ROOT / "out",
         help="run_nhdata --out 과 대칭. 이 폴더의 json/·previews/ 를 읽는다 (기본 out/)",
     )
+    parser.add_argument(
+        "--parsing-only", action="store_true",
+        help="STAGE_3(스키마 추출) 결과를 뺀 파싱 전용 화면. 스키마 확정 전 공유용",
+    )
     args = parser.parse_args()
 
     preview_dir = args.src / "previews"
@@ -1247,17 +1308,23 @@ def main() -> None:
     summary_rows = []
     for jf in json_files:
         parsed = json.loads(jf.read_text(encoding="utf-8"))
-        doc_html, agg = _doc_html(parsed, preview_dir, extracted_dir)
+        doc_html, agg = _doc_html(parsed, preview_dir, extracted_dir, args.parsing_only)
         docs_html.append(doc_html)
         did = parsed["doc_id"]
-        found_txt = f'{agg["found"]} / {agg["not_found"]}' if agg["found"] is not None else "—"
-        summary_rows.append(
-            f'<tr><td><a href="#{html.escape(did)}">{html.escape(did)}</a></td>'
-            f'<td>{agg["pages"]}</td><td>{agg["regions"]}</td><td>{agg["lines"]}</td>'
-            f'<td{" class=\"warncell\"" if agg["unassigned"] else ""}>{agg["unassigned"]}</td>'
-            f'<td>{found_txt}</td>'
-            f'<td{" class=\"warncell\"" if agg["miss"] else ""}>{agg["miss"] if agg["found"] is not None else "—"}</td></tr>'
-        )
+        cells = [
+            f'<td><a href="#{html.escape(did)}">{html.escape(did)}</a></td>',
+            f'<td>{agg["pages"]}</td><td>{agg["regions"]}</td><td>{agg["lines"]}</td>',
+            f'<td{" class=\"warncell\"" if agg["unassigned_ocr"] else ""}>{agg["unassigned"]}'
+            f'<span class="subcell">그중 OCR {agg["unassigned_ocr"]}</span></td>',
+        ]
+        if not args.parsing_only:
+            found_txt = f'{agg["found"]} / {agg["not_found"]}' if agg["found"] is not None else "—"
+            cells.append(f'<td>{found_txt}</td>')
+            cells.append(
+                f'<td{" class=\"warncell\"" if agg["miss"] else ""}>'
+                f'{agg["miss"] if agg["found"] is not None else "—"}</td>'
+            )
+        summary_rows.append(f'<tr>{"".join(cells)}</tr>')
 
     legend = " ".join(
         f'<span class="tag" style="background:{c}">{a}</span> {d}'
@@ -1269,30 +1336,53 @@ def main() -> None:
         ("페이지", "그 문서의 페이지 수"),
         ("영역", "레이아웃 단위 개수(굵은 박스). 많다고 좋은 게 아니라 화면 구성에 따라 달라진다"),
         ("라인", "잡은 글자 줄 수 = 영역에 붙은 줄 + 미배정 줄. 이 숫자가 '얼마나 읽었나'다"),
-        ("미배정", "어느 영역에도 못 붙은 줄 수. 낮을수록 좋다(글자는 전달되지만 근거 좌표를 지목 못 함)"),
-        ("found/not_found", "스키마 필드 중 값을 채운 개수 / 광고에서 못 찾은 개수. not_found 는 결함이 아니다"),
-        ("미표시", "표시 의무가 있는데 값이 없는 개수. 위반 판정이 아니라 확인이 필요하다는 관측"),
+        ("미배정", "어느 영역에도 안 붙은 낱줄. 대부분은 OCR 이 못 읽어 VLM 이 새로 건진 문구이고 "
+                   "밴드 근사 좌표라 일부러 안 붙인 것 — 텍스트는 다음 단계로 전달된다. "
+                   "결함 신호는 '그중 OCR' 숫자다"),
     ]
+    if not args.parsing_only:
+        cols += [
+            ("found/not_found", "스키마 필드 중 값을 채운 개수 / 광고에서 못 찾은 개수. not_found 는 결함이 아니다"),
+            ("미표시", "표시 의무가 있는데 값이 없는 개수. 위반 판정이 아니라 확인이 필요하다는 관측"),
+        ]
     head = "".join(f'<th title="{html.escape(d)}">{h}</th>' for h, d in cols)
+    # 미배정 해설 — "낮을수록 좋다"고만 쓰면 오해다(실측: 21줄 중 20줄이 VLM 추가 회수분).
+    un_note = (
+        '<b>미배정</b>은 총계가 아니라 <b>그중 OCR</b> 숫자를 봅니다 — 전체 21줄 중 20줄은 '
+        'OCR 이 아예 못 읽어 VLM 이 새로 건진 문구이고(밴드 근사 좌표라 일부러 영역에 안 붙임, '
+        '텍스트는 다음 단계로 전달) OCR 출처는 1줄뿐입니다. '
+        '<b>영역 개수는 많고 적음이 품질이 아닙니다</b> — 화면을 몇 덩어리로 검출했나일 뿐입니다. '
+    )
+    if args.parsing_only:
+        sumnote = (
+            '<p class="sumnote"><b>보는 방향</b> — <b>라인</b>은 많이 읽었을수록 좋습니다. '
+            + un_note + '컬럼 제목에 마우스를 올리면 뜻이 나옵니다.</p>'
+        )
+    else:
+        sumnote = (
+            '<p class="sumnote"><b>보는 방향</b> — <b>라인</b>은 많이 읽었을수록, '
+            '<b>found</b>는 높을수록 좋습니다. ' + un_note
+            + '<b>not_found 는 결함이 아닙니다</b>(광고에 원래 없는 값일 수 있음). '
+            '<b>미표시</b>(빨강)만 실제로 사람이 확인할 값이며, 이것도 <b>위반 판정이 아니라 사실 관측</b>입니다. '
+            '컬럼 제목에 마우스를 올리면 뜻이 나옵니다.</p>'
+        )
     summary = (
         '<div class="summary"><b>파일별 요약</b> — 문서 이름을 누르면 아래 상세로 이동합니다.'
         f'<table><thead><tr>{head}</tr></thead>'
-        f'<tbody>{"".join(summary_rows)}</tbody></table>'
-        '<p class="sumnote"><b>보는 방향</b> — <b>라인</b>은 많이 읽었을수록, <b>미배정</b>은 낮을수록, '
-        '<b>found</b>는 높을수록 좋습니다. <b>not_found 는 결함이 아닙니다</b>(광고에 원래 없는 값일 수 있음). '
-        '<b>미표시</b>(빨강)만 실제로 사람이 확인할 값이며, 이것도 <b>위반 판정이 아니라 사실 관측</b>입니다. '
-        '컬럼 제목에 마우스를 올리면 뜻이 나옵니다.</p></div>'
+        f'<tbody>{"".join(summary_rows)}</tbody></table>{sumnote}</div>'
     )
 
     doc = (
         '<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        '<title>NH 광고심의 파싱 리뷰</title>'
+        f'<title>NH 광고심의 파싱 리뷰{" — 파싱 결과" if args.parsing_only else ""}</title>'
         f'<style>{CSS}</style></head><body>'
-        '<header class="top"><h1>NH 광고심의 파싱 결과 리뷰</h1>'
+        f'<header class="top"><h1>NH 광고심의 파싱 결과 리뷰'
+        f'{" <span class=\"scopetag\">파싱(OCR) 결과까지</span>" if args.parsing_only else ""}</h1>'
         f'<div class="legend">라인 출처 태그: {legend}</div>'
         '</header>'
-        f'<div class="wrap">{_pipeline_overview_html()}{summary}{"".join(docs_html)}</div>'
+        f'<div class="wrap">{_pipeline_overview_html(args.parsing_only)}'
+        f'{summary}{"".join(docs_html)}</div>'
         f'<script>{HOVER_JS}</script>'
         '</body></html>'
     )
