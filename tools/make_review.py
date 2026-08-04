@@ -363,15 +363,25 @@ def _region_label_overlay(page: dict) -> str:
     쌍은 둘 다 남는다. 라인은 한쪽에만 붙고 다른 쪽은 빈 껍데기가 되는데(224개 중 24개,
     11%), 라벨이 같은 좌표에 겹쳐 그려져 **빈 껍데기 이름이 실제 영역 이름을 덮었다** —
     그림에는 `r019`, 오른쪽 파싱 결과에는 `r017` 로 보여 번호가 틀린 것처럼 읽혔다.
+
+    **실제 내용이 있는 영역끼리도 라벨이 겹칠 수 있다**(2026-08-04, 위와 다른 결함).
+    올원e `r018`[129,3097,1070,3139 · 각주 '주1)...']과 `r020`[130,3097,1068,3197 ·
+    본문 '동의 필수']은 둘 다 글자가 있는데, **왼쪽 위 모서리가 거의 같은 자리**라서
+    (PaddleX 레이아웃 검출이 r020 사각형을 실제 글자(y=3158~)보다 위(y=3097)까지
+    넓게 잡았다) 나중에 그려진 r020 라벨이 r018 라벨을 완전히 가렸다 — 텍스트 배정
+    자체는 맞는데(둘 다 정확한 영역에 들어감) 화면에서 r018 라벨만 안 보였다. 위
+    빈-박스 케이스는 "먼저/나중" 순서로 풀리지만 이건 **둘 다 실제 영역**이라 순서로는
+    안 풀린다 — 겹치는 라벨을 감지해 뒤엣것을 아래로 밀어낸다.
     """
     cw, ch = page.get("canvas_w"), page.get("canvas_h")
     if not (cw and ch):
         return ""
     empty_html, real_html = [], []
+    placed: list[tuple[float, float]] = []  # 이미 배치한 실제 라벨의 원본 픽셀 좌표
     for r in page.get("regions", []):
         if not r.get("bbox"):
             continue
-        l, t, _w, _h = _norm_box(r["bbox"], cw, ch)
+        x0, y0 = r["bbox"][0], r["bbox"][1]
         # 화면 폭을 아끼려고 `p1_` 접두는 뺀다(페이지는 블록 머리줄에 이미 있다).
         short = r["region_id"].split("_", 1)[-1]
         role = html.escape(str(r.get("role") or "?"))
@@ -379,12 +389,26 @@ def _region_label_overlay(page: dict) -> str:
         title = f'{r["region_id"]} · 역할 {role} · bbox {r["bbox"]}'
         if not has_lines:
             title += " · 글자가 안 붙은 빈 검출 박스 (거의 같은 자리 중복 검출)"
-        body = f'{html.escape(short)} <i>{role}</i>' if has_lines else f'{html.escape(short)} <i>빈 박스</i>'
-        span = (
-            f'<span class="rlbl{"" if has_lines else " empty"}" '
-            f'style="left:{l:.2f}%;top:{t:.2f}%" title="{html.escape(title)}">{body}</span>'
+            l, t, _w, _h = _norm_box(r["bbox"], cw, ch)
+            body = f'{html.escape(short)} <i>빈 박스</i>'
+            empty_html.append(
+                f'<span class="rlbl empty" style="left:{l:.2f}%;top:{t:.2f}%" '
+                f'title="{html.escape(title)}">{body}</span>'
+            )
+            continue
+        # 다른 실제 영역 라벨과 원점이 가까우면(픽셀 기준) 아래로 밀어낸다 — 둘 다
+        # 실제 영역이라 그리는 순서로는 안 풀리고, 밀어내지 않으면 뒤엣것이 앞엣것을
+        # 완전히 덮는다(위 r018/r020 실측).
+        y_shift = y0
+        while any(abs(x0 - px) < 45 and abs(y_shift - py) < 24 for px, py in placed):
+            y_shift += 24
+        placed.append((x0, y_shift))
+        l, t, _w, _h = _norm_box([x0, y_shift, r["bbox"][2], r["bbox"][3]], cw, ch)
+        body = f'{html.escape(short)} <i>{role}</i>'
+        real_html.append(
+            f'<span class="rlbl" style="left:{l:.2f}%;top:{t:.2f}%" '
+            f'title="{html.escape(title)}">{body}</span>'
         )
-        (real_html if has_lines else empty_html).append(span)
     return "".join(empty_html) + "".join(real_html)
 
 
