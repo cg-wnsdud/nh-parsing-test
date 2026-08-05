@@ -62,8 +62,79 @@ def norm(text: str) -> str:
 
     괄호·낫표·중점·공백은 OCR 과 VLM 이 서로 다르게 쓰는 대표적인 자리라(실측:
     OCR '[NH대박7적금]' vs VLM '「NH대박7적금」') 관계 판정에서는 걷어낸다.
+
+    **주의: 이 함수는 마침표도 지운다.** 그래서 '7.1%' 와 '71%' 가 같아진다.
+    숫자가 같은지는 이 함수로 판단하면 안 된다 — numeric_signature 를 쓴다.
     """
     return "".join(_KEEP.findall((text or "").casefold().translate(_CIRCLED_TABLE)))
+
+
+_NUM = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def numeric_signature(text: str) -> list[str]:
+    """텍스트에 **적힌 그대로의** 숫자열만 순서대로 뽑는다 (천단위 콤마만 제거).
+
+    **왜 따로 재나.** norm() 은 비교를 위해 마침표를 지우므로 '7.1%' 와 '71%' 가
+    둘 다 '71' 이 된다. 금리 광고에서 이 둘은 10배 차이다. 실측(2026-08-05,
+    5문서 177개 후보 전수) — 아래 둘이 relation=same 으로 찍혀 교차검증 경고가
+    뜨지 않았다:
+
+      002 p1_r014  정본 '최고연71%'
+                   후보 '최고연 7.1%'                        → 금리 10배
+      003 p2_r008  정본 '…고객행복센터(1661-3000,1522-3000)…'
+                   후보 '…고객행복센터(1661-3000, 1522-3000)…' → OCR 이 '3000,1522' 를
+                        한 덩어리로 붙여 읽어 '30001522' 가 됐다
+
+    둘 다 **VLM 이 정확히 읽고 OCR 이 틀린** 경우다. 후보가 정답을 들고 있는데도
+    "차이 없음"으로 덮여 하류가 볼 기회를 잃었다.
+
+    **원문자(①②③)는 숫자로 환산하지 않는다.** norm() 은 ①→1 로 바꾸는데
+    그쪽은 그게 맞다(항목번호가 사라진 것처럼 보이는 오탐을 막는다 — 위 _CIRCLED
+    주석). 숫자 비교에서 같이 하면 반대 방향 오탐이 난다: VLM 이 원문자를 정확히
+    읽어낸 것이 '숫자가 늘었다'로 잡힌다. 실측에서 환산할 때 11건이 걸렸는데
+    그중 6건이 이 경우였다. \\d 만 보면 원문자는 자연히 빠진다 — 원문자는 값이
+    아니라 순서 표시다.
+    """
+    return [m.replace(",", "") for m in _NUM.findall(text or "")]
+
+
+def numbers_differ(ocr_text: str, vlm_text: str) -> bool:
+    """적힌 숫자가 **실질적으로** 다른가 — 원문자 오독은 차이로 세지 않는다.
+
+    한 자리 정수를 따로 취급한다. 이유는 실측이다(2026-08-05, 5문서 177개 후보):
+    숫자를 전부 그대로 비교하면 무해한 원문자 회수가 걸린다 — VLM 이 '1' 을 '①' 로
+    **더 정확히** 읽어낸 것이 '숫자가 늘었다'로 잡힌다. 이 저장소의 기존 테스트도
+    같은 패턴('참여방법 1' vs '참여 방법 ①')을 무해한 것으로 이미 고정해 두고 있었다.
+
+    그래서 규칙을 이렇게 둔다:
+
+      - 두 자리 이상 또는 소수점이 있는 숫자는 **항상** 비교한다. 금리·금액·기간·
+        연락처가 여기 들어온다. 실측 2건이 이 규칙으로 잡힌다(numeric_signature 주석).
+      - 한 자리 정수가 **한쪽에만 있으면** 원문자 회수로 보고 무시한다.
+      - 단 **양쪽에 한 자리가 다 있는데 다르면** 비교한다. '연 3%' 대비 '연 5%'
+        같은 실제 값 차이를 놓치지 않기 위해서다.
+
+    이 규칙으로 5문서에서 5건이 same 에서 빠졌고 **5건 모두 OCR 이 실제로 틀린**
+    것이었다(오탐 0). 중대도는 갈린다 — 금리 10배·전화번호 붕괴 2건이 값 오류이고,
+    나머지 3건은 원문자 오독이다:
+
+        올원e p1_r017  OCR 이 '③' 을 별도 라인 '3' 으로, 상단첨자 '²' 를 '2' 로 읽음
+                       (금리 '0.2%p' 자체는 양쪽 동일 — 값 오류가 아니다)
+        003 p1_r008    OCR 이 '②' 를 '1' 로 읽음
+        003 p1_r009    OCR 이 '③' 을 '3' 으로 읽음
+
+    **알려진 한계.** 한 자리 값이 한쪽에서만 사라진 경우('연 3%' → '연 %')는 이
+    게이트를 통과한다. 그건 모양 판정(잘림/불일치)이 잡을 자리다.
+    """
+    a, b = numeric_signature(ocr_text), numeric_signature(vlm_text)
+    a_multi = [n for n in a if len(n) > 1]
+    b_multi = [n for n in b if len(n) > 1]
+    if a_multi != b_multi:
+        return True
+    a_one = [n for n in a if len(n) == 1]
+    b_one = [n for n in b if len(n) == 1]
+    return bool(a_one and b_one and a_one != b_one)
 
 
 @dataclass(frozen=True)
@@ -96,6 +167,24 @@ class Relation:
 
 def classify_reading(ocr_text: str, vlm_text: str) -> Relation:
     """정본(ocr_text) 대비 후보(vlm_text)의 관계를 판정한다.
+
+    두 단계다 — 먼저 문자열 모양으로 관계를 정하고(_relation_by_shape), 그 답이
+    SAME 이면 **적힌 숫자가 같은지 다시 본다**(numeric_signature).
+
+    숫자를 따로 보는 이유는 numeric_signature 주석에 실측과 함께 적었다. 요지는
+    모양 비교가 쓰는 norm() 이 마침표를 지워서 '7.1%' 와 '71%' 를 같다고 말한다는
+    것이다. SAME 일 때만 검사한다 — 나머지 딱지는 이미 "다르다"를 말하고 있고,
+    잘림(TAIL_TRUNCATED)·회수(EXPANDED)는 숫자가 달라지는 게 정상이다(뒤가
+    잘리면 그 안의 숫자도 같이 없어진다).
+    """
+    rel = _relation_by_shape(ocr_text, vlm_text)
+    if rel.kind == SAME and numbers_differ(ocr_text, vlm_text):
+        return Relation(DIVERGED)
+    return rel
+
+
+def _relation_by_shape(ocr_text: str, vlm_text: str) -> Relation:
+    """문자열 모양만으로 관계를 정한다 (숫자 게이트 전 단계).
 
     판정 순서 — 부분문자열 관계를 먼저 보고, 아니면 유사도로 떨어진다.
       1) 정규화 후 같다            → SAME

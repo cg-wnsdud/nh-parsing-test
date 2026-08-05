@@ -134,6 +134,36 @@ def section_relation(res: dict) -> None:
               f'{x["stored"]} → {x["recomputed"]}')
         print(f'      정본 {x["ocr"]!r}')
         print(f'      후보 {x["cand"]!r}')
+    _relation_numeric_gate(res)
+
+
+def _relation_numeric_gate(res: dict) -> None:
+    """숫자 게이트(2026-08-05 추가)가 same 에서 빼낸 건수를 따로 센다.
+
+    위 불일치 숫자와 합치면 안 된다 — 원인이 다르다. 위는 라인 순서 시점 문제고
+    이건 '모양은 같은데 적힌 숫자가 다르다'다. 합쳐 놓으면 어느 쪽이 움직였는지
+    못 본다.
+    """
+    from nh_parsing.truncation import _relation_by_shape, classify_reading
+
+    moved = []
+    for stem, d in _docs():
+        for pg in d["pages"]:
+            for r in pg["regions"]:
+                cand = r.get("vlm_reading")
+                if not cand:
+                    continue
+                ocr = " ".join(l["text"] for l in r["lines"])
+                if _relation_by_shape(ocr, cand).kind == classify_reading(ocr, cand).kind:
+                    continue
+                moved.append({"doc": stem, "page": pg["page_no"], "region_id": r["region_id"],
+                              "ocr": ocr[:70], "cand": cand.replace("\n", " / ")[:70]})
+    res["relation_numeric_gate"] = moved
+    print(f"\n숫자 게이트가 same 에서 빼낸 것: {len(moved)}건")
+    for x in moved:
+        print(f'  {x["doc"][:12]:14s} p{x["page"]} {x["region_id"]:9s} same → diverged')
+        print(f'      정본 {x["ocr"]!r}')
+        print(f'      후보 {x["cand"]!r}')
 
 
 # ───────────────────────────── linecand ─────────────────────────────
