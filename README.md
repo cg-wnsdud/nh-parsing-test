@@ -55,6 +55,10 @@ uv run python tools/make_review.py      # → out/review.html
 
 ## 코드 맵 (src/nh_parsing/)
 
+![파이프라인 다이어그램](docs/architecture/pipeline-diagram.png)
+
+> 상자별 설명은 [docs/architecture/pipeline-diagram-guide.md](docs/architecture/pipeline-diagram-guide.md).
+
 ### 파싱 파이프라인 (`tools/run_nhdata.py` → `pipeline.py`)
 
 | 모듈 | 역할 |
@@ -132,7 +136,7 @@ uv run python tools/make_review.py      # → out/review.html
 | **인계 시 정할 것** (스키마·DB·RAG 경계) | [docs/handoff.md](docs/handoff.md) |
 | 스키마 내부 구조 상세 | [docs/schema-explained.md](docs/schema-explained.md) |
 | 검수 화면(review.html) 읽는 법 | [docs/screen-guide-review-html.md](docs/screen-guide-review-html.md) |
-| 다이어그램 캔버스 동반 설명 | [docs/architecture/pipeline-diagram-guide.md](docs/architecture/pipeline-diagram-guide.md) |
+| 다이어그램 캔버스 동반 설명 | [docs/architecture/pipeline-diagram-guide.md](docs/architecture/pipeline-diagram-guide.md) (이미지는 코드 맵 위쪽 참조) |
 | 팀장님 레포(nh-ad-compliance)와의 비교 | [docs/compare-nh-ad-compliance.md](docs/compare-nh-ad-compliance.md) |
 
 **갱신하지 않는 옛 문서** — 어긋나는 지점은
