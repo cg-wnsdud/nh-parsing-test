@@ -761,6 +761,8 @@ header.top .legend .tag { margin-left: 10px; }
 .act-code { background:#eaecef; color:#424a53; }
 .act-paddle { background:#ddf4ff; color:#0550ae; }
 .act-vlm { background:#fbefff; color:#8250df; }
+.gaptag { display:inline-block; background:#fff8c5; color:#7d4e00; font-size:9.5px; font-weight:700;
+  padding:1px 5px; border-radius:3px; margin-right:4px; }
 /* 도식 — 2026-08-06 부터는 손그림 SVG 대신 사용자가 Obsidian 에서 만든 PNG 를 그대로 쓴다.
    좁은 화면에서는 가로 스크롤. */
 .svgwrap { overflow-x:auto; margin-bottom:10px; }
@@ -799,6 +801,15 @@ table.terms th, table.terms td { border-top:1px solid #eaecef; padding:5px 9px; 
 table.terms th { background:#fafbfc; color:#57606a; font-size:11px; }
 table.terms .tm { white-space:nowrap; font-weight:700; color:#0550ae; }
 table.terms .tw { color:#8b949e; }
+details.colcalcwrap { margin:8px 0 4px; }
+details.colcalcwrap > summary { background:#f6f8fa; padding:6px 10px; font-size:12.5px; }
+table.colcalc { border-collapse:collapse; width:100%; font-size:11.5px; margin-top:6px; }
+table.colcalc td { border-top:1px solid #eaecef; padding:5px 9px; text-align:left; vertical-align:top; line-height:1.6; }
+table.colcalc .cc-col { white-space:nowrap; font-weight:700; color:#0550ae; }
+details.diagramgapswrap { margin-top:10px; }
+details.diagramgapswrap > summary { background:#fff8c5; padding:6px 10px; font-size:12.5px; }
+.diagramgapswrap ol { margin:8px 0 0; padding-left:20px; font-size:12.5px; line-height:1.7; }
+.diagramgapswrap li { margin-bottom:6px; }
 .summary .sumnote { font-size:11.5px; color:#57606a; line-height:1.7; margin:8px 0 0; }
 header.top .scopetag { font-size:11px; font-weight:normal; background:#fff8c5; color:#7d4e00; padding:2px 8px; border-radius:10px; vertical-align:middle; margin-left:6px; }
 .pipeline-overview .scopebar { background:#fff8c5; border-left:3px solid #d4a72c; border-radius:4px; padding:9px 13px; font-size:12.5px; color:#57606a; line-height:1.7; margin:0 0 12px; }
@@ -963,61 +974,105 @@ _ACTOR_META = {
     "vlm": ("VLM", "act-vlm", "Gemma VLM — 의미 판단(역할·카드·교정·분류)"),
 }
 
+# 2026-08-06: 그림(pipeline-diagram.png)의 번호체계(①~⑨, ⑦은 ⑦-1~⑦-4)에 맞춰 재편했다.
+# 전에는 이 표가 그림과 다른 번호(0~4단계·①~⑮)를 썼는데, 사용자가 만든 그림을 화면에 넣고 보니
+# "그림 보고 아래 글 보면 번호가 안 맞는다"는 문제가 생겼다. 문장 내용 자체는 실측 그대로 두고
+# 그룹만 그림 기준으로 다시 묶었다. <span class="gaptag"> 표시가 붙은 항목은 그림에는 없지만
+# 실제로 있는 동작이다 — 그림 한 장에 다 담을 수 없어 빠진 것들.
 _PHASES: list[tuple[str, str, str, list[tuple[str, str, str, str]]]] = [
-    ("0", "라우팅", "이 페이지를 어떻게 읽을지 먼저 정한다", [
-        ("0", "트리아지", "code",
-         "PDF는 페이지마다 structured / hybrid / scan_like 판정. 디지털 텍스트를 믿을 수 있으면 "
-         "OCR 을 아예 안 돌린다(정확·무료). HWP는 텍스트·표를 사내 파서 정본으로 쓰고 내장 이미지만 OCR."),
+    ("①", "광고 파일 입력", "PDF · PNG · HWP — 오늘 기준 샘플 5건(PDF 2 · PNG 2 · HWP 1)", [
+        ("", "입력 형식별 시작점", "code",
+         "이미지는 그 자체가 캔버스(=이후 모든 좌표의 기준). PDF 는 페이지를 렌더해 캔버스를 만든다. "
+         "HWP 는 캔버스가 없다 — 좌표가 없어 미리보기·하이라이트를 못 만드는 대신 0.7~1.6초에 끝난다."),
     ]),
-    ("1", "글자 획득", "여기가 OCR — 글자와 좌표를 뽑는다", [
-        ("①", "밀도 기반 타일 분할", "code",
+    ("②", "라우팅", "이 페이지를 어떻게 읽을지 먼저 정한다", [
+        ("", "트리아지", "code",
+         "PDF는 페이지마다 structured / hybrid / scan_like 판정. 디지털 텍스트를 믿을 수 있으면 "
+         "OCR 을 아예 안 돌린다(정확·무료). HWP는 텍스트·표를 사내 파서 정본으로 쓰고 내장 이미지만 OCR. "
+         "<span class=\"gaptag\">그림엔 없음</span> 벡터로 그린 글자(이미지가 아니라 도형 패스로 그려진 "
+         "큰 타이포)가 있으면 structured 판정에 경고만 남긴다 — 판정 자체를 바꾸진 않는다(샘플 1건짜리 "
+         "임계값을 새로 만드는 게 더 위험해서, 2026-08-06)."),
+    ]),
+    ("③", "조각 분할", "OCR 에 보내기 전, 세로로 긴 이미지를 자른다", [
+        ("", "밀도 기반 타일 분할", "code",
          "세로로 긴 광고(6000px+)는 한 번에 못 보내 잘라야 한다. 글자량이 고르게 나뉘는 자리를 찾아 "
          "글자 없는 행에 스냅해 자른다 — 기계적으로 1600px마다 자르면 글자가 반토막 났다."),
-        ("②", "레이아웃 + OCR", "paddle",
+    ]),
+    ("④", "StructureV3(+OCR)", "조각당 1회 호출로 글자·좌표·레이아웃을 함께 받는다", [
+        ("", "레이아웃 + OCR", "paddle",
          "타일당 1회. 글자 박스·인식 텍스트·레이아웃 블록(제목/본문/표/그림)을 한 번에 받는다."),
-        ("③", "좌표 복원 · 중복 제거", "code",
+    ]),
+    ("⑤", "좌표 복원 · 영역 조립", "조각 좌표를 되돌리고, 라인을 레이아웃 블록에 배정한다", [
+        ("", "좌표 복원 · 중복 제거", "code",
          "타일 좌표를 원본 이미지 좌표로 되돌리고, 타일이 200px 겹치는 구간의 중복 검출을 지운다."),
-        ("④", "디지털 우선 병합", "code",
+        ("", "디지털 우선 병합", "code",
          "PDF·HWP의 디지털 텍스트와 OCR 결과가 같은 자리에서 겹치면 디지털을 정본으로 쓴다."),
-        ("⑤", "영역 조립", "code",
+        ("", "영역 조립", "code",
          "레이아웃 블록에 라인을 좌표로 분배해 <b>영역</b>을 만든다. 어느 블록에도 안 들어간 라인이 "
-         "<b>미배정 낱줄</b>이 되고, 이것이 ⑨가 존재하는 이유다."),
+         "<b>미배정 낱줄</b>이 된다(그림의 점선 화살표)."),
+        ("", "미배정 낱줄 재배정", "code",
+         "위에서 남은 낱줄을 <b>좌표만 보고</b> 다시 붙인다(VLM 호출 없음). 포함: 중심점을 품는 가장 "
+         "작은 영역 → 근접: <b>같은 칼럼</b>(가로 50% 이상 겹침) 중 수직 갭 최근접. 둘 다 실패하면 "
+         "미배정으로 최종 남는다."),
     ]),
-    ("2", "구조 정리", "글자를 화면 구조에 맞게 묶는다", [
-        ("⑥", "카드 게이트", "code",
+    ("⑥", "구조 판정", "영역마다 역할을 정하고, 카드형이면 나눈다", [
+        ("", "카드 게이트", "code",
          "세로 스크롤형(높이/폭 ≥ 2)이거나 단일 패널이면 카드 판정을 <b>호출조차 안 한다</b> — 헛호출 차단."),
-        ("⑦", "카드 배정", "vlm",
+        ("", "카드 배정", "vlm",
          "한 이미지에 광고 패널이 좌우로 여러 장일 때 묶음을 나눈다. <b>개수는 픽셀 밀도가 결정론적으로 세고</b> "
-         "배정은 VLM — 전폭 헤드라인처럼 어느 컬럼에도 안 속하는 요소는 좌표로 못 정하기 때문. 밀도 관측을 증거로 실어 1회만 묻는다."),
-        ("⑧", "역할 판정", "vlm",
-         "영역마다 <b>역할</b>(제목·본문·유의사항·고지문구·각주·표·이미지·버튼·기타) 하나를 정한다. "
-         "왼쪽 그림 박스 옆 라벨의 괄호 값이 이것. OCR 정본만 보고 판정한다(VLM 후보는 안 씀 — 비결정성 격리)."),
-        ("⑨", "미배정 낱줄 귀속", "code",
-         "⑤에서 남은 낱줄을 <b>좌표만 보고</b> 붙인다(VLM 호출 없음). ㉠ 포함: 중심점을 품는 가장 작은 영역 → "
-         "㉡ 근접: <b>같은 칼럼</b>(가로 50% 이상 겹침) 중 수직 갭 최근접. 둘 다 실패하면 미배정 유지."),
+         "배정은 VLM — 전폭 헤드라인처럼 어느 컬럼에도 안 속하는 요소는 좌표로 못 정하기 때문."),
+        ("", "역할 판정", "vlm",
+         "영역마다 <b>역할</b> 9종(제목·본문·유의사항·고지문구·각주·표·이미지·버튼·기타) 중 하나를 정한다. "
+         "OCR 정본만 보고 판정한다(VLM 후보는 안 씀 — 비결정성 격리). "
+         "<span class=\"gaptag\">그림엔 없음</span> VLM 응답이 일부만 오면 나머지 영역은 규칙 기반 "
+         "폴백(코드가 위치·크기로 추정한 값)을 그대로 쓰고, 그 폴백 값도 <code>role_rule</code> 로 따로 "
+         "남겨 VLM 최종값과 나중에 비교할 수 있게 한다(2026-08-06)."),
     ]),
-    ("3", "통합 판독", "OCR 이 놓치거나 잘못 읽은 글자를 VLM 이 재확인 — 정본은 안 덮는다", [
-        ("⑩", "밴드 통합판독", "vlm",
+    ("⑦", "통합 재판독", "OCR 이 놓치거나 잘못 읽은 글자를 VLM 이 재확인 — 정본은 안 덮는다", [
+        ("⑦-1", "밴드 통합판독", "vlm",
          "OCR 이 본 것과 <b>같은 크롭</b>을 VLM 에도 주고 \"이 영역들을 고쳐라 + 목록에 없는 문구를 찾아라\"를 "
-         "한 번에 묻는다(두 단계를 합쳐 호출 122→65회). 결과는 <b>후보</b>(vlm_reading)로만 붙는다."),
-        ("⑪", "통짜 스윕", "vlm",
+         "한 번에 묻는다. 결과는 <b>후보</b>(<code>vlm_reading</code>)로만 붙는다."),
+        ("⑦-2", "통짜 스윕", "vlm",
          "타일이 원래 못 잡는 대형 장식 타이포를 페이지 전체 1회 통짜로 회수(실측: 002 '행운의 777 이벤트')."),
-        ("⑫", "스윕-OCR 중복 정정", "vlm",
+        ("⑦-3", "오차(스윕-OCR 중복) 재판독", "vlm",
          "같은 자리를 다르게 읽은 경우(<code>1O.1%p</code> vs <code>① 0.1%p</code>) 그 자리만 고해상 재판독해 "
          "<b>VLM 이 심판</b>한다. 코드가 규칙으로 우열을 정하지 않는다."),
-        ("⑬", "저신뢰 재판독", "vlm",
+        ("⑦-4", "저신뢰 재판독", "vlm",
          "OCR 신뢰도 0.80 미만 라인을 다시 읽는다(실측: '생학해대' → '생활형태'). 역시 후보로만 부착."),
-        ("⑭", "읽기순서 정렬 · 진단", "code",
-         "카드 → 위→아래 → 좌→우 로 정렬한다. 레이아웃이 <b>통째로 놓친 덩어리</b>가 있으면 판단 로그에 남긴다."),
-        ("⑮", "광고 분류", "vlm", "상품군(예금성·대출성)과 광고 유형을 문서당 1회 판정 — 어느 스키마를 쓸지 결정."),
     ]),
-    ("4", "스키마 추출 (STAGE_3)", "심의 스키마 필드에 값을 채운다 — 별도 프로세스", [
+    ("⑧", "읽기순서 정렬", "카드 → 위→아래 → 좌→우 순서로 최종 순서를 정한다", [
+        ("", "정렬 · 진단", "code",
+         "레이아웃이 <b>통째로 놓친 덩어리</b>가 있으면 판단 로그에 남긴다. "
+         "<span class=\"gaptag\">그림엔 없음</span> 정본-후보 관계 딱지(<code>same</code>/"
+         "<code>head_drop</code>/<code>tail_cut</code>/<code>expanded</code>/<code>diverged</code>) 계산은 "
+         "그림엔 ⑦ 안에 있는 것처럼 그려졌지만, 실제로는 <b>이 단계가 끝난 뒤</b>로 옮겨져 있다 — 순서가 "
+         "확정된 뒤 비교해야 라벨이 안 흔들린다(2026-08-06, 위 다이어그램 아래 노란 캡션 참고)."),
+    ]),
+    ("⑨", "산출물", "목적이 서로 달라 파일 3개로 나누고, region_id 로 연결한다", [
+        ("", "분류(상품군 판정)", "vlm",
+         "<span class=\"gaptag\">그림엔 없음</span> 그림에는 스키마를 '선택'하는 박스만 있고 이 단계 "
+         "자체가 없다. 실제로는 여기서 문서 전체에 딱 1회 VLM 을 불러 상품군·광고유형을 정하고, "
+         "파일명에서 뽑은 힌트(prior)와 합의한다 — 둘이 갈리면 <b>파일명을 우선</b>하고, 그 근거를 "
+         "<code>category_source</code> 값으로 남긴다(<code>vlm</code>=합의 / "
+         "<code>filename_vlm_abstained</code>=VLM 이 '기타·판단불가' 답변 / "
+         "<code>filename_vlm_failed</code>=VLM 호출 실패 / <code>filename_no_vlm</code>=HWP 라 VLM 을 "
+         "안 부름)."),
+        ("", "출력 3개", "code",
+         "<code>out/json</code>(전체 기록) · <code>out/llm_view</code>(정제 텍스트) · "
+         "<code>out/extracted</code>(스키마 필드) — 아래 '산출물 3개' 박스에 각 파일의 실제 키 목록이 있다."),
+    ]),
+    ("", "스키마 추출 (STAGE_3 — ①~⑨ 와 별개 프로세스)",
+     "심의 스키마 필드에 값을 채운다 — tools/run_extract.py 로 따로 돈다", [
         ("", "5그룹 분할 호출", "vlm",
-         "상품기본 / 금리 / 의무고지 / 위험표현 / 이벤트 로 나눠 문서당 5회. 한 번에 57필드를 다 물으면 "
-         "응답이 길어져 배열이 비는 퇴행이 난다."),
+         "상품기본 / 금리 / 의무고지 / 위험표현 으로 나눠 문서당 4회, <b>이벤트 페이지면 이벤트 그룹이 "
+         "더해져 5회</b>. 한 번에 57필드를 다 물으면 응답이 길어져 배열이 비는 퇴행이 난다. "
+         "<span class=\"gaptag\">그림엔 없음</span> 그림의 예시엔 G1~G4 만 적혀 있고 이 조건부 5번째 "
+         "그룹은 빠져 있다."),
         ("", "부재 4분류", "code",
          "값이 없을 때 <b>미표시 / 해당없음 / 확인필요 / 판정제외</b>를 스키마 메타데이터로 코드가 가른다 — "
-         "모델 호출 0회. '없음'을 다 똑같이 두면 진짜 누락이 묻힌다."),
+         "<b>모델 호출 0회</b>. '없음'을 다 똑같이 두면 진짜 누락이 묻힌다. "
+         "<span class=\"gaptag\">그림엔 없음</span> 그림의 'vlm 필드 검출 검토' 박스만 보면 VLM 이 "
+         "이 판단까지 하는 것처럼 보이지만, 이 갈래질은 전부 코드다."),
         ("", "근거 bbox 재부착", "code",
          "필드가 지목한 region_id 로 좌표를 되붙여 이 화면의 hover 하이라이트에 연결한다."),
     ]),
@@ -1173,11 +1228,12 @@ def _pipeline_overview_html(parsing_only: bool = False) -> str:
         + ('<p class="scopebar">그림 좌측 하단 "stage3 최종 산출물 필드 뽑는 단계(임시)" 박스는 '
            '참고용입니다 — 이 화면은 파싱(그림의 ①~⑨)까지만 봅니다.</p>' if parsing_only else "")
         + '<details class="toggle stepswrap"><summary class="sechead">단계별 설명 (글로 보기)'
-        '<span class="meta">위 그림보다 더 세분화된 번호체계(0~4단계 · ①~⑮) · 실측 근거</span></summary>'
+        '<span class="meta">위 그림과 같은 번호(①~⑨) + <span class="gaptag">그림엔 없음</span> 표시로 '
+        '그림에 못 담은 내용을 보충 · 실측 근거</span></summary>'
         f'<div class="phases">{"".join(phases)}</div></details>'
         '<p class="howto"><b>이 배치가 원칙입니다</b> — <b>의미 판단은 모델이, 검산은 코드가</b> 합니다. '
-        '카드 개수는 픽셀 밀도가 세고(⑦), 낱줄 귀속은 좌표 게이트가 막고(⑨), 통독 후보는 관계 딱지로 '
-        '교차검증합니다(⑩). 반대로 코드가 규칙으로 값의 우열을 정하지는 않습니다(⑫). '
+        '카드 개수는 픽셀 밀도가 세고(⑥), 낱줄 귀속은 좌표 게이트가 막고(⑤), 통독 후보는 관계 딱지로 '
+        '교차검증합니다(⑧). 반대로 코드가 규칙으로 값의 우열을 정하지는 않습니다(⑦-3). '
         '그리고 <b>VLM 판독은 정본을 절대 덮지 않습니다</b> — 덮으면 같은 광고를 두 번 돌렸을 때 값이 달라져 '
         '재현이 안 되기 때문입니다(실측: 역할 판정은 실행 간 97.3% 일치, 정본 텍스트·좌표는 100% 일치).</p>'
         '<div class="ovhead">산출물 3개 — 목적이 서로 달라 합치지 않습니다</div>'
@@ -1265,11 +1321,14 @@ def main() -> None:
             ("미표시", "표시 의무가 있는데 값이 없는 개수. 위반 판정이 아니라 확인이 필요하다는 관측"),
         ]
     head = "".join(f'<th title="{html.escape(d)}">{h}</th>' for h, d in cols)
-    # 미배정 해설 — "낮을수록 좋다"고만 쓰면 오해다(실측: 21줄 중 20줄이 VLM 추가 회수분).
+    # 미배정 해설 — 2026-08-04 에는 "21줄 중 20줄" 같은 특정 실행의 숫자를 박아 넣었는데,
+    # 문서마다 실제 비율이 다르니 그 숫자만 낡아도 화면이 거짓말을 하게 된다(2026-08-06,
+    # screen-guide-review-html.md §0-(b) 에서 지적됨). 특정 수치 대신 계산 방식만 적는다 —
+    # 실제 수치는 아래 "표 보는 법" 토글과 "그중 OCR" 열에서 그때그때 읽으면 된다.
     un_note = (
-        '<b>미배정</b>은 총계가 아니라 <b>그중 OCR</b> 숫자를 봅니다 — 전체 21줄 중 20줄은 '
-        'OCR 이 아예 못 읽어 VLM 이 새로 건진 문구이고(밴드 근사 좌표라 일부러 영역에 안 붙임, '
-        '텍스트는 다음 단계로 전달) OCR 출처는 1줄뿐입니다. '
+        '<b>미배정</b>은 총계가 아니라 <b>그중 OCR</b> 숫자를 봅니다 — 대부분은 결함이 아니라 '
+        '⑦-2 통짜 스윕이 OCR 이 못 읽은 문구를 새로 건진 추가 회수분이고(밴드 근사 좌표라 일부러 '
+        '영역에 안 붙임, 텍스트는 다음 단계로 전달), 진짜 결함 신호는 그 나머지(그중 OCR)뿐입니다. '
         '<b>영역 개수는 많고 적음이 품질이 아닙니다</b> — 화면을 몇 덩어리로 검출했나일 뿐입니다. '
     )
     if args.parsing_only:
@@ -1285,10 +1344,40 @@ def main() -> None:
             '<b>미표시</b>(빨강)만 실제로 사람이 확인할 값이며, 이것도 <b>위반 판정이 아니라 사실 관측</b>입니다. '
             '컬럼 제목에 마우스를 올리면 뜻이 나옵니다.</p>'
         )
+    # 컬럼 산출 방법 — hover 만으로는 지나치기 쉬워, 늘 펴서 보이는 토글로 한 번 더 적는다.
+    col_calc = [
+        ("파일", "문서 ID(원본 파일명에서 확장자만 뗀 것). 눌러서 아래 상세로 스크롤."),
+        ("페이지", "<code>out/json</code> 의 <code>pages[]</code> 배열 길이 — 그 문서에서 파싱된 페이지 수."),
+        ("영역", "<code>pages[].regions[]</code> 개수를 페이지마다 더한 값 — ⑤ 영역 조립이 만든 "
+                 "레이아웃 블록 수. 많다고 잘 읽었다는 뜻은 아니다(화면 구성에 따라 다름)."),
+        ("라인", "<code>pages[].regions[].lines[]</code> 개수 + <code>pages[].unassigned_lines[]</code> "
+                 "개수 — 영역에 붙었든 못 붙었든 잡아낸 글자 줄 전부. 높을수록 더 많이 읽었다는 뜻."),
+        ("미배정", "<code>pages[].unassigned_lines[]</code> 개수. 그중 <code>source=vlm_sweep</code>"
+                   "(⑦-2 통짜 스윕이 새로 건진 것)은 결함이 아니라 추가 회수분이고, 나머지"
+                   "(표의 '그중 OCR')가 진짜 결함 신호다."),
+    ]
+    if not args.parsing_only:
+        col_calc += [
+            ("found/not_found", "<code>out/extracted</code> 의 <code>coverage.fields_found</code> / "
+                                 "<code>coverage.fields_not_found</code>. STAGE_3 가 스키마 필드에 값을 "
+                                 "채웠는지 여부의 집계. not_found 는 광고에 원래 없는 값일 수 있어 결함이 "
+                                 "아니다."),
+            ("미표시", "<code>coverage.absence_missing + coverage.absence_missing_in_events</code>. "
+                       "부재 4분류(미표시/해당없음/확인필요/판정제외) 중 '표시 의무가 있는데 값이 없음'만 "
+                       "골라 센 것 — 위반 판정이 아니라 사람이 확인해야 한다는 사실 관측이다."),
+        ]
+    col_calc_html = "".join(
+        f'<tr><td class="cc-col">{html.escape(h)}</td><td>{d}</td></tr>' for h, d in col_calc
+    )
+    col_calc_block = (
+        '<details class="toggle colcalcwrap"><summary class="sechead">표 보는 법 — 컬럼 뜻·산출 방법'
+        '<span class="meta">숫자가 어디서 나왔는지 궁금하면 여기</span></summary>'
+        f'<table class="colcalc"><tbody>{col_calc_html}</tbody></table></details>'
+    )
     summary = (
         '<div class="summary"><b>파일별 요약</b> — 문서 이름을 누르면 아래 상세로 이동합니다.'
         f'<table><thead><tr>{head}</tr></thead>'
-        f'<tbody>{"".join(summary_rows)}</tbody></table>{sumnote}</div>'
+        f'<tbody>{"".join(summary_rows)}</tbody></table>{sumnote}{col_calc_block}</div>'
     )
 
     doc = (
