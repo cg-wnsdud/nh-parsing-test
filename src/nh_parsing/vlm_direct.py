@@ -15,6 +15,7 @@ bbox 는 VLM 이 준 y_ratio 로 만든 전폭 근사 밴드 (source='vlm_sweep'
 — 죽은 코드 감사 참조.)
 """
 
+import collections
 import re
 
 from PIL import Image
@@ -520,11 +521,23 @@ _BAND_READ_PROMPT = """첨부 이미지는 광고 화면의 한 구간입니다.
 
 def read_band_regions(
     band: Image.Image, entries: list[tuple[str, str]]
-) -> tuple[dict[str, tuple[str, float | None]], list[dict]]:
-    """밴드 하나를 읽어 (영역별 교정, 누락 문구)를 한 번에 돌려준다.
+) -> tuple[dict[str, tuple[str, float | None]], list[dict], collections.Counter]:
+    """밴드 하나를 읽어 (영역별 교정, 누락 문구, 버린 이유 집계)를 한 번에 돌려준다.
 
     entries 는 [(region_id, 현재 OCR 텍스트)]. 반환의 첫 원소는 region_id → (전사, 확신도)
     이며 형식이 깨졌거나 빈 응답인 영역은 아예 담기지 않는다(호출측이 원값 유지).
+
+    **세 번째 반환값이 왜 필요한가** (2026-08-06 실측). 이 호출은 예외 없이 성공하면서
+    영역을 0개만 돌려줄 수 있다 — 003 p2 에서 22개 영역 중 **0개** 부착이 관측됐다
+    (같은 코드·같은 입력의 직전 실행은 22/22 였다). 그런데 버리는 자리가 셋 다
+    조용한 `continue` 라 무엇 때문에 비었는지 알 수가 없었다:
+
+        · 응답에 없는 region_id     — VLM 이 ID 를 지어냈거나 목록을 못 따라감
+        · 빈 텍스트                 — 영역은 인정했는데 판독을 못 냄
+        · 형식 파손(_looks_malformed) — JSON 중괄호·짝 안 맞는 따옴표
+
+    호출측이 이 집계를 notes 에 남긴다. 판정은 안 바꾼다(버리는 규칙은 그대로) —
+    "왜 비었나"를 다음에 셀 수 있게 하는 것이 목적이다.
     """
     listing = "\n".join(f'- region_id={rid} 현재판독: "{txt[:120]}"' for rid, txt in entries)
     parts = [
@@ -541,14 +554,27 @@ def read_band_regions(
 
     known = {rid for rid, _ in entries}
     readings: dict[str, tuple[str, float | None]] = {}
+    dropped: collections.Counter = collections.Counter()
     for item in data.get("regions", []) or []:
         rid = str(item.get("region_id", "")).strip()
         text = str(item.get("text", "")).strip()
-        if rid not in known or not text or _looks_malformed(text):
+        if rid not in known:
+            dropped["모르는_region_id"] += 1
+            continue
+        if not text:
+            dropped["빈_텍스트"] += 1
+            continue
+        if _looks_malformed(text):
+            dropped["형식_파손"] += 1
             continue
         try:
             conf = float(item.get("confidence"))
         except (TypeError, ValueError):
             conf = None
         readings[rid] = (text, conf)
-    return readings, list(data.get("missing", []) or [])
+    # 응답에 아예 안 실린 영역 — 위 셋과 원인이 다르다(VLM 이 그 항목을 통째로 건너뜀)
+    answered = {str(i.get("region_id", "")).strip() for i in data.get("regions", []) or []}
+    missing_ids = len(known - answered)
+    if missing_ids:
+        dropped["응답에_없음"] = missing_ids
+    return readings, list(data.get("missing", []) or []), dropped

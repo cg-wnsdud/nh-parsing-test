@@ -50,10 +50,10 @@ def _print_timing(rows: list[dict], wall_s: float) -> None:
           f'{tot_p:>8.1f}{tot_v:>8.1f}{tot_p - tot_v:>8.1f}{tot_c:>8}{tot_cached:>5}'
           f'{sum(r["stage_fails"] for r in rows):>5}')
     if tot_c:
-        # 호출당 평균이 정상 추론(12초대)보다 한참 짧으면 전량 실패를 의심한다 —
-        # 실패도 3회 재시도 + 백오프(2s+4s)를 쓰므로 7~8초대로 찍힌다.
-        print(f'  호출당 평균 {tot_v / tot_c:.1f}s '
-              f'(참고: 정상 추론 12초대 · 전량 실패는 재시도 대기라 7~8초대)')
+        # 추론 서버가 공유 자원이라 실행마다 크게 흔들린다 — 정상 실행에서 7.2~10.0s 를
+        # 관측했다(2026-08-06). 그래서 이 값만으로는 실패를 못 가린다. 판정은 아래
+        # _report_stage_failures 의 dead_pages(산출물 검사)가 한다. 이 줄은 참고용이다.
+        print(f'  호출당 평균 {tot_v / tot_c:.1f}s (서버 부하로 흔들림 — 실패 판정 근거 아님)')
     print(f'  전체 벽시계 {wall_s:.1f}s (파일 합 {tot_p:.1f}s + 러너 오버헤드 '
           f'{wall_s - tot_p:.1f}s), 문서당 평균 {tot_p / len(rows):.1f}s')
     if tot_cached:

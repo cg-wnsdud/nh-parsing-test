@@ -768,10 +768,19 @@ def _merged_band_read(page: AdPage, canvas_img: Image.Image, all_lines: list[Lin
         crop_top = max(0, need_top)
         entries = [(r.region_id, " ".join(l.text for l in r.lines)) for r in mine]
         try:
-            readings, missing = read_band_regions(crop, entries)
+            readings, missing, dropped = read_band_regions(crop, entries)
         except Exception as exc:
             page.notes.append(f"밴드 통합판독 실패(y={band.offset}, 이 구간 원값 유지): {exc}")
             continue
+        # 예외 없이 성공하면서 아무것도 안 돌려주는 경우가 있다 — 실측(2026-08-06)
+        # 003 p2 가 영역 22개 중 0개 부착으로 나왔고(직전 실행은 22/22) 원인이
+        # 기록되지 않아 못 가렸다. 버리는 규칙은 그대로 두고 이유만 남긴다.
+        if dropped:
+            page.notes.append(
+                f"밴드 통합판독 일부 미채택(y={band.offset}, 요청 {len(entries)}개 중 "
+                f"채택 {len(readings)}개): "
+                + ", ".join(f"{k} {v}" for k, v in sorted(dropped.items()))
+            )
 
         by_id = {r.region_id: r for r in page.regions}
         for rid, (text, conf) in readings.items():

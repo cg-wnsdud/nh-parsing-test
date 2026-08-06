@@ -7,6 +7,8 @@
      쓰므로, 글자량이 몰린 조각이 손해를 본다.
 """
 
+import collections
+
 from PIL import Image, ImageDraw
 
 from nh_parsing.bands import (
@@ -211,7 +213,10 @@ def test_밴드_크롭은_맡은_영역을_통째로_담는다():
 
     def fake_read(crop, entries):
         seen.append((crop.width, crop.height))
-        return {rid: (txt, 0.9) for rid, txt in entries}, []
+        # 반환은 (판독, 누락문구, 버린이유집계) 3-tuple. 2-tuple 로 두면 언팩 ValueError 가
+        # pipeline 의 try 에 잡혀 "밴드 통합판독 실패" 노트로 둔갑하고, 이 테스트는 다른
+        # 노트를 보고 그대로 통과한다 — 2026-08-06 실제로 그렇게 통과하고 있었다.
+        return {rid: (txt, 0.9) for rid, txt in entries}, [], collections.Counter()
 
     import nh_parsing.vlm_direct as vd
     orig = vd.read_band_regions
@@ -225,3 +230,6 @@ def test_밴드_크롭은_맡은_영역을_통째로_담는다():
     # 200px 짜리 영역이 통째로 들어가려면 크롭 높이가 그 이상이어야 한다
     assert max(h for _, h in seen) >= 200
     assert any("크롭 확장" in n for n in page.notes), "확장 사실을 노트로 남겨야 한다"
+    # 성공 경로를 재는 테스트다 — 실패 노트가 있으면 무엇을 쟀는지 알 수 없다
+    assert not any("통합판독 실패" in n for n in page.notes), page.notes
+    assert page.regions[0].vlm_reading == "경계에 걸친 영역"
