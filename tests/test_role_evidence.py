@@ -100,3 +100,61 @@ def test_새_필드는_판정에_쓰이지_않는다():
         regions, _ = build_regions(blocks, [_line(text, box)], canvas_h=1000, page_no=1)
         roles.append(regions[0].role)
     assert len(set(roles)) == 1, f"layout_score 가 판정을 흔든다: {roles}"
+
+
+# ───────────────── B4b: 부분 응답이 조용히 묻히지 않는가 ─────────────────
+
+
+def test_VLM이_일부만_판정하면_notes에_남는다(monkeypatch):
+    """judge_region_roles 의 반환값(applied)을 버려서 부분 응답을 못 잡던 자리.
+
+    except 는 완전 실패만 잡는다 — VLM 이 정상 응답하면서 영역을 빠뜨리면 그 영역은
+    조용히 규칙 폴백 값을 유지했고 notes 에 아무것도 안 남았다.
+    """
+    from nh_parsing import pipeline
+    from nh_parsing.ir import AdPage
+
+    regions = [
+        Region(region_id=f"p1_r{i:03d}", bbox=[0, i * 10, 100, i * 10 + 9],
+               lines=[_line(f"줄{i}", [0, i * 10, 100, i * 10 + 9])])
+        for i in range(3)
+    ]
+    page = AdPage(page_no=1, parse_route="ocr", canvas_w=100, canvas_h=100, regions=regions)
+
+    monkeypatch.setattr(pipeline, "judge_region_roles", lambda *a, **k: 2)  # 3개 중 2개만
+    pipeline._apply_vlm_judgments(page, canvas_img=None)
+
+    note = [n for n in page.notes if "부분 응답" in n]
+    assert note, f"부분 응답이 조용히 묻혔다: {page.notes}"
+    assert "3개 중 2개" in note[0] and "나머지 1개" in note[0]
+
+
+def test_전부_판정되면_노이즈를_안_남긴다(monkeypatch):
+    from nh_parsing import pipeline
+    from nh_parsing.ir import AdPage
+
+    regions = [Region(region_id="p1_r000", bbox=[0, 0, 100, 10],
+                      lines=[_line("줄", [0, 0, 100, 10])])]
+    page = AdPage(page_no=1, parse_route="ocr", canvas_w=100, canvas_h=100, regions=regions)
+    monkeypatch.setattr(pipeline, "judge_region_roles", lambda *a, **k: 1)
+    pipeline._apply_vlm_judgments(page, canvas_img=None)
+    assert not any("부분 응답" in n for n in page.notes)
+
+
+def test_라인_없는_빈_박스는_분모에서_빠진다(monkeypatch):
+    """빈 검출 박스는 애초에 VLM 에게 안 묻는다 — 세면 가짜 부분응답 경보가 된다.
+
+    실측 225개 영역 중 24개(10.7%)가 글자 없는 껍데기다.
+    """
+    from nh_parsing import pipeline
+    from nh_parsing.ir import AdPage
+
+    regions = [
+        Region(region_id="p1_r000", bbox=[0, 0, 100, 10],
+               lines=[_line("줄", [0, 0, 100, 10])]),
+        Region(region_id="p1_r001", bbox=[0, 20, 100, 30]),   # 빈 껍데기
+    ]
+    page = AdPage(page_no=1, parse_route="ocr", canvas_w=100, canvas_h=100, regions=regions)
+    monkeypatch.setattr(pipeline, "judge_region_roles", lambda *a, **k: 1)
+    pipeline._apply_vlm_judgments(page, canvas_img=None)
+    assert not any("부분 응답" in n for n in page.notes), page.notes

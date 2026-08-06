@@ -187,8 +187,20 @@ def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
     # 영역 역할 판정 — 섹션(의미 묶음)은 2026-08-03 제거했다(vlm_judge 상단 주석).
     # 같이 빠진 것: 장식예시 격리(section_type 의존), 미배정 낱줄의 VLM 내용 귀속.
     # 둘 다 흔들리는 의미 판정이었고 후속 계약에 담을 자리도 없었다.
+    # except 는 **완전 실패**(서버 죽음·JSON 깨짐)만 잡는다. VLM 이 정상 응답하면서
+    # 일부 영역을 빠뜨리면 그 영역들은 조용히 규칙 폴백 값을 유지했고 notes 에 아무것도
+    # 안 남았다 — "조용한 실패 금지" 원칙에서 벗어난 자리였다(2026-08-06 수정).
+    # 실측(2026-08-05, 글자 있는 영역 201개 전수): VLM 적용 199 · 폴백 2. 그 2 중
+    # 하나는 HWP(캔버스가 없어 애초에 안 부름)라 진짜 부분 응답은 1건이다. 규모가
+    # 작아 이건 결함 수정이 아니라 예방이다 — 다음에 늘어나면 로그로 알아챌 수 있다.
+    judgeable = sum(1 for r in page.regions if r.lines)
     try:
-        judge_region_roles(page.regions, canvas_img, page.canvas_h)
+        applied = judge_region_roles(page.regions, canvas_img, page.canvas_h)
+        if applied < judgeable:
+            page.notes.append(
+                f"VLM 역할 판정 부분 응답: {judgeable}개 중 {applied}개만 판정됨 "
+                f"→ 나머지 {judgeable - applied}개는 규칙 폴백(_refine_role) 값 유지"
+            )
     except Exception as exc:
         page.notes.append(f"VLM 역할 판정 실패 → 규칙 폴백(_refine_role) 유지: {exc}")
 
