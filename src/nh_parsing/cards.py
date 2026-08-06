@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """카드-우선 분할 (§D): SNS 카드·예시 뭉치가 한 이미지에 있을 때, region 들을 카드
 단위로 묶는다.
 
@@ -16,6 +14,8 @@ from __future__ import annotations
 개수가 결정론적으로 정해지므로 투표를 매번 3회 돌리지 않는다 — 1회 관측 후 개수가
 밀도와 어긋날 때만 나머지를 돌린다(관측 1회 + 로직 검산 + 조건부 재호출).
 """
+
+from __future__ import annotations
 
 from PIL import Image
 

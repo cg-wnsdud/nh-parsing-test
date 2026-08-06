@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """세로 스크롤 타일링 [B2-2] — 설계서 6.3절.
 
 초장신 캔버스(높이 4000px↑)를 오버랩 수평 밴드로 분할해 OCR에 보내고,
 결과 라인 좌표를 원본 캔버스 좌표로 복원한 뒤 오버랩 구간 중복을 제거한다.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

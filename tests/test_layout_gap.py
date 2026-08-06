@@ -5,10 +5,7 @@
 울려야 할 때 우는 것만큼 중요하다. 오탐이 잦으면 아무도 안 본다.
 """
 
-from nh_parsing.layout_gap import (
-    Cluster, cluster_line_boxes, detect, median_line_height, missed_blocks,
-    uncovered_clusters,
-)
+from nh_parsing.layout_gap import cluster_line_boxes, median_line_height, missed_blocks
 
 
 def _line(y, x0=100, x1=400, h=30):
@@ -47,60 +44,10 @@ def test_글자가_없으면_덩어리도_없다():
     assert median_line_height([]) == 0.0
 
 
-# ───────────────────── 놓친 자리 판정 ─────────────────────
-
-
-def test_영역이_덮은_덩어리는_놓친_게_아니다():
-    clusters = [Cluster([100, 100, 400, 300], 5)]
-    assert uncovered_clusters(clusters, [[90, 90, 410, 310]]) == []
-
-
-def test_영역이_없는_자리는_놓친_것이다():
-    clusters = [Cluster([100, 100, 400, 300], 5)]
-    missed = uncovered_clusters(clusters, [[1000, 1000, 1200, 1200]])
-    assert len(missed) == 1 and missed[0].covered == 0.0
-
-
-def test_여러_영역이_나눠_덮어도_인정한다():
-    """큰 덩어리가 작은 영역 여러 개로 인식된 것은 실패가 아니다."""
-    clusters = [Cluster([100, 100, 400, 300], 6)]
-    regions = [[100, 100, 400, 200], [100, 200, 400, 300]]
-    assert uncovered_clusters(clusters, regions) == []
-
-
-def test_절반만_덮이면_놓친_것이다():
-    clusters = [Cluster([100, 100, 400, 300], 6)]
-    missed = uncovered_clusters(clusters, [[100, 100, 400, 200]])   # 위 절반만
-    assert len(missed) == 1 and 0.4 < missed[0].covered < 0.6
-
-
-def test_낱줄_하나짜리는_무시한다():
-    """장식 글자 한 조각까지 실패로 세면 경보가 울기만 하고 아무도 안 본다."""
-    assert uncovered_clusters([Cluster([0, 0, 50, 20], 1)], []) == []
-
-
-def test_영역이_아예_없으면_전부_놓친_것이다():
-    boxes = [_line(y) for y in (100, 140, 900, 940)]
-    assert len(detect(boxes, [])) == 2
-
-
-# ───────────────────── 통합 ─────────────────────
-
-
-def test_정상_페이지는_경보를_울리지_않는다():
-    """영역이 글자를 제대로 덮고 있으면 놓친 자리가 0 이어야 한다."""
-    boxes = [_line(y) for y in (100, 140, 180, 600, 640, 680)]
-    regions = [[90, 90, 410, 220], [90, 590, 410, 720]]
-    assert detect(boxes, regions) == []
-
-
-def test_흩어진_글자를_영역이_못_담으면_짚어낸다():
-    """001 실측 상황 — 앱 목업처럼 글자가 흩어지면 StructureV3 가 영역을 못 만든다."""
-    boxes = [_line(100), _line(140), _line(900, x0=600, x1=700), _line(940, x0=600, x1=700)]
-    regions = [[90, 90, 410, 180]]            # 위 덩어리만 인식됨
-    missed = detect(boxes, regions)
-    assert len(missed) == 1
-    assert missed[0].bbox[1] >= 900, "못 담긴 아래쪽 덩어리를 짚어야 한다"
+# 2026-08-06: 면적 기준 판정(`uncovered_clusters` · `detect`)을 시험하던 8개를 지웠다.
+# 그 함수들이 생산 코드에서 안 쓰이는 것을 확인하고 제거했으므로(layout_gap.py 주석),
+# 남겨 두면 **아무도 부르지 않는 코드를 테스트가 지키는** 상태가 된다.
+# 아래 `missed_blocks`(줄 배정 기준)가 현행 판정이고 그쪽만 시험한다.
 
 
 # ───────────────── 줄 배정 기준 (면적 기준의 착시 교정) ─────────────────

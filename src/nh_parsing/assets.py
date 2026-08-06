@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """문서 내장 이미지(ImageAsset) 공용 헬퍼 — rag 트랙과 광고물 트랙이 공유.
 
 document-processor 의 docir.assets 는 {이름: ImageAsset} dict 이고,
 ImageAsset 은 bytes_data/mime_type/filename 을 노출한다 (2026-07-18 실측).
 문단 스트림에는 이미지 참조 노드가 없어 문서 내 위치는 알 수 없다.
 """
+
+from __future__ import annotations
 
 import io
 

@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Gemma(OpenAI 호환 VLM) 클라이언트 — 설계서 6.2/6.5절.
 
 - chat_json(): 모든 VLM 태스크가 공유하는 strict json_schema 호출 헬퍼 (재시도 포함)
 - classify(): 문서 분류 — 파일명 prior + VLM 관측 결합, category_source 로 합의/충돌 기록
   (이전 프로젝트 검증 패턴)
 """
+
+from __future__ import annotations
 
 import base64
 import io

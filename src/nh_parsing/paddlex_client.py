@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """PaddleX PP-StructureV3 클라이언트 [B2-3] — 설계서 6.4절.
 
 이전 프로젝트 orchestrator/adapters/paddlex.py 의 요청/응답 계약을 따른다.
 타일 이미지를 보내고 레이아웃 영역 + OCR 라인을 받아온다.
 좌표는 보낸 이미지(=타일) 픽셀 기준이므로 호출측에서 y_offset 만 더하면 된다.
 """
+
+from __future__ import annotations
 
 import base64
 import io

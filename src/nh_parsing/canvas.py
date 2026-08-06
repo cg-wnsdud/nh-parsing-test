@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """입력 정규화 [B0] — 광고물을 '페이지 캔버스' 목록으로 변환.
 
 캔버스 = 원본 픽셀 좌표계를 가진 단일 RGB 이미지.
 이후 모든 단계(타일링/OCR/영역)는 이 좌표계만 사용한다.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path

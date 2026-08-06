@@ -1,16 +1,19 @@
-from __future__ import annotations
-
 """AdPageIR — 광고물 파싱 산출물 스키마 (설계서 7절).
 
 모든 bbox 는 [x0, y0, x1, y1] 원본 캔버스 픽셀 좌표.
 HWP 디지털 추출처럼 캔버스가 없는 경우 bbox 는 None.
 """
 
+from __future__ import annotations
+
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-Source = Literal["digital", "ocr", "vlm", "vlm_sweep", "vlm_region"]
+# 실제로 대입되는 값 셋뿐이다 (2026-08-06 out/json 전수: ocr 448 · digital 37 · vlm_sweep 15).
+# 예전에는 "vlm"·"vlm_region" 도 있었는데 B안 전환(VLM 판독이 정본을 덮지 않고 후보로만
+# 붙는다) 이후 라인 출처로 대입되는 코드가 없어졌다 — 지우기 전 전수 확인함.
+Source = Literal["digital", "ocr", "vlm_sweep"]
 ParseRoute = Literal["digital", "ocr", "hybrid"]
 ParseStatus = Literal["ok", "partial", "unreadable"]
 
@@ -49,13 +52,12 @@ class Region(BaseModel):
     # 이 두 필드가 그 측정의 재료다 — walkthrough §9-⑤ 고도화 1단계.
     role_rule: Optional[str] = None
     role_rule_confidence: Optional[float] = None
-    section_id: Optional[str] = None   # 소속 섹션 (AdPage.sections 참조)
     card_no: Optional[int] = None      # 카드-분할(§D): 1..N=카드(위→아래·좌→우), 0=페이지 공통(배너/헤더). 스크롤/미적용은 None
-    is_illustrative: bool = False      # 예시/장식(앱화면 예시·지폐 그림 등) — 심의 대상 제외·보관 (2a)
+    # 예시/장식(앱화면 예시·지폐 그림 등) 격리용. ⚠️ **어디서도 True 로 대입되지 않는다** —
+    # 2026-08-03 섹션 제거 때 설정 코드가 같이 빠졌다. 읽는 곳 3군데(vlm_direct·pipeline·
+    # applicability)가 전부 항상 False 로 돈다. 되살릴 조건은 walkthrough §9-⑥ 참조.
+    is_illustrative: bool = False
     lines: list[Line] = Field(default_factory=list)
-    # (레거시) A안 시절: 통독 clean text 가 lines 를 대체하고 OCR 은 여기로 강등됐음.
-    # B안(현행)에서는 OCR/디지털이 lines 정본으로 남으므로 이 필드는 보통 비어 있다.
-    ocr_lines: list[Line] = Field(default_factory=list)
     # 영역별 VLM 통독(§6) — B안: OCR 정본을 덮어쓰지 않고 '후보'로만 보존한다. VLM 이
     # 이 영역 크롭을 통독한 clean text(회전·장식 교정 포함)이며, ocr_score(정밀도)로
     # OCR 과 교차검증된다. 최종 텍스트 선택은 judge/STAGE_3(스키마)가 수행 — 파싱 단계는
@@ -73,38 +75,17 @@ class Region(BaseModel):
         return "\n".join(line.text for line in self.lines)
 
 
-class ExtractedField(BaseModel):
-    key: str                        # 심의필번호|금리|우대금리|가입기간 ...
-    value: str
-    bbox: Optional[list[int]] = None
-    confidence: Optional[float] = None
-    source: Source = "ocr"
-    extractor: Optional[str] = None      # vlm | vlm+crop(수치 재확인 교정) | regex(폴백)
-    ocr_backed: Optional[bool] = None    # 값이 참조 라인 텍스트에 실재하는가 (환각 방지)
-    ocr_score: Optional[float] = None    # 값 토큰 중 페이지 텍스트 발견 비율 (연속 신호)
-    regex_backed: Optional[bool] = None  # 알려진 표기 패턴과 형태 일치 (보조 신호)
-    crop_verified: Optional[bool] = None # 수치 필드 고해상 크롭 재확인 통과 여부 (6.4)
-    obs_count: Optional[int] = None      # 복수 관측 중 이 값이 관측된 횟수 (득표수)
-
-
-class Section(BaseModel):
-    """의미 단위 섹션 — 같은 목적의 영역 묶음 (예: '이벤트1 유의사항' 전체).
-
-    골드셋 평가의 기본 단위. bbox 는 소속 영역들의 합집합.
-    """
-
-    section_id: str
-    # 섹션은 2026-08-03 파싱에서 제거됐다(vlm_judge 상단 주석). 모델과 AdPage.sections
-    # 필드는 남기되 파이프라인은 채우지 않는다 — 검수 도구가 조용히 비는 쪽이 낫다.
-    section_type: str
-    section_no: int = 1             # 같은 타입 섹션이 여럿일 때 위→아래 순번
-    group_no: Optional[int] = None  # 시각적 묶음(카드/패널/컬럼) 번호 — SNS 카드형 등.
-                                    # 묶음 구조가 없는 페이지는 None (범용 계층, 특정 양식 가정 없음)
-    bbox: Optional[list[int]] = None
-    region_ids: list[str] = Field(default_factory=list)
-    confidence: Optional[float] = None
-    source: str = "vlm"
-    is_illustrative: bool = False   # 장식예시 섹션 — 심의 대상에서 격리(보관) (2a)
+# 2026-08-06 제거: `ExtractedField` 와 `Section` 모델, `AdPage.extracted_fields` ·
+# `AdPage.sections` 필드.
+#
+#   · Section       — 섹션(의미 묶음) 생성을 2026-08-03 에 파이프라인에서 없앴다.
+#                     그 뒤로 항상 빈 리스트였고 채우는 코드가 없다.
+#   · ExtractedField — 필드 추출은 STAGE_3(out/extracted)가 단일 창구다. 파싱 단계는
+#                     필드를 안 뽑으므로 이 모델도 항상 빈 리스트였다.
+#
+# 산출물(out/json)에서 두 키가 사라진다. 읽던 곳은 러너의 진단 출력(항상 아무것도 안
+# 찍혔다)과 삭제된 도구 둘(dump_text·make_gold_draft)뿐이었다. 되살릴 일이 생기면
+# git 이력에 남아 있다.
 
 
 class AdPage(BaseModel):
@@ -115,10 +96,8 @@ class AdPage(BaseModel):
     parse_route: ParseRoute
     parse_status: ParseStatus = "ok"
     triage: Optional[dict] = None   # PDF 페이지 triage 근거 (감사 추적용)
-    sections: list[Section] = Field(default_factory=list)
     regions: list[Region] = Field(default_factory=list)
     unassigned_lines: list[Line] = Field(default_factory=list)
-    extracted_fields: list[ExtractedField] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 

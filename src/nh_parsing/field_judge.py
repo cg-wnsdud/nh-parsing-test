@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """값 검증 신호 — 값이 근거 텍스트에 실재하는지 재는 연속 신뢰 지표.
 
 원본 패턴 (paddle-gemma-orchestrator): core/extraction.py::check_field_consistency —
@@ -12,6 +10,8 @@ BACKED_TOKEN_RATIO(0.8) 이상이면 evidence_backed=True (STAGE_3, extract.py �
 merge_observations)는 전부 그 제거된 경로에서만 불리고 있어 같이 걷어냈다
 (2026-07-29, 죽은 코드 감사 후). 아래 두 개만 지금도 쓰인다.
 """
+
+from __future__ import annotations
 
 import re
 

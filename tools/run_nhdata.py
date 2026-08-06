@@ -125,12 +125,8 @@ def main() -> None:
                 f"canvas={pg.canvas_w}x{pg.canvas_h} regions={len(pg.regions)} "
                 + (f" triage={pg.triage['verdict']}({';'.join(pg.triage['reasons'])})" if pg.triage else "")
             )
-            for s in pg.sections:
-                grp = f" 묶음{s.group_no}" if s.group_no else ""
-                print(
-                    f"      §{s.section_id} [{s.section_type}#{s.section_no}]{grp} "
-                    f"regions={len(s.region_ids)} bbox={s.bbox} conf={s.confidence}"
-                )
+            # 2026-08-06: 섹션 출력 루프를 제거했다. 섹션 생성은 2026-08-03 에
+            # 파이프라인에서 빠졌고 그 뒤로 이 루프는 한 줄도 찍은 적이 없다.
             for region in pg.regions:
                 if region.role == "유의사항" and region.lines:
                     sample = region.lines[0].text[:60]

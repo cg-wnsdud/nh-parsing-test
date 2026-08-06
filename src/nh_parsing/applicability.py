@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """필드 부재의 3분류 (LLM 호출 없음).
 
 STAGE_3 는 값이 없으면 전부 `status=not_found` 로 돌려준다. 그런데 심의 관점에서
@@ -40,6 +38,8 @@ conditions 가 비어 있으면 '전 광고 적용'이다. 조문에 없는 해�
 
 의무등급(`obligation`): 필수 / 권장 은 판정 대상, 분류·수집·관측·절차 는 판정 제외.
 """
+
+from __future__ import annotations
 
 from typing import Any
 

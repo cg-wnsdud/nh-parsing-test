@@ -33,8 +33,6 @@ from statistics import median
 # 세로는 짜게 — 문단 사이를 넘어 붙으면 페이지 전체가 덩어리 하나가 된다.
 GX_MULT = 1.5
 GY_MULT = 0.6
-# 덩어리가 영역에 이만큼 덮이면 '인식됐다'로 본다.
-MIN_COVER = 0.6
 # 낱줄 하나짜리 덩어리는 무시 — 장식 글자 한 조각까지 실패로 세면 경보가 울기만 한다.
 MIN_LINES = 2
 
@@ -46,12 +44,8 @@ class Cluster:
     covered: float = 0.0   # StructureV3 영역이 덮은 비율 (0~1)
 
 
-def _area(b: list[int]) -> int:
-    return max(0, b[2] - b[0]) * max(0, b[3] - b[1])
-
-
-def _overlap(a: list[int], b: list[int]) -> int:
-    return _area([max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])])
+# `_area` · `_overlap` 도 2026-08-06 제거했다 — 면적 기준 판정의 부속이었고
+# 그 판정이 사라지면서 부르는 곳이 없어졌다.
 
 
 def median_line_height(boxes: list[list[int]]) -> float:
@@ -108,34 +102,13 @@ def cluster_line_boxes(
     return out
 
 
-def uncovered_clusters(
-    clusters: list[Cluster],
-    region_boxes: list[list[int]],
-    *,
-    min_cover: float = MIN_COVER,
-    min_lines: int = MIN_LINES,
-) -> list[Cluster]:
-    """영역이 충분히 덮지 못한 덩어리 = StructureV3 가 놓친 자리.
-
-    한 영역이 아니라 **영역 전체의 합집합**으로 덮였는지 본다. 큰 덩어리가 작은 영역
-    여러 개로 나뉘어 인식된 경우를 실패로 세면 안 되기 때문이다.
-    """
-    missed: list[Cluster] = []
-    for c in clusters:
-        if c.line_count < min_lines:
-            continue
-        area = _area(c.bbox)
-        if area <= 0:
-            continue
-        covered = sum(_overlap(c.bbox, r) for r in region_boxes if r) / area
-        if covered < min_cover:
-            missed.append(Cluster(c.bbox, c.line_count, round(min(covered, 1.0), 3)))
-    return missed
-
-
-def detect(line_boxes: list[list[int]], region_boxes: list[list[int]]) -> list[Cluster]:
-    """한 페이지의 라인·영역 좌표로 놓친 덩어리를 찾는다 (면적 기준)."""
-    return uncovered_clusters(cluster_line_boxes(line_boxes), region_boxes)
+# 2026-08-06 제거: `uncovered_clusters` · `detect` · `MIN_COVER` (면적 기준 판정).
+#
+# `missed_blocks`(줄 배정 기준)로 대체된 뒤 **생산 코드에서 아무도 부르지 않았다** —
+# 남은 참조는 테스트뿐이었고, 그 테스트는 쓰이지 않는 함수를 지키고 있었다.
+# 왜 면적 기준을 버렸는지는 아래 `missed_blocks` 주석에 실측과 함께 남아 있다
+# (001 p1: 면적으로 재면 덩어리 8개·110줄이 '미커버'로 잡히는데 그 줄 대부분은 이미
+# 영역에 잘 배정돼 있었다 — 덩어리 bbox 는 넓은데 그 안의 영역들이 작아서 생긴 착시).
 
 
 # 덩어리를 '놓쳤다'고 부를 미배정 비율.

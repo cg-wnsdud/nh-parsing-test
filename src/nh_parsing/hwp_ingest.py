@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """HWP/HWPX 트랙 — 사내 파서(document-processor) 연동. 설계서 5절/6.8절.
 
 텍스트·표는 디지털 정본으로 추출한다. 내장 이미지(BinData)는 호출측이 넘긴
@@ -11,6 +9,8 @@ HWP 렌더링(시각 검토용 캔버스)은 프로토타입 범위 밖이며, �
 AdDocument.notes 에 명시한다. 사내 파서 실패 시(예: Java 미가용)
 parse_status="unreadable" 로 조용한 실패를 남기지 않는다.
 """
+
+from __future__ import annotations
 
 import re
 from collections.abc import Callable

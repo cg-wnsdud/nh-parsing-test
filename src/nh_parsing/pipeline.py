@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """파일 → AdDocument 오케스트레이션 — 설계서 3절 Track B.
 
 라우팅(설계서 4.1):
@@ -7,6 +5,8 @@ from __future__ import annotations
   PDF      → 페이지 단위 triage → digital / ocr / hybrid
   HWP/HWPX → 사내 파서 디지털 추출
 """
+
+from __future__ import annotations
 
 import re
 import statistics
@@ -610,8 +610,8 @@ def _assemble_page(
         unassigned_lines=unassigned,
         # 필드는 STAGE_3(스키마 기반) 단일 출처다. 파싱 단계에서 regex 로 뽑아 두면
         # 같은 이름의 값이 두 곳에 생겨 어느 쪽이 정본인지 헷갈린다(실측: eval 의 '필드'
-        # 지표가 ⑥-4 를 보고 있어서 STAGE_3 개선이 지표에 안 잡혔다).
-        extracted_fields=[],
+        # 지표가 ⑥-4 를 보고 있어서 STAGE_3 개선이 지표에 안 잡혔다). 그래서
+        # AdPage.extracted_fields 필드 자체를 2026-08-06 제거했다 — ir.py 주석 참조.
     )
 
 

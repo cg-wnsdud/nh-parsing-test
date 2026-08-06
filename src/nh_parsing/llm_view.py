@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """LLM 전달용 lean 텍스트 투영 (§1A / §6).
 
 최종 파싱 결과(AdDocument)에서 bbox·신뢰도·출처 같은 기계 신호를 빼고, 읽기순서로
@@ -18,6 +16,8 @@ review.html 'LLM 전달 형태' 표시의 단일 출처.
 읽기순서(위→아래, 좌→우)로 평면 나열한다 — 순서 자체가 화면 흐름을 담으므로
 STAGE_3 가 문맥을 잃지 않는다. 자세한 근거는 vlm_judge 모듈 상단 주석.
 """
+
+from __future__ import annotations
 
 from .ir import AdDocument, AdPage, Line, Region
 from .tiling import sort_reading_order

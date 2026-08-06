@@ -71,13 +71,13 @@ def _intro(text: str) -> str:
     return f'<p class="blkintro">{text}</p>'
 
 
-# 출처 태그 → (약어, 색, 설명)
+# 출처 태그 → (약어, 색, 설명). 산출물에 실제로 나오는 세 값만 남겼다 — 2026-08-06
+# out/json 전수: ocr 448 · digital 37 · vlm_sweep 15. "vlm"·"vlm_region" 항목은
+# B안 전환 이후 대입되는 코드가 없어져 범례에만 남아 있던 죽은 태그였다(ir.Source 참조).
 SOURCE_META = {
     "ocr": ("O", "#2563eb", "OCR 인식"),
     "digital": ("D", "#059669", "디지털 텍스트 추출"),
-    "vlm": ("V", "#7c3aed", "VLM"),
     "vlm_sweep": ("S", "#db2777", "VLM 스윕 회수"),
-    "vlm_region": ("R", "#0891b2", "VLM 영역통독"),
 }
 
 

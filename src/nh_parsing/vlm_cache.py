@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """VLM 응답 캐시 — A/B 를 결정론적으로 만들기 위한 개발용 장치.
 
 **왜 필요한가.** 파이프라인에는 비결정적 VLM 호출이 문서당 30여 개 있다. 그 상태로
@@ -18,6 +16,8 @@ A/B 에서 달라지는 것은 '내가 바꾼 단계'뿐이 된다. 덤으로 �
     VLM_CACHE=p  재생(replay): 캐시에 있으면 재생, 없으면 실패 — 완전 결정론
     (미설정)     캐시 없음 (기본, 운영)
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -75,11 +75,8 @@ def store(key: str, schema_name: str, response: dict) -> None:
     )
 
 
-def stats() -> dict:
-    """캐시 적중/저장 현황 — 실행이 정말 결정론적이었는지 확인용."""
-    return dict(_STATS)
-
-
+# 2026-08-06 제거: `stats()`. "캐시 적중/저장 현황 확인용" 이었으나 부르는 곳이 없었다.
+# 같은 정보가 gemma_client.STATS 의 `cached` 열로 러너 표에 이미 찍힌다.
 _STATS = {"hit": 0, "miss": 0, "stored": 0}
 
 

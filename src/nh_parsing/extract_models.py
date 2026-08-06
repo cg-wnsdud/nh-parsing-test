@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """STAGE_3 출력 계약 — pydantic 검증 경계.
 
 **원래 계획이었다.** `docs/previous/schema-layer-plan_2026-07-23.md` §1(A):
@@ -28,6 +26,8 @@ from __future__ import annotations
    그대로 plain dict 로 두고(이미 44/44 로 검증된 로직을 다시 짜는 위험을 피함),
    경계에서만 pydantic 이 감시한다.
 """
+
+from __future__ import annotations
 
 from typing import Any, Literal
 

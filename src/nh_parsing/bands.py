@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """글자 밀도 기반 분할 — 페이지를 자를 때 '어디서' 와 '얼마씩' 을 내용으로 정한다.
 
 지금까지 페이지 분할이 세 군데에 따로 있었고 기준도 달랐다(OCR 타일 1600px 고정,
@@ -21,6 +19,8 @@ from __future__ import annotations
 등량 목표점 10개 전부 ±160px 안에서 깨끗한 행을 찾았다. 그래도 못 찾으면 목표점을
 그대로 쓰고 오버랩이 보완한다 — 조용히 실패하지 않도록 사유를 함께 돌려준다.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

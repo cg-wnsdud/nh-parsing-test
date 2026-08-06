@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """PDF 페이지 단위 triage [B1] — 설계서 4.2절.
 
 document-processor 의 probe 기준(정상문자 비율, U+FFFD, 이미지 면적비)을
@@ -9,6 +7,8 @@ pypdfium2 로 재현한다. 프로토타입에서는 이중 렌더를 피하려�
 핵심 원칙(조용한 실패 금지): 모든 페이지는 반드시 structured / scan_like /
 hybrid 중 하나로 판정되고 판정 근거가 AdPage.triage 에 남는다.
 """
+
+from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass, field

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """영역 구성 + 규칙 기반 초기 역할(폴백 전용) — 설계서 6.4절.
 
 ⚠ 역할 판정의 판단 주체는 VLM(vlm_judge.py)이다.
@@ -9,9 +7,11 @@ from __future__ import annotations
 regex 를 판단 로직으로 승격하려면 대량 데이터에서 공통 패턴 도출이 선행돼야 한다.
 
 (regex 기반 필드 추출 extract_fields 는 필드가 STAGE_3 로 일원화되며 죽은 코드가
-되어 2026-07-29 제거했다 — 죽은 코드 감사 참조. _REVIEW_NO/_RATE 정규식은
-_refine_role 의 역할 판정 폴백으로 여전히 쓰여 남긴다.)
+되어 2026-07-29 제거했다. `_REVIEW_NO` 정규식만 `_apply_role_rules` 의 역할 판정
+폴백으로 남아 있다 — 금리 정규식 `_RATE` 는 부르는 곳이 없어 2026-08-06 제거했다.)
 """
+
+from __future__ import annotations
 
 import re
 
@@ -51,10 +51,10 @@ _NOTICE_HEADER = re.compile(r"유의\s*사항|알아\s*두|꼭\s*확인|주의\s
 _REVIEW_NO = re.compile(
     r"(준법\s*감시인?\s*)?심의필\s*[:：]?\s*제?\s*([0-9]{4}\s*[-–~]\s*[0-9O]+)"
 )
-_RATE = re.compile(
-    r"(?:최고|최대|최저|기본|우대)\s*연?\s*[0-9]+(?:\.[0-9]+)?\s*%p?"
-    r"|연\s*[0-9]+(?:\.[0-9]+)?\s*%p?"
-)
+# 2026-08-06 제거: `_RATE`(금리 표기 정규식). 모듈 상단 주석은 "_REVIEW_NO/_RATE 는
+# _refine_role 의 폴백으로 여전히 쓰여 남긴다"고 적고 있었지만 실제로는 `_REVIEW_NO`
+# 만 쓰였다(_apply_role_rules). 금리 정규식은 필드 추출이 STAGE_3 로 일원화된 뒤
+# 부르는 곳이 없어졌다.
 
 
 def _center_inside(line_bbox: list[int], region_bbox: list[int]) -> bool:

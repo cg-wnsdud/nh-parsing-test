@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """VLM 직독 폴백 — 설계서 6.4 (OCR/디지털 추출이 놓친 텍스트 회수).
 
 sweep_missing_lines — 페이지 축소본과 이미 추출된 텍스트 목록을 주고, 화면에 보이는데
@@ -14,6 +12,8 @@ bbox 는 VLM 이 준 y_ratio 로 만든 전폭 근사 밴드 (source='vlm_sweep'
 는 밴드 통합판독 read_band_regions 이 흡수하며 죽은 코드가 되어 2026-07-29 제거했다
 — 죽은 코드 감사 참조.)
 """
+
+from __future__ import annotations
 
 import collections
 import re

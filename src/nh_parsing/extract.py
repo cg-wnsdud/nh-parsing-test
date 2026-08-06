@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """STAGE_3 — 스키마 기반 필드 추출.
 
 입력: 파싱 결과의 lean 투영(llm_view.build_doc_view) + 상품군 스키마(schemas/*.json)
@@ -13,6 +11,8 @@ from __future__ import annotations
 - 없는 값을 만들지 않게 하고(status=not_found), 어느 필드에도 안 맞은 텍스트는
   반드시 unmapped 로 남긴다 — 조용한 유실 금지.
 """
+
+from __future__ import annotations
 
 import json
 import re

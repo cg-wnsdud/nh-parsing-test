@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """VLM 기반 영역 역할 판정 + 필드 추출 — 설계서 6.5절 (판단 주체 = VLM).
 
 원칙:
@@ -10,6 +8,8 @@ from __future__ import annotations
   (이전 프로젝트 check_field_consistency 패턴).
 - regex 는 보조 신호(regex_backed)로만 부착한다. 채택/폐기를 결정하지 않는다.
 """
+
+from __future__ import annotations
 
 import re
 

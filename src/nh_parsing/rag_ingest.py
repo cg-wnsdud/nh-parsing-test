@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """rag-data 트랙 [Track A] — 기준 문서(법령·규제·심의사례) → RAG 청크. 설계서 5절.
 
 광고물 트랙(AdPageIR)과 달리 출력은 검색용 청크 목록이다.
@@ -15,6 +13,8 @@ from __future__ import annotations
 청크 분할은 구조적 경계(조항 번호 등 개요 기호)와 길이 상한만 쓴다.
 내용 판단(무엇이 중요한 기준인지)은 이후 RAG/VLM 단계의 몫이다.
 """
+
+from __future__ import annotations
 
 import re
 from pathlib import Path
