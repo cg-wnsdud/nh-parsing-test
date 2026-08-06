@@ -237,6 +237,64 @@ def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
     # 읽기 순서 국소 재정렬: 전역 정렬이 긴 페이지에서 시각적 줄을 조각내는 문제
     # (001 단어 섞임 실측)를 영역 범위 재정렬로 교정한다.
     _finalize_reading_order(page)
+    # 정본이 확정된 **뒤에** 후보 점수·관계 딱지를 매긴다 (아래 함수 주석의 실측 참조).
+    _score_reading_candidates(page)
+
+
+def _score_reading_candidates(page: AdPage) -> None:
+    """확정된 정본과 통독 후보를 대조해 점수·관계 딱지를 매긴다.
+
+    **왜 밴드 판독 시점이 아닌가.** 예전에는 _merged_band_read 안에서 후보를 붙이는
+    즉시 매겼는데, 그 시점의 `region.text` 는 아직 정본이 아니다. 밴드 판독 이후에도
+    정본을 바꾸는 단계가 둘 더 있다:
+
+      1. 유령 중복 라인 삭제 — vlm_direct.py:413 (reread_low_confidence_lines 안).
+         같은 행을 겹쳐 검출한 얇은 조각을 지운다. 라인이 빠지면 정본 문자열이 바뀐다.
+      2. 읽기순서 국소 재정렬 — _finalize_reading_order. 표 형태 영역의 `라벨|값` 이
+         전역 정렬에서 뒤집혀 있던 것을 바로잡는다.
+
+    2번이 딱지를 실제로 뒤집었다 (실측 2026-08-06, 5문서 177건 중 7건):
+
+        [밴드 판독 시점 — 라인 순서 뒤집힘]
+          정본 '12 개월 가입기간' → 후보 '12 개월' 이 앞(위치 0)에 걸린다
+          → 뒤에서 50% 사라짐 → tail_cut  "뒷부분 잘림(50% 소실)"    ← 틀린 딱지
+        [최종 정렬 후 — 화면에 보이는 순서]
+          정본 '가입기간 12 개월' → 후보 '12 개월' 이 위치 4
+          → 앞에서 50% 사라짐 → head_drop "앞 항목명 생략 — 값은 온전"  ← 맞는 답
+
+    tail_cut→head_drop 2 · diverged→head_drop 1 · diverged→same 4. 거짓 '잘림 경보'가
+    "확인 필요" 목록 맨 위로 올라와(위험순 정렬) 검수자가 먼저 보게 되던 자리다.
+
+    점수(score/coverage)는 토큰 집합이라 순서에 무관하지만, 1번(라인 삭제)에는 영향을
+    받으므로 같이 여기서 계산한다 — 정본 판정 근거를 한 곳에 모은다.
+    """
+    from .field_judge import check_field_consistency
+    from .truncation import Relation, classify_reading
+
+    truncated: list[tuple[str, Relation]] = []
+    for region in page.regions:
+        cand = region.vlm_reading
+        if not cand:
+            continue
+        ocr = " ".join(l.text for l in region.lines)
+        region.vlm_reading_score = round(check_field_consistency(cand, ocr), 3)
+        region.vlm_reading_coverage = round(check_field_consistency(ocr, cand), 3)
+        # 위 두 점수는 토큰 겹침이라 순서를 못 본다 — 뒤가 잘린 판독이 정밀도 만점을
+        # 받는다(실측 5건). 경계 기준으로 관계를 따로 판정해 후보에 딱지를 붙인다.
+        rel = classify_reading(ocr, cand)
+        region.vlm_reading_relation = rel.kind
+        if rel.is_truncated:
+            truncated.append((region.region_id, rel))
+
+    # 잘린 후보 경보 — 통합판독으로 옮길 때 빠뜨렸던 것을 복구(2026-07-29). 옛 경로
+    # (_transcribe_regions_vlm)에는 '절단 의심' 표시가 있었는데 그 함수엔 없었다.
+    # 정본을 안 덮으므로 파싱 결과가 틀어지지는 않지만, STAGE_3 가 잘린 쪽을 고르면
+    # 내용이 사라진다 — 실측 002 p1_r018 은 경품 금액이 통째로 빠진 후보였다.
+    if truncated:
+        page.notes.append(
+            "통독 후보 잘림 경보(정본 우선): "
+            + ", ".join(f"{rid}({rel.lost_tail:.0%} 소실)" for rid, rel in truncated)
+        )
 
 
 def _note_layout_gaps(page: AdPage) -> None:
@@ -643,15 +701,12 @@ def _merged_band_read(page: AdPage, canvas_img: Image.Image, all_lines: list[Lin
     반환: 회수된 누락 라인들(호출측이 unassigned 로 편입).
     """
     from .bands import content_bands
-    from .field_judge import check_field_consistency
-    from .truncation import Relation, classify_reading
     from .vlm_direct import read_band_regions
 
     bands = content_bands(canvas_img, span=SETTINGS.tile_max_height_px,
                           max_span=SETTINGS.tile_max_height_px)
     known = _n_join(all_lines)
     recovered: list[Line] = []
-    truncated: list[tuple[str, Relation]] = []
     corrected = attached = expanded = 0
 
     # 영역을 밴드에 **정확히 하나씩** 배정한다. 밴드는 서로 200px 겹치므로(오버랩은
@@ -714,14 +769,8 @@ def _merged_band_read(page: AdPage, canvas_img: Image.Image, all_lines: list[Lin
             ocr = " ".join(l.text for l in region.lines)
             # B안 유지 — OCR 정본은 안 건드리고 후보로만 붙인다. 판단은 STAGE_3 몫.
             region.vlm_reading = text
-            region.vlm_reading_score = round(check_field_consistency(text, ocr), 3)
-            region.vlm_reading_coverage = round(check_field_consistency(ocr, text), 3)
-            # 위 두 점수는 토큰 겹침이라 순서를 못 본다 — 뒤가 잘린 판독이 정밀도 만점을
-            # 받는다(실측 5건). 경계 기준으로 관계를 따로 판정해 후보에 딱지를 붙인다.
-            rel = classify_reading(ocr, text)
-            region.vlm_reading_relation = rel.kind
-            if rel.is_truncated:
-                truncated.append((region.region_id, rel))
+            # 점수·관계 딱지는 여기서 매기지 않는다 → _score_reading_candidates 참조.
+            # 이 시점의 정본은 아직 확정이 아니다(라인 순서 미정렬 + 유령 라인 미제거).
             attached += 1
             if _n_squash(text) != _n_squash(ocr):
                 corrected += 1
@@ -745,15 +794,6 @@ def _merged_band_read(page: AdPage, canvas_img: Image.Image, all_lines: list[Lin
         f"(OCR 과 다른 것 {corrected}개) + 누락 후보 {len(recovered)}건"
         f" / 영역 절단 방지로 크롭 확장 {expanded}개 밴드"
     )
-    # 잘린 후보 경보 — 통합판독으로 옮길 때 빠뜨렸던 것을 복구(2026-07-29). 옛 경로
-    # (_transcribe_regions_vlm)에는 '절단 의심' 표시가 있었는데 이 함수엔 없었다.
-    # 정본을 안 덮으므로 파싱 결과가 틀어지지는 않지만, STAGE_3 가 잘린 쪽을 고르면
-    # 내용이 사라진다 — 실측 002 p1_r018 은 경품 금액이 통째로 빠진 후보였다.
-    if truncated:
-        page.notes.append(
-            "통독 후보 잘림 경보(정본 우선): "
-            + ", ".join(f"{rid}({rel.lost_tail:.0%} 소실)" for rid, rel in truncated)
-        )
     return recovered
 
 

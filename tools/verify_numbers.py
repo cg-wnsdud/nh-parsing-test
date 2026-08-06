@@ -101,8 +101,15 @@ def section_parse(res: dict) -> None:
 def section_relation(res: dict) -> None:
     """관계 딱지를 **최종 라인 순서로** 다시 계산해 저장값과 비교.
 
-    저장값은 밴드 통독 시점(_merged_band_read)에 계산되는데, 그 시점은
-    _finalize_reading_order 보다 앞이라 표의 `라벨|값` 행이 뒤집혀 있을 수 있다.
+    ⚠️ **이 불일치 숫자는 원인이 섞여 있다.** 저장값은 out/json 을 만든 실행 시점의
+    코드가 낸 것이고 재계산은 현행 코드가 낸다. 그 사이에 코드가 바뀌면 순서 문제와
+    로직 변경분이 한 숫자에 합쳐진다 — 2026-08-06 실측: 18건 중 순서 7건 ·
+    숫자게이트(1c86add) 4건 · 유사도폴백 제거(6d860ec) 나머지.
+
+    그래서 원인별로 따로 센다:
+      · 이 함수      = 저장값 vs 현행·최종순서   (재파싱 후 0 이어야 함 — 회귀 감시)
+      · _relation_order_effect = 순서 효과만    (현행 코드로 두 순서를 비교)
+      · _relation_numeric_gate = 숫자 게이트만
     """
     from nh_parsing.truncation import classify_reading
 
@@ -134,7 +141,59 @@ def section_relation(res: dict) -> None:
               f'{x["stored"]} → {x["recomputed"]}')
         print(f'      정본 {x["ocr"]!r}')
         print(f'      후보 {x["cand"]!r}')
+    _relation_order_effect(res)
     _relation_numeric_gate(res)
+
+
+def _relation_order_effect(res: dict) -> None:
+    """라인 순서만의 효과를 가른다 — **현행 코드로 두 순서를 비교한다.**
+
+    옛 경로(_merged_band_read 안에서 즉시 판정)는 전역 정렬 직후 순서, 즉
+    `(top, left)` 로 나열된 라인을 정본으로 봤다(regions.py:108). 현행 경로
+    (_score_reading_candidates)는 sort_reading_order 로 시각적 행을 묶은 뒤 본다.
+    표의 `라벨|값` 은 두 셀의 top 이 몇 px 어긋나기만 해도 (top,left) 정렬에서
+    값이 라벨보다 앞에 오고, 그러면 '앞 생략'이 '뒤 잘림'으로 뒤집힌다.
+
+    저장값과 비교하지 않으므로 out/json 이 낡아도 이 숫자는 오염되지 않는다.
+    """
+    from nh_parsing.tiling import sort_reading_order
+    from nh_parsing.truncation import classify_reading
+    from nh_parsing.ir import Line
+
+    flips = []
+    total = 0
+    for stem, d in _docs():
+        for pg in d["pages"]:
+            for r in pg["regions"]:
+                cand = r.get("vlm_reading")
+                if not cand or len(r["lines"]) < 2:
+                    continue
+                total += 1
+                lines = [Line(**{k: v for k, v in l.items() if k in Line.model_fields})
+                         for l in r["lines"]]
+                # 저장된 순서 = 이미 sort_reading_order 를 거친 최종 순서
+                final_txt = " ".join(l.text for l in lines)
+                # 옛 순서 재현: 전역 정렬 키 (top, left)
+                old = sorted(lines, key=lambda l: (l.bbox[1] if l.bbox else 0,
+                                                   l.bbox[0] if l.bbox else 0))
+                old_txt = " ".join(l.text for l in old)
+                if _sq(old_txt) == _sq(final_txt):
+                    continue
+                a = classify_reading(old_txt, cand).kind
+                b = classify_reading(final_txt, cand).kind
+                if a != b:
+                    flips.append({"doc": stem, "page": pg["page_no"],
+                                  "region_id": r["region_id"], "old_order": a,
+                                  "final_order": b, "ocr_old": old_txt[:70],
+                                  "ocr_final": final_txt[:70]})
+    res["relation_order_flips"] = flips
+    print(f"\n라인 순서만의 효과 (현행 코드, 옛순서 vs 최종순서): {len(flips)}건 "
+          f"/ 라인 2개 이상인 후보 {total}건")
+    for x in flips:
+        print(f'  {x["doc"][:12]:14s} p{x["page"]} {x["region_id"]:9s} '
+              f'{x["old_order"]} → {x["final_order"]}')
+        print(f'      옛순서 정본 {x["ocr_old"]!r}')
+        print(f'      최종  정본 {x["ocr_final"]!r}')
 
 
 def _relation_numeric_gate(res: dict) -> None:
