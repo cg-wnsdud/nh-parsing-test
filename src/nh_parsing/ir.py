@@ -118,7 +118,11 @@ class AdDocument(BaseModel):
     file_type: str                  # pdf|image|hwp|hwpx
     product_group: Optional[str] = None
     ad_type: Optional[str] = None
-    category_source: Optional[str] = None  # filename|vlm|filename_and_vlm|vlm_overrode_filename
+    # 분류가 어느 경로로 정해졌나 (gemma_client.classify 주석 참조). prior 와 VLM 이
+    # 둘 다 있을 때: filename_and_vlm(합의) | vlm_overrode_filename(충돌, VLM 채택).
+    # VLM 만: vlm | vlm_abstained. 파일명만: filename_vlm_abstained(VLM 이 반대) |
+    # filename_vlm_failed(호출 실패) | filename_no_vlm(HWP — 안 부름). 없으면 none.
+    category_source: Optional[str] = None
     classification_confidence: Optional[float] = None
     pages: list[AdPage] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

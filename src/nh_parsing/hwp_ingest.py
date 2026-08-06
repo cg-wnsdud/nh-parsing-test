@@ -211,7 +211,11 @@ def ingest_hwp(
         source_file=path.name,
         file_type=path.suffix.lstrip(".").lower(),
         product_group=prior,
-        category_source="filename" if prior else None,
+        # "filename" 이 아니라 "filename_no_vlm" 이다 — HWP 는 캔버스가 없어 분류 VLM 을
+        # **애초에 부르지 않는다**(gemma_client.classify 주석의 3번). VLM 이 실패한 것도
+        # 반대한 것도 아니고 물어보지 않은 것이라, 같은 값으로 적으면 실측을 세는 순간
+        # 틀린다. ad_type 이 None 인 것도 같은 이유다.
+        category_source="filename_no_vlm" if prior else None,
     )
     try:
         from document_processor import DocIR

@@ -200,6 +200,24 @@ class Classification:
 
 
 def classify(canvas: Image.Image, filename: str) -> Classification:
+    """파일명 prior 와 VLM 관측을 결합한다. **어느 경로로 정해졌는지를 값으로 남긴다.**
+
+    2026-08-06: `category_source="filename"` 이 서로 다른 세 상황을 뭉치고 있었다.
+    셋은 신뢰도가 완전히 다른데 값이 같아서 산출물만 보고 가를 수가 없었다:
+
+      1. VLM 호출이 실패했다 (서버 죽음·타임아웃) → `filename_vlm_failed`
+         파일명 말고는 근거가 없다. 재실행하면 달라질 수 있다.
+      2. VLM 이 봤는데 "기타/판단불가"라고 답했다 → `filename_vlm_abstained`
+         **VLM 이 반대 의견을 낸 것**이지 정보가 없는 게 아니다. 실측(003): VLM 이
+         확신도 0.9 로 "특정 금융상품 가입 유도가 아니라 '올원모임' 서비스 이벤트"라고
+         답했는데 파일명의 '예금성' 이 그 판단을 덮었다. 스키마 선택이 걸린 자리라
+         (예금성 팩으로 심의) 검수자가 이 케이스를 알아야 한다.
+      3. VLM 을 애초에 안 불렀다 (HWP — 캔버스가 없다) → `filename_no_vlm`
+         hwp_ingest.py 가 붙인다. 여기 코드가 도는 경로가 아니다.
+
+    §9-③ 의 '규칙폴백 2건 중 1건은 안 부른 것' 과 같은 종류의 혼동이다 —
+    "폴백했다"와 "물어보지도 않았다"를 한 값에 담으면 실측을 세는 순간 틀린다.
+    """
     prior = filename_prior(filename)
     try:
         data = chat_json(
@@ -217,20 +235,32 @@ def classify(canvas: Image.Image, filename: str) -> Classification:
             product_group=prior,
             ad_type=None,
             confidence=None,
-            category_source="filename" if prior else "none",
+            category_source="filename_vlm_failed" if prior else "none",
             reason=f"VLM 분류 실패, 파일명 prior 사용: {exc}",
         )
 
-    vlm_group = data.get("product_group")
-    if vlm_group in ("기타", "판단불가"):
-        vlm_group = None
+    raw_group = data.get("product_group")          # 기타/판단불가 를 지우기 전 원값
+    vlm_group = None if raw_group in ("기타", "판단불가") else raw_group
+    abstained = raw_group in ("기타", "판단불가")
+    reason = str(data.get("reason", ""))
+
     if prior and vlm_group:
         source = "filename_and_vlm" if prior == vlm_group else "vlm_overrode_filename"
         group = vlm_group
     elif vlm_group:
         source, group = "vlm", vlm_group
+    elif prior and abstained:
+        source, group = "filename_vlm_abstained", prior
+        # VLM 이 무엇을 근거로 반대했는지를 노트에 그대로 남긴다. 이 문장이 없으면
+        # 산출물에서 "VLM 도 동의했다"와 구분이 안 된다 (003 이 그렇게 보였다).
+        reason = (
+            f"VLM 은 '{raw_group}' 로 판단(확신도 {data.get('confidence')})했고 "
+            f"파일명 prior '{prior}' 를 적용했다. VLM 사유: {reason}"
+        )
     elif prior:
-        source, group = "filename", prior
+        source, group = "filename_vlm_failed", prior
+    elif abstained:
+        source, group = "vlm_abstained", None
     else:
         source, group = "none", None
     return Classification(
@@ -238,5 +268,5 @@ def classify(canvas: Image.Image, filename: str) -> Classification:
         ad_type=data.get("ad_type"),
         confidence=data.get("confidence"),
         category_source=source,
-        reason=data.get("reason", ""),
+        reason=reason,
     )
