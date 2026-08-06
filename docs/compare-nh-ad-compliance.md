@@ -55,7 +55,7 @@
 | `LOAN` / `CARD` / `INVESTMENT` | 대출성 / 카드 / 투자성 | ✅ 일치 |
 | — | 보장성, 시설대여·할부, 업무광고, 상품이미지 | ❌ 저장소 2에 없음 |
 
-근거: [database-specification.md:351](../../../농협프로젝트/nh-ad-compliance/docs/database-specification.md) / [out/schema_source/_product_group_fields.json](../out/schema_source/_product_group_fields.json) `classification_axes`
+근거: `docs/database-specification.md`(저장소2) / [out/schema_source/_product_group_fields.json](../out/schema_source/_product_group_fields.json) `classification_axes`
 
 **왜 이게 실무 문제인가.** `standards.product_group`·`evidences.product_group`이 필수문구 목록을 필터링하는 키다(F-006 처리규칙 1: *"상품군과 광고유형을 기준으로 필수 문구 목록을 조회한다"*). 우리 스키마의 **G3 의무고지 15필드는 예금/적금/입출금에 공통**이다. 저장소 2 enum을 그대로 쓰면:
 
@@ -145,7 +145,7 @@ standards.title         = "(2023)은행연합회 광고심의 매뉴얼 1부"
 
 ### 3-1. `out/json` → `ocr_text_blocks` / `layout_blocks`
 
-**좌표는 실측으로 검증했다.** 우리 5문서 225영역 445라인을 저장소 2의 `Coordinate` pydantic 계약([packages/parser-contracts/.../models.py:40](../../../농협프로젝트/nh-ad-compliance/packages/parser-contracts/src/nh_ad_parser_contracts/models.py))에 대조:
+**좌표는 실측으로 검증했다.** 우리 5문서 225영역 445라인을 저장소 2의 `Coordinate` pydantic 계약(`packages/parser-contracts/src/nh_ad_parser_contracts/models.py`(저장소2))에 대조:
 
 ```
 regions 225 / lines 445
@@ -187,11 +187,11 @@ regions 225 / lines 445
 
 **⚠️ 계약 구현 자체의 문제 3건** (저장소 2 내부 드리프트 — 우리가 흡수하려면 걸린다)
 
-1. **`TextBlock`에 `metadata` 필드가 없다.** ADR-0065는 *"`metadata` | N | parser별 확장 정보"*를 명시하는데, 실제 pydantic 모델은 `extra="forbid"`이고 `metadata` 필드가 아예 없다([models.py:83-102](../../../농협프로젝트/nh-ad-compliance/packages/parser-contracts/src/nh_ad_parser_contracts/models.py)). → **`vlm_reading`·`source`·`is_illustrative`를 넣을 확장 슬롯이 실제로는 막혀 있다.**
+1. **`TextBlock`에 `metadata` 필드가 없다.** ADR-0065는 *"`metadata` | N | parser별 확장 정보"*를 명시하는데, 실제 pydantic 모델은 `extra="forbid"`이고 `metadata` 필드가 아예 없다(`packages/parser-contracts/src/nh_ad_parser_contracts/models.py`(저장소2)). → **`vlm_reading`·`source`·`is_illustrative`를 넣을 확장 슬롯이 실제로는 막혀 있다.**
 2. **`LayoutBlock` 필드명이 3곳에서 다르다.** ADR-0065 = `blockType`, DB 명세 = `block_type`, 구현 = `layout_type`(alias `layoutType`). 구현에는 `confidence_status`도 없다(DB엔 있음).
-3. **`block_metadata_matches_document` 검증자가 하이브리드 문서를 거부한다.** 모든 TextBlock의 `parser_name`이 문서 `parser_name`과 같아야 한다([models.py:173](../../../농협프로젝트/nh-ad-compliance/packages/parser-contracts/src/nh_ad_parser_contracts/models.py)). 우리 IR은 **라인 단위로 `source`가 digital/ocr/vlm로 섞인다**(PDF hybrid 라우팅). ADR-0079가 `parser_name=hwp-hybrid`로 병합해 푼 것과 같은 방식(예: `parser_name=paddle-gemma-orch`)이 필요하고, 그러면 **라인별 출처 정보는 계약상 사라진다.**
+3. **`block_metadata_matches_document` 검증자가 하이브리드 문서를 거부한다.** 모든 TextBlock의 `parser_name`이 문서 `parser_name`과 같아야 한다(`packages/parser-contracts/src/nh_ad_parser_contracts/models.py`(저장소2)). 우리 IR은 **라인 단위로 `source`가 digital/ocr/vlm로 섞인다**(PDF hybrid 라우팅). ADR-0079가 `parser_name=hwp-hybrid`로 병합해 푼 것과 같은 방식(예: `parser_name=paddle-gemma-orch`)이 필요하고, 그러면 **라인별 출처 정보는 계약상 사라진다.**
 
-**⚠️ 그리고 실제 버그 위험 1건:** `normalized_document()`가 문서 confidence를 `min(모든 블록 confidence)`로 계산한다([service.py:65](../../../농협프로젝트/nh-ad-compliance/apps/parser-services/service.py)). 우리 IR에는 **confidence 0.0 라인이 9건 있다**(빈 텍스트 검출). 그대로 emit하면 문서 confidence = 0.0 → `UNREADABLE` → ADR-0073의 `OCR_UNREADABLE` → **ADR-0024 평가 제외 후보로 자동 강하**된다. 저장소 2의 PaddleOCR 서비스는 `if text:`로 빈 블록을 버려서 이 문제를 우회하지만, min() 자체는 여전히 위험하다(라인 1개가 문서 전체 판정을 끌어내림).
+**⚠️ 그리고 실제 버그 위험 1건:** `normalized_document()`가 문서 confidence를 `min(모든 블록 confidence)`로 계산한다(`apps/parser-services/service.py`(저장소2)). 우리 IR에는 **confidence 0.0 라인이 9건 있다**(빈 텍스트 검출). 그대로 emit하면 문서 confidence = 0.0 → `UNREADABLE` → ADR-0073의 `OCR_UNREADABLE` → **ADR-0024 평가 제외 후보로 자동 강하**된다. 저장소 2의 PaddleOCR 서비스는 `if text:`로 빈 블록을 버려서 이 문제를 우회하지만, min() 자체는 여전히 위험하다(라인 1개가 문서 전체 판정을 끌어내림).
 
 ### 3-2. `out/extracted` → `review_items`: **담기지 않는다**
 

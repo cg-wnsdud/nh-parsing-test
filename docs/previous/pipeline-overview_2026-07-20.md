@@ -7,7 +7,7 @@
 # NH 광고심의 파싱 파이프라인 — 단계별 상세 (시각 가이드)
 
 > 2026-07-20 기준 구현 상태. 상세 설계 근거와 실측 이력은
-> [parsing-pipeline-design.md](parsing-pipeline-design.md) 부록 C 참조.
+> [parsing-pipeline-design.md](parsing-pipeline-design_v0.1_2026-07-16.md) 부록 C 참조.
 > 코드 위치는 각 단계에 표기 (`src/nh_parsing/`).
 
 ---

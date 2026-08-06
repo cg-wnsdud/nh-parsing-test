@@ -8,7 +8,7 @@
 # 스키마 추출 계층 — 계획 및 인수인계 (2026-07-23 기준)
 
 > 새 채팅에서 이어서 작업하기 위한 문서. 여기부터 읽고 시작하면 됩니다.
-> 관련 배경: [pipeline-overview.md](architecture/pipeline-overview.md), 상위 요구사항은 repo 루트 `project-description.txt`.
+> 관련 배경: [pipeline-overview.md](pipeline-overview_2026-07-20.md), 상위 요구사항은 repo 루트 `project-description.txt`.
 
 ## 0. 지금 어디까지 왔나 (파싱 현황)
 

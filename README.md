@@ -67,7 +67,7 @@ uv run python tools/make_review.py      # → out/review.html
 | `paddlex_client.py` | PP-StructureV3 호출 (레이아웃 + OCR) |
 | `regions.py` | 레이아웃 블록 → 영역(Region) 조립 |
 | `gemma_client.py` | VLM 공용 호출(chat_json) + 분류 + 호출 비용 계측 |
-| `vlm_judge.py` | 영역 역할·섹션 판정, 미배정 라인 내용 귀속 |
+| `vlm_judge.py` | 영역 역할 판정 (섹션 판정·미배정 VLM 귀속은 2026-08-03 제거) |
 | `cards.py` | 카드-분할 — 개수는 밀도(코드), 배정은 VLM |
 | `vlm_direct.py` | 밴드 통합판독, 스윕, 저신뢰 재판독 |
 | `truncation.py` | OCR 정본 vs VLM 후보의 관계 판정 (잘림/생략/회수/불일치) |
@@ -84,15 +84,40 @@ uv run python tools/make_review.py      # → out/review.html
 | 모듈 | 역할 |
 |---|---|
 | `extract.py` | `out/llm_view` → 스키마 기반 필드 추출. 호출그룹 분할, 부재 판정, 근거 검증 |
+| `extract_models.py` | STAGE_3 응답의 pydantic 계약 — 서버가 계약 밖 값을 보내면 그 그룹만 스킵 |
 | `applicability.py` | 부재 4분류(해당없음/미표시/확인필요/판정제외) — 스키마 메타데이터를 코드로 평가 |
 | `llm_view.py` | `out/json` → STAGE_3 입력 정제본 (좌표 제거, 판독 관계 딱지 부착) |
 | `schema_pack.py` | `schemas/*.json` 로드 + 오버레이 합성 + strict json_schema 생성 |
+
+**스키마 데이터는 `src/nh_parsing/schemas/`** 에 있다 (2026-08-06 에 저장소 루트에서
+패키지 안으로 옮겼다 — 설치본에서도 찾히게):
+
+| 파일 | 내용 |
+|---|---|
+| `예금성.json` | 상품군 스키마 — 호출그룹·필드·의무등급 |
+| `_overlay_이벤트.json` | 이벤트페이지일 때 덧붙는 오버레이 |
+| `_product_group_fields.json` | 근거 대장 — 규정 조문 ↔ 필드 매핑. `check_coverage()` 가 이걸로 누락을 검사 |
 
 ### 별도 트랙 (파싱 파이프라인과 무관)
 
 | 모듈 | 역할 |
 |---|---|
 | `rag_ingest.py` | `tools/run_ragdata.py` 전용 — 규정 원문 → RAG 청크 + 이미지 캡션 (스키마 근거 도출용) |
+
+## 도구 (tools/)
+
+| 도구 | 하는 일 | 모델 호출 |
+|---|---|---|
+| `run_nhdata.py` | 파싱 — 광고물 → `out/json` · `out/llm_view` · `out/_timing.json` | **필요** |
+| `run_extract.py` | STAGE_3 — `out/llm_view` → `out/extracted` | **필요** |
+| `run_ragdata.py` | 규정 원문 → RAG 청크 (별도 트랙) | **필요** |
+| `run_schema_source.py` | 규정 문서 → 원본 파싱 결과 (스키마 도출 근거용) | 없음 |
+| `verify_numbers.py` | 문서에 쓰는 모든 숫자를 `out/` 에서 재계산 | 없음 |
+| `evaluate.py` | 골드셋 채점 — 분류·영역검출·문장 회수 | 없음 |
+| `verify_extract.py` | 골드셋 채점 — 필드 회수 | 없음 |
+| `make_review.py` | 육안 검수 화면 `out/review.html` 생성 | 없음 |
+| `rebuild_views.py` | `out/json` → `out/llm_view` 재생성 (파싱은 안 다시 함) | 없음 |
+| `reclassify_absences.py` | 부재 4분류를 스키마 메타로 재계산 (스키마 수정 후 검증용) | 없음 |
 
 ## 문서
 
