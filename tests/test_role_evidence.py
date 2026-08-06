@@ -158,3 +158,50 @@ def test_라인_없는_빈_박스는_분모에서_빠진다(monkeypatch):
     monkeypatch.setattr(pipeline, "judge_region_roles", lambda *a, **k: 1)
     pipeline._apply_vlm_judgments(page, canvas_img=None)
     assert not any("부분 응답" in n for n in page.notes), page.notes
+
+
+# ─────── layout_score 는 두 응답 목록을 이어 붙여야 나온다 (2026-08-06) ───────
+
+
+def test_검출_확신도가_parsing_res_list_블록으로_옮겨진다():
+    """StructureV3 는 score 를 layout_det_res 에만 준다 — 우리가 쓰는 목록엔 없다."""
+    from nh_parsing.paddlex_client import _attach_det_scores
+
+    primary = [LayoutBlock(label="doc_title", bbox=[70, 84, 399, 150])]
+    det = [LayoutBlock(label="doc_title", bbox=[71, 85, 398, 149], score=0.72,
+                       source="layout_det_res")]
+    assert primary[0].score is None
+    _attach_det_scores(primary, det)
+    assert primary[0].score == 0.72
+
+
+def test_겹치지_않는_박스의_확신도는_안_붙인다():
+    """애매하면 None 으로 둔다 — 없는 것과 틀린 것 중 없는 쪽이 낫다."""
+    from nh_parsing.paddlex_client import _attach_det_scores
+
+    primary = [LayoutBlock(label="text", bbox=[0, 0, 100, 100])]
+    _attach_det_scores(primary, [LayoutBlock(label="text", bbox=[500, 500, 600, 600],
+                                             score=0.9, source="layout_det_res")])
+    assert primary[0].score is None
+
+
+def test_부분만_겹치면_안_붙인다():
+    """절반만 겹치는 박스는 다른 블록이다 (IoU 0.8 문턱)."""
+    from nh_parsing.paddlex_client import _attach_det_scores
+
+    primary = [LayoutBlock(label="text", bbox=[0, 0, 100, 100])]
+    _attach_det_scores(primary, [LayoutBlock(label="text", bbox=[0, 0, 100, 55],
+                                             score=0.9, source="layout_det_res")])
+    assert primary[0].score is None
+
+
+def test_가장_많이_겹치는_박스를_고른다():
+    from nh_parsing.paddlex_client import _attach_det_scores
+
+    primary = [LayoutBlock(label="text", bbox=[0, 0, 100, 100])]
+    det = [
+        LayoutBlock(label="text", bbox=[0, 0, 100, 88], score=0.5, source="layout_det_res"),
+        LayoutBlock(label="text", bbox=[1, 1, 99, 99], score=0.9, source="layout_det_res"),
+    ]
+    _attach_det_scores(primary, det)
+    assert primary[0].score == 0.9
