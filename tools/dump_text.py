@@ -17,7 +17,6 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT / "src"))
 from nh_parsing.ir import Line              # noqa: E402
 from nh_parsing.tiling import sort_reading_order  # noqa: E402
 

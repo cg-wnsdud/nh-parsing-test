@@ -35,8 +35,6 @@ import yaml
 
 sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(Path(__file__).parent))
 
 from evaluate import norm  # 채점기와 동일한 정규화 규칙 공유
 

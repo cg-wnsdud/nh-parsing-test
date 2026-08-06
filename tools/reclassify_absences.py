@@ -15,7 +15,6 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from nh_parsing.applicability import (  # noqa: E402
     check_schema_metadata, classify_absences, derived_rules, input_gap,

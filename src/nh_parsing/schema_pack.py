@@ -1,9 +1,7 @@
-from __future__ import annotations
-
-"""상품군 스키마 팩 — 데이터 파일(schemas/*.json)을 읽어 STAGE_3 호출용으로 변환한다.
+"""상품군 스키마 팩 — 데이터 파일을 읽어 STAGE_3 호출용으로 변환한다.
 
 스키마는 코드에 하드코딩하지 않는다. 규정이 바뀌면 근거 대장
-(out/schema_source/_product_group_fields.json)을 고치고 schemas/*.json 을 갱신하면
+(`schemas/_product_group_fields.json`)을 고치고 `schemas/<상품군>.json` 을 갱신하면
 코드 변경 없이 반영된다.
 
 - load_pack(product_group, ad_type): 상품군 스키마 + 조건에 맞는 오버레이를 합쳐 호출그룹 목록으로
@@ -18,13 +16,22 @@ from __future__ import annotations
   조용히 유실된다 — 금융광고 심의에서 가장 위험한 실패다.
 """
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 
-SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas"
-CATALOG_PATH = (
-    Path(__file__).resolve().parents[2] / "out" / "schema_source" / "_product_group_fields.json"
-)
+# 데이터 파일은 **패키지 안**(src/nh_parsing/schemas/)에 있다. 2026-08-06 이전에는
+# 저장소 루트의 schemas/ 를 `parents[2]` 로 올라가 찾았는데, 그러면 패키지를 설치해
+# 쓸 때(휠에는 저장소 루트가 없다) 스키마를 못 찾는다. 실측으로 확인함 — `uv build` 로
+# 만든 휠에 nh_parsing/*.py 26개만 들어가고 schemas/ 는 빠졌다.
+#
+# 근거 대장(_product_group_fields.json)도 같이 옮겼다. 예전에는 `out/schema_source/`
+# 를 가리켰는데 out/ 은 .gitignore 대상이라 **새로 클론하면 check_coverage() 가 죽었고**,
+# run_extract.py 는 그 호출이 첫 줄이라 STAGE_3 가 아예 시작을 못 했다. 이 파일은
+# 도구가 생성하는 산출물이 아니라 손으로 쓴 입력이므로 산출물 폴더에 있을 이유가 없다.
+SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
+CATALOG_PATH = SCHEMA_DIR / "_product_group_fields.json"
 
 STATUS_ENUM = ["found", "not_found", "uncertain"]
 UNMAPPED_KIND = ["심의무관", "심의관련_필드없음"]

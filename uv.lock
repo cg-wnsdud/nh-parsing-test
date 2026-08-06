@@ -201,7 +201,7 @@ wheels = [
 [[package]]
 name = "nh-ad-review-poc"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "document-processor" },
     { name = "pillow" },

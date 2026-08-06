@@ -22,7 +22,6 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
 
 from nh_parsing.ir import AdDocument  # noqa: E402
 from nh_parsing.llm_view import build_doc_view  # noqa: E402

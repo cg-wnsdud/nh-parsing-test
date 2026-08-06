@@ -26,7 +26,30 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
-load_env_file(Path(__file__).resolve().parents[2] / ".env")
+def _find_env_file() -> Path | None:
+    """`.env` 를 찾는다 — 현재 작업 디렉터리에서 위로, 그다음 소스 트리 기준으로.
+
+    예전에는 `parents[2]/.env` 하나만 봤다(= 소스 레이아웃의 저장소 루트). 패키지를
+    설치해 쓰면 `__file__` 이 site-packages 안이라 그 경로가 존재하지 않는다.
+    작업 디렉터리에서 위로 올라가며 찾는 쪽을 먼저 두면 두 경우가 다 된다.
+    """
+    cwd = Path.cwd().resolve()
+    here = Path(__file__).resolve()
+    candidates = [cwd, *cwd.parents, *here.parents]
+    seen: set[Path] = set()
+    for base in candidates:
+        if base in seen:
+            continue
+        seen.add(base)
+        env = base / ".env"
+        if env.is_file():
+            return env
+    return None
+
+
+_ENV_FILE = _find_env_file()
+if _ENV_FILE is not None:
+    load_env_file(_ENV_FILE)
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,342 @@
+{
+  "meta": {
+    "title": "광고심의 추출·검토 항목 카탈로그 (PoC)",
+    "generated": "2026-07-24",
+    "project": "nh-ad-review-poc",
+    "purpose": "제공 자료 근거로 도출한 PoC(예금성+이벤트 오버레이) 광고심의 추출·검토 항목의 전체 목록과 근거. 인간용 서술은 _schema_analysis.md 참조.",
+    "principles": [
+      "샘플에만 있는 표현을 일반 규칙으로 승격하지 않음",
+      "모든 항목에 근거(문서·위치·조문·조건) 부착",
+      "근거 약함/문서 충돌은 status='확인필요'로 분리",
+      "추출 필드는 검토 항목에서 파생(같은 카탈로그에서 링크)"
+    ],
+    "source_priority": [
+      "1차: rag-data/260713_2_NH_광고심의_체크리스트.xlsx (v12, 축기반, NH 전용)",
+      "교차검증: pilot-data-set/NH_광고심의_통합체크리스트.xlsx (M04+M12)",
+      "recall 보강(보조, status=임시): pilot-data-set/NH_광고심의_규칙리스트_v0.xlsx (1721건)",
+      "근거 원문 백업: pilot-data-set/260716_3_전체조문지도.xlsx"
+    ]
+  },
+
+  "scope": {
+    "in_scope_product_groups": ["예금성"],
+    "deposit_subtypes": ["예금", "적금", "입출금(통장·MMDA)", "ELD/주가·환율연동예금"],
+    "event_is_overlay_not_product": true,
+    "event_note": "샘플 002·003은 product_group=예금성 + ad_type=이벤트페이지. 이벤트성은 예금성 상품의 광고유형 오버레이로 모델링.",
+    "out_of_scope_future": ["대출성", "투자성", "보장성", "카드", "시설대여·할부금융"],
+    "advertiser_in_scope": ["은행 본체(NH농협은행)"],
+    "basis": "project-description.txt §2.1 / §2.2"
+  },
+
+  "classification_axes": [
+    {"axis": "product_group", "values": ["예금성","대출성","투자성","보장성","카드","시설대여·할부","업무광고","상품이미지"], "source": "v12 시트 2_상품유형", "poc": "예금성"},
+    {"axis": "product_subtype", "values": ["예금","적금","입출금(통장·MMDA)","ELD/주가·환율연동"], "source": "v12 예금성 항목 + 은행 광고심의 기준 세칙 §2①(사전심의 6종)"},
+    {"axis": "ad_type", "values": ["상품광고","업무광고","상세페이지","이벤트페이지","안내장","배너","앱푸시","SMS·알림톡"], "source": "v12 시트 5_심의기준 2단계 + project-description §2.1 + 샘플 ad_type"},
+    {"axis": "media", "values": ["지면(신문·잡지·전단·팸플릿·리플릿)","방송(TV·라디오)","온라인(홈페이지·앱·배너·검색광고·SNS·블로그·유튜브)","전자적전송매체(SMS·LMS·알림톡·이메일)","옥외"], "source": "v12 시트 3_광고매체(77)"},
+    {"axis": "advertiser", "values": ["은행 본체","개별 영업점","대출모집인","자문업자","제휴처","판매대리·중개업자"], "source": "v12 시트 4_광고주체(43)", "poc": "은행 본체"},
+    {"axis": "review_gate", "values": ["1_광고성립성","2_광고유형(상품/업무)","3_심의대상성","4_심의절차"], "source": "v12 시트 5_심의기준(64)"},
+    {"axis": "category", "values": ["표시의무","금지","양식","절차"], "source": "규칙리스트 category + v12 대분류"}
+  ],
+
+  "field_catalog": {
+    "common": [
+      {
+        "field_key": "advertiser_bank_name", "label": "은행 명칭", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "광고 주체인 은행(NH농협은행) 명칭", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "광고 주체인 은행의 명칭을 표시하였는가?", "basis": {"law": "은행 광고심의 기준", "article": "§16①1", "also": "금소법 §22③2호", "source_doc": "(2023)은행연합회 광고심의 매뉴얼 1부.hwp p105", "source_type": "자율규제"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "review_stamp", "label": "준법감시인 심의필(번호·유효기간·심의주체)", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "심의필 번호, 유효기간, 심의주체", "value_type": "text", "example": "NH농협은행 준법감시인 심의필 2026-0000 (2026.06.00.~2026.12.31.)", "source": "text"},
+        "review_items": [{"check": "심의필 번호·유효기간·심의주체를 표시하였는가?", "basis": {"law": "은행 광고심의 기준", "article": "§9 / §16①2", "source_doc": "(2023)은행연합회 광고심의 매뉴얼 1부.hwp p102", "source_type": "자율규제"}, "applies_when": "전 광고", "exceptions": "라디오·SMS 등 표시 곤란 매체는 금소법 시행령 §18에 따라 생략 가능", "status": "확정"}]
+      },
+      {
+        "field_key": "read_terms_notice", "label": "상품설명서·약관 필독 권유 문구", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "'계약 체결 전 상품설명서 및 약관을 읽어볼 것을 권유'하는 문구", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "'계약 체결 전 상품설명서 및 약관 필독' 권유 문구를 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①3 / 금소법 §22③1호", "source_doc": "(2023)은행연합회 광고심의 매뉴얼 1부.hwp p105", "source_type": "자율규제·법률"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "right_to_explanation", "label": "설명받을 권리 안내", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "금소법 §19①에 따른 설명을 받을 권리 안내 문구", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "설명받을 권리 안내 내용을 포함하였는가?", "basis": {"law": "은행 광고심의 기준 §16①7 / 금소법 §19① / 시행령 §18③1호", "source_type": "자율규제·법률"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "seller_name_product_content", "label": "판매업자 명칭·상품 내용", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "금융상품판매업자등 명칭 + 상품 명칭·이자율·수수료 등 내용", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "금융상품판매업자등의 명칭 및 금융상품의 내용(명칭·이자율·수수료)을 표시하였는가?", "basis": {"law": "금소법 §22③2호 / 시행령 §18①1호 가·나·다", "source_type": "법률·시행령"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "stats_source", "label": "통계·도표 출처·기준일", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "인용한 통계수치·도표의 출처 및 기준일자", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "통계·도표 인용 시 출처와 기준일자를 명시하였는가?", "basis": {"law": "은행 광고심의 기준 §18②2 / 감독규정 별표5 1호 나목", "source_type": "자율규제·행정규칙"}, "applies_when": "통계·도표 인용 시", "status": "확정"}]
+      },
+      {
+        "field_key": "award_cert_timeinfo", "label": "수상·인증·특허 시기·내용", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "수상·선정·인증·특허 표기 시 그 시기와 내용", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "수상·인증·특허 표기 시 시기·내용을 명시하였는가?", "basis": {"law": "은행 광고심의 기준 §18①1", "source_type": "자율규제"}, "applies_when": "수상·인증·특허 표기 시", "status": "확정"}]
+      },
+      {
+        "field_key": "affiliated_service_condition", "label": "연계·제휴서비스 충족조건", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "연계·제휴 부수서비스 이용을 위한 충족요건", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "연계·제휴서비스 광고 시 충족해야 할 조건을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §18③3 / 감독규정 별표5 1호 다목", "source_type": "자율규제·행정규칙"}, "applies_when": "연계·제휴서비스 광고 시", "status": "확정"}]
+      },
+      {
+        "field_key": "endorsement_interest_disclosure", "label": "추천·보증 경제적 이해관계 공개", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "광고주-추천/보증인 간 경제적 이해관계 존재 여부·공개 문구(위치·형태·언어 요건 포함)", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "추천·보증형식 광고 시 경제적 이해관계를 명확히(근접 위치·명확 표현·한국어) 표시하였는가?", "basis": {"law": "추천·보증 등에 관한 표시·광고 심사지침 Ⅴ.6", "source_type": "행정규칙"}, "applies_when": "추천·보증(체험·후기·유명인·SNS 노출) 광고 시", "status": "확정"}]
+      },
+      {
+        "field_key": "ai_generated_notice", "label": "생성형 AI 활용 고지", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "생성형 AI로 제작·편집한 텍스트/이미지/영상/오디오 고지 문구", "value_type": "text", "example": "본 광고는 생성형 AI로 생성·편집되었습니다", "source": "text"},
+        "review_items": [{"check": "생성형 AI 활용 광고물에 활용 사실을 고지·표시하였는가? (실존 인물·음성 오인 우려 시 강화 표시)", "basis": {"law": "(2026)생성형 AI·외국어 번역·다크패턴 관련 광고 유의사항(은행연합회) Ⅰ", "source_type": "실무 안내"}, "applies_when": "생성형 AI 제작·편집 광고물", "status": "확정"}]
+      },
+      {
+        "field_key": "prohibit_definitive", "label": "단정적·확정적 표현 금지", "group": "공통", "category": "금지", "priority": "필수",
+        "extraction": {"description": "'확정·보장' 등 불확실 사항의 단정적 표현 유무", "value_type": "bool", "source": "text"},
+        "review_items": [{"check": "불확실한 사항을 단정적으로 표시하지 않았는가?", "basis": {"law": "은행 광고심의 기준 §17①1 / 금소법 시행령 §20①4호", "source_type": "자율규제·시행령"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "prohibit_superlative", "label": "근거 없는 최상급 표현 금지", "group": "공통", "category": "금지", "priority": "필수",
+        "extraction": {"description": "'최고·최상·최저·최초·최대·1위·제일·유일' 등 객관 근거 없는 최상급 표현", "value_type": "bool", "source": "text"},
+        "review_items": [{"check": "객관적 근거 없이 최상급 표현을 사용하지 않았는가?", "basis": {"law": "은행 광고심의 기준 §17①5", "source_type": "자율규제"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "prohibit_condition_generalization", "label": "거래조건 일반화 오인 금지", "group": "공통", "category": "금지", "priority": "필수",
+        "extraction": {"description": "소비자별로 달라지는 거래조건을 누구에게나 적용되는 것처럼 오인시키는 표현", "value_type": "bool", "source": "text"},
+        "review_items": [{"check": "소비자별로 달라질 수 있는 거래조건을 누구에게나 적용되는 것처럼 오인하게 하지 않았는가?", "basis": {"law": "은행 광고심의 기준 §17①4 / 감독규정 §19①1호", "source_type": "자율규제·행정규칙"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "prohibit_false_exaggerate_deceive", "label": "거짓·과장·기만·부당비교·비방 금지", "group": "공통", "category": "금지", "priority": "필수",
+        "extraction": {"description": "거짓·과장·기만·부당비교·비방에 해당하는 표현", "value_type": "bool", "source": "text"},
+        "review_items": [{"check": "거짓·과장·기만·부당비교·비방 광고에 해당하는 표현이 없는가?", "basis": {"law": "표시·광고의 공정화에 관한 법률 §3① / 은행 광고심의 기준 §17①7~9", "source_type": "법률·자율규제"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "prohibit_darkpattern", "label": "다크패턴 금지", "group": "공통", "category": "금지", "priority": "권장",
+        "extraction": {"description": "다크패턴 4종(허위·숨김·기습·순차공개 가격) 해당 UI/문구", "value_type": "bool", "source": "text+layout"},
+        "review_items": [{"check": "다크패턴(허위광고·숨겨진 정보·기습광고·순차공개 가격)에 해당하지 않는가?", "basis": {"law": "(2026)생성형 AI·외국어·다크패턴 유의사항(은행연합회) Ⅲ", "source_type": "실무 안내"}, "applies_when": "전 광고(특히 온라인 가입 프로세스)", "status": "확정", "note": "priority=권장(유의사항)"}]
+      },
+      {
+        "field_key": "benefit_risk_balance", "label": "혜택·불이익 균형 전달(색·굵기·크기)", "group": "공통", "category": "양식", "priority": "필수",
+        "extraction": {"description": "글자 색·크기, 음성 속도·크기가 혜택과 불이익을 균형 있게 전달하는지(시각 신호)", "value_type": "enum", "source": "layout"},
+        "review_items": [{"check": "글자 색·크기·음성 속도·크기가 혜택과 불이익을 균형 있게 전달하는가?", "basis": {"law": "금소법 §22⑦ / 시행령 §19① / 감독규정 §18", "source_type": "법률·행정규칙"}, "applies_when": "전 광고", "status": "확정", "note": "텍스트만으로 판정 불가 — FR-011 레이아웃/폰트 분석 필요"}]
+      },
+      {
+        "field_key": "compliance_pre_review", "label": "준법감시인 사전 심의(절차)", "group": "공통", "category": "절차", "priority": "필수",
+        "extraction": {"description": "광고 시행 전 준법감시인(없으면 감사) 심의 완료 여부", "value_type": "bool", "source": "metadata"},
+        "review_items": [{"check": "광고 시행 전 준법감시인의 심의를 완료하였는가?", "basis": {"law": "금소법 시행령 §19②", "source_type": "시행령"}, "applies_when": "전 광고", "status": "확정", "note": "광고물 자체가 아닌 절차 — 광고물 판독으로는 심의필 표기로 간접 확인. 다만 002·003 실측(2026-07-28)에서 광고 본문에 '이 광고는 법령 및 내부통제기준에 따른 광고 관련 절차를 준수하였습니다' 류 자율선언 문구가 그대로 인쇄돼 있어, 이 경우엔 광고물 판독으로 직접 확인 가능 — 예금성.json G3에 compliance_procedure_declaration 필드로 별도 추출(심의필과는 별개 문구, 없어도 정상)"}]
+      },
+      {
+        "field_key": "event_promo_info", "label": "이벤트·프로모션 대상·자격·기간·내용", "group": "공통", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "이벤트·특판·프로모션·연계·제휴 광고 시 대상·자격요건·기간·내용", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "이벤트·프로모션 광고의 경우 대상·자격·기간·내용을 명확히 안내하였는가?", "basis": {"law": "은행 광고심의 기준 §18③3", "source_type": "자율규제"}, "applies_when": "이벤트·프로모션 광고 시", "status": "확정", "link": "event_overlay"}]
+      }
+    ],
+
+    "deposit": [
+      {
+        "field_key": "product_name", "label": "상품명", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "예금성 상품 명칭", "value_type": "text", "example": "NH올원e적금", "source": "text"},
+        "review_items": [{"check": "상품 명칭을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①4 / 금소법 시행령 §18①1호 가목", "source_doc": "(2023)은행연합회 매뉴얼 p105", "source_type": "자율규제·시행령"}, "applies_when": "예금성", "status": "확정"}]
+      },
+      {
+        "field_key": "eligibility", "label": "가입대상·가입조건", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "가입대상·연령·개인/기업 등 가입조건", "value_type": "text", "example": "개인(1인 1계좌)", "source": "text"},
+        "review_items": [{"check": "가입대상·계약기간 등 가입조건을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①4·5가목", "source_type": "자율규제"}, "applies_when": "예금성", "status": "확정"}]
+      },
+      {
+        "field_key": "contract_period", "label": "가입기간(계약기간)", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "계약기간/가입기간", "value_type": "text", "example": "12 개월", "source": "text"},
+        "review_items": [{"check": "계약기간(가입기간)을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①5가목", "source_type": "자율규제"}, "applies_when": "예금성", "status": "확정"}]
+      },
+      {
+        "field_key": "deposit_amount", "label": "가입금액(납입 한도)", "group": "예금성", "category": "표시의무", "priority": "권장",
+        "extraction": {"description": "가입/납입 금액·한도", "value_type": "text", "example": "1천원 이상 30만원 이하(원단위)", "source": "text"},
+        "review_items": [{"check": "가입금액·납입한도를 표시하였는가? (입출금 파킹통장 등은 한도금액 누락 주의)", "basis": {"law": "은행 광고심의 기준 §16①(가입조건) + NH 자체 매뉴얼(파킹통장 한도 누락)", "source_type": "자율규제·자체기준"}, "applies_when": "예금성(특히 한도형 상품)", "status": "확인필요", "note": "가입조건의 일부로 취급되나 독립 필수항목 여부는 상품별 상이 — 준법팀 확정"}]
+      },
+      {
+        "field_key": "interest_rate_range", "label": "이자율 범위·산출기준", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "연 최저~최고 이자율 범위 + 산출기준(기준일자·세전/세후·연 기준·기간별 이율)", "value_type": "text", "example": "연 최저 3.1% ~ 연 최고 3.6% (26.06.10 기준, 세전)", "source": "text"},
+        "review_items": [
+          {"check": "이자율의 범위 및 산출기준(기준일·세전/세후)을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①5나목 / 감독규정 §17①3호 가목 / 금소법 §22③3호", "source_type": "자율규제·행정규칙·법률"}, "applies_when": "예금성", "status": "확정"},
+          {"check": "이자율·수익률 표기 시 '세전'·'세후' 구분을 표기했는가?", "basis": {"law": "금융상품 등의 표시·광고에 관한 심사지침 Ⅴ.1", "source_type": "행정규칙"}, "applies_when": "예금성", "status": "확정"}
+        ]
+      },
+      {
+        "field_key": "base_rate_with_max", "label": "기본금리(최고금리 병기·균형)", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "최고금리 표시 시 함께 표기되는 기본금리(인접 위치·균형 배치)", "value_type": "text", "example": "기본 연 3.1% / 최대 연 3.6%", "source": "text"},
+        "review_items": [
+          {"check": "최고금리 표시 시 기본금리를 병기하고 인접 위치에 표시하였는가?", "basis": {"law": "(2023)예금성상품 광고시 준수사항(은행연합회) Ⅲ.일반원칙(1) / M03", "source_doc": "(2023)예금성상품 광고시 준수사항_은행연합회.hwp p2", "source_type": "실무 안내"}, "applies_when": "예금성(최고금리 표시 시)", "status": "확정"},
+          {"check": "기본금리 글자 크기·굵기·색상이 최고금리와 균형을 이루는가? (최고금리만 크게 표기 금지)", "category_override": "양식", "basis": {"law": "(2023)예금성상품 광고시 준수사항 Ⅲ.일반원칙(1)", "source_type": "실무 안내"}, "applies_when": "예금성(최고금리 표시 시)", "status": "확정", "note": "시각 신호 — 레이아웃 분석 필요"}
+        ]
+      },
+      {
+        "field_key": "preferential_rate_conditions", "label": "우대금리 지급조건(항목별 구분)", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "우대금리 각 조건별 우대폭(항목별 구분)과 지급조건", "value_type": "list", "example": ["0.1%p: NH올원e통장에서 출금하여 신규", "0.2%p: 7번동의서 전체 동의", "0.2%p: 최근 6개월 예·적금 미보유 신규"], "source": "text"},
+        "review_items": [
+          {"check": "우대금리 지급조건을 항목별로 구분하여 명시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①5나 / (2023)예금성 준수사항 Ⅲ.일반원칙(2) / M03·M04", "source_doc": "(2023)예금성상품 광고시 준수사항_은행연합회.hwp p5", "source_type": "자율규제·실무 안내"}, "applies_when": "예금성(우대금리 있는 경우)", "status": "확정"},
+          {"check": "우대금리가 '만기해지 시에만 적용'되는 경우 그 사실(중도해지 시 미지급)을 명시하였는가?", "basis": {"law": "(2023)예금성상품 광고시 준수사항 Ⅱ.광고시 유의사항", "source_type": "실무 안내"}, "applies_when": "만기해지 조건부 우대금리", "status": "확정"}
+        ]
+      },
+      {
+        "field_key": "interest_calc_method", "label": "이자 계산방식(단리/복리 종류)", "group": "예금성", "category": "금지", "priority": "필수",
+        "extraction": {"description": "이자 계산방식 — 단리/복리 및 복리 종류(일·월·분기·반기·연)", "value_type": "text", "source": "text"},
+        "review_items": [
+          {"check": "복리를 일·월·분기·반기·연 복리로 구분하지 않고 단순히 '복리식'으로 표시하지 않았는가?", "basis": {"law": "금융상품 등의 표시·광고에 관한 심사지침 Ⅴ.2.가 / M04", "source_type": "행정규칙"}, "applies_when": "복리 상품", "status": "확정"},
+          {"check": "만기 복리·중도해지 단리 지급인데 항상 복리로 지급하는 것처럼 표시하지 않았는가?", "basis": {"law": "금융상품 등의 표시·광고에 관한 심사지침 Ⅴ.2.나", "source_type": "행정규칙"}, "applies_when": "만기복리/중도단리 상품", "status": "확정"}
+        ]
+      },
+      {
+        "field_key": "interest_payment_time", "label": "이자 지급시기", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "이자 지급시기(만기일시지급/월별지급 등)", "value_type": "text", "example": "만기일시지급식", "source": "text"},
+        "review_items": [{"check": "이자·수익의 지급시기를 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①5다 / 감독규정 §17①3호 나목", "source_type": "자율규제·행정규칙"}, "applies_when": "예금성", "status": "확정"}]
+      },
+      {
+        "field_key": "interest_payment_restriction", "label": "이자 지급제한 사유", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "압류·가압류·질권설정 등 원금·이자 지급제한 사유", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "이자·수익의 지급제한 사유를 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①5다 / 감독규정 §17①3호 나목", "source_type": "자율규제·행정규칙"}, "applies_when": "예금성", "status": "확정"}]
+      },
+      {
+        "field_key": "maturity_interest_example", "label": "만기 수취이자 예시(또는 계산기)", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "만기시 예상 수취이자 예시(납입금액·기간·적용금리 기반) 또는 이자계산기 기능", "value_type": "text", "example": "매월 30만원 12개월 납입 시 세전이자 70,200원", "source": "text"},
+        "review_items": [{"check": "만기시 수취이자에 대한 예시(또는 계산기)를 제공하였는가?", "basis": {"law": "(2023)예금성상품 광고시 준수사항 Ⅲ.일반원칙", "source_doc": "...hwp p6", "source_type": "실무 안내"}, "applies_when": "예금성", "exceptions": "지면협소(SNS·LMS 1,000자 등) 또는 화면 내 이자계산기 제공 시 미적용 가능(권장)", "status": "확정"}]
+      },
+      {
+        "field_key": "early_termination_rate", "label": "중도해지이율·만기후이율", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "중도해지 이율 및 만기 후 이율", "value_type": "text", "example": "NH농협은행 영업점 및 홈페이지에 고시한 이율", "source": "text"},
+        "review_items": [
+          {"check": "중도해지이율·만기후이율을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①5나 / 감독규정 시행세칙 §4①(비교공시 표시항목)", "source_type": "자율규제·행정규칙"}, "applies_when": "예금성", "status": "확정"},
+          {"check": "중도해지 시 저율·이자 지급 제한 사유를 은폐하지 않았는가?", "category_override": "금지", "basis": {"law": "(2023)예금성상품 광고시 준수사항 Ⅱ / 심사지침 Ⅴ.1", "source_type": "실무 안내·행정규칙"}, "applies_when": "예금성", "status": "확정"}
+        ]
+      },
+      {
+        "field_key": "depositor_protection", "label": "예금자보호 부보 문구", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "예금자보호법에 따른 보호 대상 여부 및 보호 한도 문구", "value_type": "text", "example": "이 예금은 예금자보호법에 따라 … 1인당 '1억원까지' 보호됩니다", "source": "text"},
+        "review_items": [{"check": "예금자보호법상 보호 대상 여부 및 한도 문구를 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①5라 / 금소법 시행령 §18③3호", "source_type": "자율규제·시행령"}, "applies_when": "예금성", "status": "확인필요", "note": "한도 값 충돌(규칙리스트/M04=5천만원 vs v12·샘플=1억원). 검토 기준일 유효 한도를 준법팀 확정. 스키마는 값 고정 대신 '부보 문구 존재 + 최신 한도 일치'로 검사. Q1."}]
+      },
+      {
+        "field_key": "depositor_protection_logo", "label": "예금자보호 로고 병기", "group": "예금성", "category": "표시의무", "priority": "권장",
+        "extraction": {"description": "예금자보호 로고 병기 여부", "value_type": "bool", "source": "layout"},
+        "review_items": [{"check": "예금자보호 로고를 병기하였는가?", "basis": {"law": "예금자보호법 개정(2026.9 시행 예정)", "source_doc": "NH 자체 기준([예금성상품-적금] 올원e적금.hwpx)", "source_type": "자체기준"}, "applies_when": "예금성", "status": "확인필요", "note": "시행 예정(2026.9) — 필수 적용 개시일 확정 전까지 권장/보류. Q2."}]
+      },
+      {
+        "field_key": "future_return_disclaimer", "label": "ELD·연동예금 미래수익 비보장 문구", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "환율·주가연동예금(ELD) 등 만기지급금 예시 시 '미래 수익 미보장' 문구", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "만기지급금 예시 광고의 경우 '예시된 지급금이 미래 수익을 보장하지 않는다'는 사실을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16①5마 / 금소법 §22③3호 다목 / 시행령 §18②", "source_type": "자율규제·법률·시행령"}, "applies_when": "ELD·주가/환율연동 예금(만기지급금 예시 광고)", "status": "확정"}]
+      },
+      {
+        "field_key": "tax_benefit", "label": "세제혜택·제한조건", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "비과세 등 세제혜택 및 제한 사항(세대당 1통장 등)", "value_type": "text", "example": "비과세종합저축 가입 가능", "source": "text"},
+        "review_items": [{"check": "세금우대혜택 시 제한 사항(세대당 1통장 등)을 알렸는가?", "basis": {"law": "금융상품 등의 표시·광고에 관한 심사지침 Ⅴ.5.가", "source_type": "행정규칙"}, "applies_when": "세제혜택 표기 시", "status": "확정"}]
+      },
+      {
+        "field_key": "installment_type", "label": "적립유형(적금)", "group": "예금성", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "적금 적립유형(정액/자유)", "value_type": "enum", "example": "자유적립식", "source": "text"},
+        "review_items": [{"check": "(적금) 적립유형·저축기간별 이자율·이자계산방식·만기후이율·가입방법·우대조건을 표시하였는가?", "basis": {"law": "감독규정 시행세칙 §4①2호 및 별표1·2", "source_type": "행정규칙"}, "applies_when": "적금", "status": "확정"}]
+      },
+      {
+        "field_key": "prohibit_relative_high_rate", "label": "상대적 고이자율·수익률 허위 금지", "group": "예금성", "category": "금지", "priority": "필수",
+        "extraction": {"description": "유사 타 상품 대비 상대적 고이자율을 제공 못 하면서 제공하는 것처럼/실제보다 높게 표기", "value_type": "bool", "source": "text"},
+        "review_items": [{"check": "유사 상품 대비 상대적으로 높은 이자율을 제공할 수 없음에도 제공하는 것처럼, 또는 실제보다 높게 표시하지 않았는가?", "basis": {"law": "금융상품 등의 표시·광고에 관한 심사지침 Ⅴ.1.가·다", "source_doc": "별첨자료_금융광고규제가이드라인.pdf 참고2 사례집", "source_type": "행정규칙"}, "applies_when": "예금성", "status": "확정"}]
+      },
+      {
+        "field_key": "prohibit_special_rate_as_cash", "label": "특별금리 경품성 금전 오인 금지", "group": "예금성", "category": "금지", "priority": "필수",
+        "extraction": {"description": "만기 특별금리(우대금리)를 경품성 별도 금전 지급처럼 표시", "value_type": "bool", "source": "text"},
+        "review_items": [{"check": "특별금리를 경품성 별도 금전(축하금 등) 지급인 것처럼 표시하지 않았는가?", "basis": {"law": "금융상품 등의 표시·광고에 관한 심사지침 Ⅴ.5.나", "source_type": "행정규칙"}, "applies_when": "특별금리·우대금리 상품", "status": "확정"}]
+      },
+      {
+        "field_key": "presale_review", "label": "사전심의 대상 6종 여부(절차)", "group": "예금성", "category": "절차", "priority": "필수",
+        "extraction": {"description": "타사연계·MMDA(잔액별 차등)·ELD 등 연합회 사전심의 대상 6종 해당 여부", "value_type": "enum", "source": "metadata"},
+        "review_items": [{"check": "사전심의 대상 6종(타사연계 예금, 잔액별 차등금리 입출금예금, 지수연동예금 등)에 해당하면 연합회 사전심의를 신청하였는가?", "basis": {"law": "은행 광고심의 기준 세칙 §2①1~", "source_doc": "(2023)은행연합회 매뉴얼 p111", "source_type": "자율규제"}, "applies_when": "예금성 사전심의 대상 6종", "status": "확정", "note": "입출금(MMDA) subtype 라우팅과 연동 — Q6"}]
+      }
+    ],
+
+    "event_overlay": [
+      {
+        "field_key": "event_name", "label": "이벤트명", "group": "이벤트", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "이벤트/프로모션 명칭", "value_type": "text", "example": "행운의 777 이벤트 / 올원모임 소문내기 이벤트", "source": "text"},
+        "review_items": [{"check": "이벤트명을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §18③3", "source_type": "자율규제"}, "applies_when": "ad_type=이벤트페이지", "status": "확정"}]
+      },
+      {
+        "field_key": "event_target", "label": "이벤트 대상·자격", "group": "이벤트", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "이벤트 참여 대상·자격요건", "value_type": "text", "example": "이벤트 기간 내 「NH대박7적금」 가입고객 / 통장까지 연결해야 응모대상", "source": "text"},
+        "review_items": [{"check": "이벤트 대상·자격요건을 명확히 안내하였는가?", "basis": {"law": "은행 광고심의 기준 §18③3", "source_type": "자율규제"}, "applies_when": "ad_type=이벤트페이지", "status": "확정"}]
+      },
+      {
+        "field_key": "event_period", "label": "이벤트 기간", "group": "이벤트", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "이벤트 기간", "value_type": "text", "example": "2025년 10월 1일(수) ~ 10월 31일(금)", "source": "text"},
+        "review_items": [{"check": "이벤트 기간을 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §18③3", "source_type": "자율규제"}, "applies_when": "ad_type=이벤트페이지", "status": "확정"}]
+      },
+      {
+        "field_key": "event_prize", "label": "경품 내용", "group": "이벤트", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "경품/혜택 내용", "value_type": "text", "example": "지원금 10만원(선착순 1,000명) / 네이버페이 포인트 3만원(추첨 15명)", "source": "text"},
+        "review_items": [{"check": "경품 내용을 명확히 안내하였는가?", "basis": {"law": "은행 광고심의 기준 §18③3", "source_type": "자율규제"}, "applies_when": "ad_type=이벤트페이지", "status": "확정"}]
+      },
+      {
+        "field_key": "event_draw_method", "label": "추첨·선착순 방식·당첨자 발표", "group": "이벤트", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "추첨/선착순 방식 및 당첨자 발표방법", "value_type": "text", "example": "추첨 15명 / 선착순 1,000명 / 당첨자 대상 11월 중 LMS 발송", "source": "text"},
+        "review_items": [{"check": "추첨·선착순 방식과 당첨자 발표방법을 안내하였는가?", "basis": {"law": "은행 광고심의 기준 §18③3", "source_type": "자율규제"}, "applies_when": "ad_type=이벤트페이지", "status": "확정"}]
+      },
+      {
+        "field_key": "preferential_draw_probability", "label": "추첨 우대금리 당첨확률(조건부)", "group": "이벤트", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "우대금리를 추첨으로 제공하는 경우 당첨확률의 구체적 수치", "value_type": "text", "example": "당첨확률 00%", "source": "text"},
+        "review_items": [{"check": "추첨을 통해 '우대금리'를 제공하는 경우 당첨확률을 구체적 수치로 표기하였는가?", "basis": {"law": "(2023)예금성상품 광고시 준수사항 Ⅲ.일반원칙(3) / M03", "source_type": "실무 안내"}, "applies_when": "추첨으로 우대금리를 제공하는 경우에 한함", "exceptions": "우대금리가 아닌 일반 경품(모임지원금·네이버페이 등) 추첨은 확률표기 의무 미적용 (샘플 002·003이 이 예외)", "status": "확정", "note": "적용조건 판정이 핵심 — 경품 성격(우대금리 vs 일반경품) 먼저 분류"}]
+      }
+    ],
+
+    "media_overlay": [
+      {
+        "field_key": "media_type", "label": "매체 유형(판정)", "group": "매체", "category": "절차", "priority": "필수",
+        "extraction": {"description": "광고 매체 유형 판정(지면/방송/온라인/전자적전송매체/옥외)", "value_type": "enum", "source": "metadata"},
+        "review_items": [{"check": "광고 매체 유형을 판정하였는가? (매체별 규제 분기)", "basis": {"law": "v12 시트 3_광고매체 / 표시광고법 시행령 §2", "source_type": "복합"}, "applies_when": "전 광고", "status": "확정"}]
+      },
+      {
+        "field_key": "min_font_size", "label": "매체별 최소 글자크기", "group": "매체", "category": "양식", "priority": "필수",
+        "extraction": {"description": "의무표시사항 글자크기(지면 8pt·신문 10pt 등)", "value_type": "number", "source": "layout"},
+        "review_items": [{"check": "매체별 최소 글자크기(지면 8pt·신문 10pt)를 준수하였는가?", "basis": {"law": "여신전문금융회사 등의 광고에 관한 규정 세부지침 별표3", "source_doc": "(2025)여신금융협회 광고심의 업무매뉴얼.pdf 별표3 p21", "source_type": "자율규제"}, "applies_when": "지면·인쇄·옥외 매체", "status": "확인필요", "note": "여신협 세부지침은 본래 여전사 대상 — 은행 예금광고 적용 글자크기 정본 확정 필요. Q3. 시각 신호(레이아웃 분석)."}]
+      },
+      {
+        "field_key": "etm_ad_mark", "label": "전자적 전송매체 '(광고)' 표시", "group": "매체", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "SMS·알림톡·이메일 제목 시작부의 '(광고)' 표기(빈칸·부호·문자 삽입 금지)", "value_type": "text", "source": "text"},
+        "review_items": [{"check": "전자적 전송매체 광고 제목 시작 부분에 '(광고)'를 (변형 없이) 표시하였는가?", "basis": {"law": "은행 광고심의 기준 §16(전자적 전송매체) / 정보통신망법 §50", "source_type": "자율규제·법률"}, "applies_when": "media=전자적전송매체(SMS·알림톡·이메일)", "status": "확정"}]
+      },
+      {
+        "field_key": "etm_sender_optout", "label": "전자적 전송매체 전송자·수신거부·야간동의", "group": "매체", "category": "표시의무", "priority": "필수",
+        "extraction": {"description": "전송자 명칭·연락처 / 수신거부 무료전화 / 야간(21~08시) 전송 별도 동의", "value_type": "text", "source": "text"},
+        "review_items": [
+          {"check": "전송자의 명칭·연락처와 수신거부 무료전화를 표시하였는가?", "basis": {"law": "정보통신망법 §50④ / 시행령 §61③", "source_type": "법률·시행령"}, "applies_when": "media=전자적전송매체", "status": "확정"},
+          {"check": "21:00~08:00 야간 전송 시 별도 사전동의를 받았는가?", "basis": {"law": "정보통신망법 §50③", "source_type": "법률"}, "applies_when": "media=전자적전송매체(야간 전송)", "status": "확정"}
+        ]
+      },
+      {
+        "field_key": "online_banner_duration", "label": "온라인 배너 노출시간", "group": "매체", "category": "양식", "priority": "필수",
+        "extraction": {"description": "인터넷 배너 정지 노출시간(검색광고 3초 이상 등)", "value_type": "number", "source": "metadata"},
+        "review_items": [{"check": "인터넷 배너의 경우 3초 이상 정지 표시하였는가?", "basis": {"law": "여신전문금융회사 등의 광고에 관한 규정 세부지침 별표3", "source_type": "자율규제"}, "applies_when": "media=온라인 배너/검색광고", "status": "확인필요", "note": "동적 매체 — PoC 정지 이미지 입력에서는 판정 제한. Q3 근거 이슈 동일."}]
+      }
+    ]
+  },
+
+  "open_questions": [
+    {"id": "Q1", "topic": "예금자보호 한도", "conflict": "규칙리스트/M04=5천만원 vs v12·샘플=1억원", "action": "검토 기준일 유효 한도 준법팀 확정, 스키마는 '문구 존재+최신 한도 일치'로 검사"},
+    {"id": "Q2", "topic": "예금자보호 로고 병기", "conflict": "2026.9 시행 예정(현재 시행 전)", "action": "필수 적용 개시일 확정 전 권장/보류"},
+    {"id": "Q3", "topic": "매체별 최소 글자크기 근거", "conflict": "여신협 세부지침(여전사 대상)을 은행 예금광고에 적용, 은행 자체 기준 조문 불명", "action": "은행권 예금광고 글자크기 정본 확정"},
+    {"id": "Q4", "topic": "체크리스트 2종 관계", "conflict": "v12(축기반) vs 통합체크리스트(M04+M12)", "action": "v12 1차 근거, 통합체크리스트 교차검증"},
+    {"id": "Q5", "topic": "규칙리스트 v0 지위", "conflict": "status 전부 임시, 원문검증 실패 6.2%, 중복 미정리", "action": "recall 보강 보조 근거로만, 인용 시 status=임시 명시"},
+    {"id": "Q6", "topic": "입출금(통장·MMDA) 표시항목", "conflict": "예금성 하위지만 금리 중심 항목과 어긋남, MMDA는 사전심의 대상", "action": "입출금 subtype 전용 필수항목 별도 확정, 스키마 subtype 분기"},
+    {"id": "Q7", "topic": "원본소스 폴더 미포함", "conflict": "규칙리스트 원문 재검증·중복제거본 미전달", "action": "컴플라이언스 연구팀에 02_원본소스/·05_중복제거_참고/ 요청"}
+  ],
+
+  "sample_applicability": [
+    {"file": "[예금성상품-적금] 올원e적금.png", "product_group": "예금성", "subtype": "적금", "ad_type": "상세페이지", "finding": "예금성 필수항목 전부 실재+파싱 회수. 예금자보호 '1억원' 표기(Q1 실증)."},
+    {"file": "NH농협은행-2026_001-예금성.pdf", "product_group": "예금성", "subtype": "입출금(통장)", "ad_type": "상세페이지", "finding": "가입대상·금리·유의사항 실재. '채널/가입기간'은 원본에 없음(외부 LLM 환각). 입출금 subtype 사례(Q6)."},
+    {"file": "NH농협은행-2026_002-예금성.png", "product_group": "예금성", "subtype": "적금", "ad_type": "이벤트페이지", "finding": "예금성+이벤트 오버레이. 경품(네이버페이·배민) 추첨=일반경품 → 당첨확률 표기 미적용."},
+    {"file": "NH농협은행-2026_003-예금성.pdf", "product_group": "예금성", "subtype": "입출금(모임통장)", "ad_type": "이벤트페이지(SNS 카드형)", "finding": "카드형 다중 이벤트, 일반경품 → 확률표기 미적용. 카드별 이벤트 오버레이 적용."},
+    {"file": "NH농협은행-2026_004-대출성.hwp", "product_group": "대출성", "ad_type": "-", "finding": "PoC 상품범위 밖(대출). 스키마 대상 아님, 파서 적용성만."}
+  ],
+
+  "limitations": [
+    "양식(글자크기·색·굵기·시인성) 항목은 텍스트 추출만으로 판정 불가 — FR-011 레이아웃/폰트 분석 필요(source=layout 표기).",
+    "입출금 subtype(001·003)은 금리 중심 예금 항목과 부분 불일치(Q6).",
+    "절차 항목(사전심의·준법감시인 심의)은 광고물 판독이 아닌 메타데이터/심의필 표기로 간접 확인.",
+    "규칙리스트 v0(1721건)는 status=임시 — 본 카탈로그의 근거는 v12 체크리스트를 우선했고 규칙리스트는 recall 보강용."
+  ]
+}
