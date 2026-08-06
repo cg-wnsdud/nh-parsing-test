@@ -125,6 +125,7 @@ uv run python tools/make_review.py      # → out/review.html
 
 | 알고 싶은 것 | 문서 |
 |---|---|
+| **이 저장소가 무엇이고 어떻게 흐르나** (PR·인수인계 설명용) | ⭐ [docs/흐름과_인수인계_2026-08-06.md](docs/흐름과_인수인계_2026-08-06.md) |
 | **8/6 에 무엇을 왜 바꿨나** (쉬운 말) | ⭐ [docs/변경정리_2026-08-06.md](docs/변경정리_2026-08-06.md) |
 | **실제로 무엇이 나왔나** (숫자·시간·사례) | [docs/parsing-output-report.md](docs/parsing-output-report.md) |
 | **코드가 실제로 무엇을 하나** (좌표·실값으로 끝까지) | [docs/architecture/pipeline-walkthrough.md](docs/architecture/pipeline-walkthrough.md) |
