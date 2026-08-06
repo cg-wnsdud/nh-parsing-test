@@ -295,6 +295,58 @@ def section_role(res: dict) -> None:
     print(f"1층(label)→2층(규칙) 변경 {changed12}개 / 2층→3층(VLM) 변경 {changed23}개")
     print(f"규칙폴백인데 라인이 있는 영역 {len(rules_with_lines)}개: {rules_with_lines}")
     print("  (나머지 폴백은 라인이 없어 VLM 에게 묻지 않은 빈 검출 박스)")
+    _role_disagreement(res)
+
+
+def _role_disagreement(res: dict) -> None:
+    """규칙 vs VLM 이 **어디서** 갈리는지 — walkthrough §9-⑤ 고도화 2단계의 측정.
+
+    지금까지는 "같은 입력 2회 실행에 97.3% 일치"라는 총계만 있었고 어느 role 에서
+    갈리는지를 몰랐다. `role_rule`(규칙 판정 스냅샷)·`layout_score`(StructureV3
+    확신도)가 out/json 에 남기 시작한 뒤부터 이 표가 채워진다.
+
+    **재파싱 전에는 두 필드가 없다** — 그때는 이 함수가 '아직 없음'만 찍고 끝난다.
+    옛 산출물에 대고 규칙을 다시 돌려 흉내 내지 않는다. 그러면 재계산 결과를
+    저장값인 척 읽게 되고, 이 저장소가 반복해 당한 사고가 정확히 그것이다.
+    """
+    pairs = collections.Counter()
+    scored: list[tuple[float, bool]] = []
+    have = 0
+    for stem, d in _docs():
+        for pg in d["pages"]:
+            for r in pg["regions"]:
+                rule = r.get("role_rule")
+                if rule is None:
+                    continue
+                have += 1
+                if r.get("role_source") != "vlm":
+                    continue
+                agree = rule == r["role"]
+                if not agree:
+                    pairs[(rule, r["role"])] += 1
+                if r.get("layout_score") is not None:
+                    scored.append((float(r["layout_score"]), agree))
+
+    res["role_rule_vs_vlm"] = {f"{a}→{b}": n for (a, b), n in pairs.items()}
+    if not have:
+        print("\n규칙 vs VLM 불일치: 재파싱 전이라 role_rule 이 없다 "
+              "(B6 는 2026-08-06 추가 — tools/run_nhdata.py 를 다시 돌려야 채워진다)")
+        return
+    total_vlm = sum(1 for _, d_ in _docs() for pg in d_["pages"] for r in pg["regions"]
+                    if r.get("role_source") == "vlm" and r.get("role_rule") is not None)
+    n_diff = sum(pairs.values())
+    print(f"\n규칙 vs VLM 불일치 {n_diff}건 / VLM 판정 {total_vlm}건 "
+          f"({(1 - n_diff / total_vlm) * 100:.1f}% 일치)" if total_vlm else "")
+    for (a, b), n in pairs.most_common():
+        print(f"  규칙 '{a}' → VLM '{b}'  {n}건")
+    if scored:
+        agree_s = [s for s, a in scored if a]
+        diff_s = [s for s, a in scored if not a]
+        res["role_layout_score"] = {"agree_n": len(agree_s), "diff_n": len(diff_s)}
+        def _avg(xs): return sum(xs) / len(xs) if xs else float("nan")
+        print(f"  layout_score 평균 — 일치 {_avg(agree_s):.3f}({len(agree_s)}건) "
+              f"vs 불일치 {_avg(diff_s):.3f}({len(diff_s)}건)")
+        print("  (엔진 확신도가 낮은 블록에 불일치가 몰리는지 보는 값. 판정엔 안 쓴다)")
 
 
 # ─────────────────────────────── card ───────────────────────────────

@@ -87,6 +87,7 @@ def build_regions(
                 region_id=f"p{page_no}_r{i:03d}",
                 bbox=block.bbox,
                 label=block.label,
+                layout_score=block.score,   # 엔진 확신도 — 판정엔 안 쓰고 진단용으로만 보관
                 role=_LABEL_TO_ROLE.get(block.label.lower(), "본문"),
             )
         )
@@ -111,8 +112,19 @@ def build_regions(
 
 
 def _refine_role(region: Region, canvas_h: int) -> None:
-    """규칙 기반 초기/폴백 역할 — VLM 판정(vlm_judge)이 성공하면 덮어써진다."""
+    """규칙 기반 초기/폴백 역할 — VLM 판정(vlm_judge)이 성공하면 덮어써진다.
+
+    덮이기 전 값을 `role_rule` 에 스냅샷한다. 판정에는 안 쓴다 — VLM 이 성공하면
+    규칙 판정이 흔적 없이 사라져 두 판정을 대조할 방법이 없었기 때문이다
+    (walkthrough §9-⑤ 고도화 1단계: "근거를 먼저 만든다").
+    """
     region.role_source = "rules"
+    _apply_role_rules(region, canvas_h)
+    region.role_rule = region.role
+    region.role_rule_confidence = region.role_confidence
+
+
+def _apply_role_rules(region: Region, canvas_h: int) -> None:
     text = region.text
     if _NOTICE_HEADER.search(text):
         region.role = "유의사항"

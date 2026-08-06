@@ -36,9 +36,19 @@ class Region(BaseModel):
     region_id: str
     bbox: Optional[list[int]] = None
     label: str = "unknown"          # 엔진 원 라벨 (PP-Structure label 등)
+    # StructureV3 가 이 블록 판정에 붙인 확신도(LayoutBlock.score). 판정에는 안 쓴다 —
+    # 역할 판정이 갈릴 때 "레이아웃 엔진도 확신이 없던 자리인가"를 보려고 남긴다.
+    # 2026-08-06 이전에는 받을 칸이 없어 파싱 직후 사라졌다 (walkthrough §9-⑤).
+    layout_score: Optional[float] = None
     role: str = "본문"               # 제목|본문|유의사항|각주|버튼|고지문구|이미지|표|기타
     role_confidence: Optional[float] = None
     role_source: Optional[str] = None  # vlm | rules (VLM 실패 시 폴백)
+    # 규칙(_refine_role)이 내린 판정 — VLM 이 role 을 통째로 덮기 **전** 값이다.
+    # 판정에는 안 쓴다. 지금까지는 VLM 이 성공하면 규칙 판정이 흔적 없이 사라져
+    # "규칙과 VLM 이 어디서 몇 건 갈리는가"를 잴 수가 없었다(총계 97.3% 일치만 알았다).
+    # 이 두 필드가 그 측정의 재료다 — walkthrough §9-⑤ 고도화 1단계.
+    role_rule: Optional[str] = None
+    role_rule_confidence: Optional[float] = None
     section_id: Optional[str] = None   # 소속 섹션 (AdPage.sections 참조)
     card_no: Optional[int] = None      # 카드-분할(§D): 1..N=카드(위→아래·좌→우), 0=페이지 공통(배너/헤더). 스크롤/미적용은 None
     is_illustrative: bool = False      # 예시/장식(앱화면 예시·지폐 그림 등) — 심의 대상 제외·보관 (2a)
