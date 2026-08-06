@@ -8,20 +8,35 @@ AI 활용 금융상품 광고심의 적정성 검토 에이전트 (NH농협은�
 심의 판정(위반 여부 산정)은 아직 없음 — 자세한 경계는
 [docs/handoff.md](docs/handoff.md) §6 참조.
 
+**최신 실행: 2026-08-06 무캐시 · 5문서 7페이지**
+
+| 지표 | 값 | 도구 |
+|---|---|---|
+| 분류 | 9/9 | `evaluate.py` |
+| 영역검출 | 43/44 | `evaluate.py` |
+| 문장 회수 | 237/242 | `evaluate.py` |
+| 필드 회수 | 43/44 (실행마다 42~43) | `verify_extract.py` |
+| 파싱 소요 | 496초 (VLM 대기 96.7%) | `run_nhdata.py` |
+| 테스트 | 167 passed | `pytest` |
+
+**8/6 에 무엇을 바꿨는지는 [docs/변경정리_2026-08-06.md](docs/변경정리_2026-08-06.md)** 를
+먼저 읽으면 된다 — 쉬운 말로 정리해 두었다.
+
 ## 실행
 
 ```bash
 uv sync                                # Python 3.13 + 의존성 (사내 파서 포함, Java 필요)
 
-# 1단계: 파싱 (광고물 → out/json, out/llm_view)
-uv run python tools/run_nhdata.py --input nh-data/sample-data
+# 1단계: 파싱 (광고물 → out/json, out/llm_view, out/_timing.json)
+uv run python tools/run_nhdata.py                # 기본 입력이 nh-data/sample-data
 
 # 2단계: STAGE_3 스키마 추출 (out/llm_view → out/extracted)
 uv run python tools/run_extract.py
 
-# 채점 — 파싱 품질(분류/섹션/문장)과 필드 회수는 서로 다른 도구가 잰다
+# 채점 — 파싱 품질(분류/영역/문장)과 필드 회수는 서로 다른 도구가 잰다
 uv run python tools/evaluate.py         # gold/*.yaml 대비 → out/eval_report.md
 uv run python tools/verify_extract.py   # out/extracted 대비 필드 회수
+uv run python tools/verify_numbers.py   # 문서에 쓰는 모든 숫자를 out/ 에서 재계산 (모델 0회)
 
 # 육안 검수 — 원본 위 bbox 하이라이트 + OCR/VLM 판독 대조
 uv run python tools/make_review.py      # → out/review.html
@@ -29,6 +44,14 @@ uv run python tools/make_review.py      # → out/review.html
 
 외부 서비스(PaddleX/Gemma)는 사내 엔드포인트 — [.env.example](.env.example) 참고.
 `VLM_CACHE=r`(기록)/`=p`(재생) 환경변수로 결정론적 A/B가 가능하다(개발 전용).
+
+> ⚠️ **`GEMMA_MODEL` 이름을 먼저 확인할 것.** 게이트웨이가 모델명을 바꾸면 **모든 VLM 호출이
+> 400 으로 죽는데 OCR 은 멀쩡히 돌아 산출물이 그럴듯하게 나온다** (2026-08-06 실제 사고 —
+> `gemma-4-26b-…` → `spark-gemma-4-26b-…`). 지금은 `run_nhdata.py` 가 이런 실행을 `exit 1`
+> 로 잡지만, 확실한 건 직접 대조하는 것이다:
+> ```bash
+> curl -s "${GEMMA_URL%/chat/completions}/models"   # 사용 가능한 이름 목록
+> ```
 
 ## 코드 맵 (src/nh_parsing/)
 
@@ -73,13 +96,23 @@ uv run python tools/make_review.py      # → out/review.html
 
 ## 문서
 
-- **[docs/handoff.md](docs/handoff.md)** — ⭐ **여기부터.** 스키마를 어떻게 짰고 무엇이
-  나오는지, 다음 단계(RAG/DB) 인계 시 정해야 할 것 5가지. 팀 논의용
-- **[docs/schema-explained.md](docs/schema-explained.md)** — 스키마 내부 구조 상세
-  (그룹 구성 이유, `field_key` 설계, pydantic 없이 어떻게 검증하는지). 개인 학습용
-- **[docs/architecture/pipeline-map.md](docs/architecture/pipeline-map.md)** — 파이프라인
-  내부. 단계별 실행 순서·판단 주체(OCR/VLM/코드)·비용 실측
-- **[docs/previous/](docs/previous/)** — 대체된 과거 설계 문서 (역사적 기록)
+**무엇을 알고 싶은지에 따라 고르면 된다.**
+
+| 알고 싶은 것 | 문서 |
+|---|---|
+| **8/6 에 무엇을 왜 바꿨나** (쉬운 말) | ⭐ [docs/변경정리_2026-08-06.md](docs/변경정리_2026-08-06.md) |
+| **실제로 무엇이 나왔나** (숫자·시간·사례) | [docs/parsing-output-report.md](docs/parsing-output-report.md) |
+| **코드가 실제로 무엇을 하나** (좌표·실값으로 끝까지) | [docs/architecture/pipeline-walkthrough.md](docs/architecture/pipeline-walkthrough.md) |
+| **인계 시 정할 것** (스키마·DB·RAG 경계) | [docs/handoff.md](docs/handoff.md) |
+| 스키마 내부 구조 상세 | [docs/schema-explained.md](docs/schema-explained.md) |
+| 검수 화면(review.html) 읽는 법 | [docs/screen-guide-review-html.md](docs/screen-guide-review-html.md) |
+| 다이어그램 캔버스 동반 설명 | [docs/architecture/pipeline-diagram-guide.md](docs/architecture/pipeline-diagram-guide.md) |
+| 팀장님 레포(nh-ad-compliance)와의 비교 | [docs/compare-nh-ad-compliance.md](docs/compare-nh-ad-compliance.md) |
+
+**갱신하지 않는 옛 문서** — 어긋나는 지점은
+[walkthrough §10](docs/architecture/pipeline-walkthrough.md) 에 모아 두었다:
+`docs/architecture/pipeline-map.md` · `docs/발표대본_2026-08-04.md` ·
+`docs/notion_파싱파이프라인-output_2026-08-03.md` · [docs/previous/](docs/previous/)
 
 ## 참고 저장소
 
