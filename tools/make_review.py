@@ -576,11 +576,11 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
     return _details(summary, body, cls="stage3wrap", open_=True), "".join(overlay_divs)
 
 
-def _img_data_uri(path: Path) -> str | None:
+def _img_data_uri(path: Path, mime: str = "image/jpeg") -> str | None:
     if not path.exists():
         return None
     data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/jpeg;base64,{data}"
+    return f"data:{mime};base64,{data}"
 
 
 def _page_html(parsed: dict, page: dict, preview_dir: Path, extracted: dict | None) -> str:
@@ -761,28 +761,15 @@ header.top .legend .tag { margin-left: 10px; }
 .act-code { background:#eaecef; color:#424a53; }
 .act-paddle { background:#ddf4ff; color:#0550ae; }
 .act-vlm { background:#fbefff; color:#8250df; }
-/* 도식 — 인라인 SVG(폐쇄망: 외부 도식 라이브러리 금지). 좁은 화면에서는 가로 스크롤. */
+/* 도식 — 2026-08-06 부터는 손그림 SVG 대신 사용자가 Obsidian 에서 만든 PNG 를 그대로 쓴다.
+   좁은 화면에서는 가로 스크롤. */
 .svgwrap { overflow-x:auto; margin-bottom:10px; }
-svg.pipesvg { width:100%; min-width:1000px; height:auto; display:block; }
-svg.pipesvg text { font-family:'Malgun Gothic','Segoe UI',sans-serif; }
-svg.pipesvg .lanelbl { font-size:11.5px; font-weight:700; fill:#57606a; }
-svg.pipesvg .lanerule { stroke:#eaecef; stroke-width:1; }
-svg.pipesvg .bt { font-size:12px; font-weight:700; fill:#1f2328; }
-svg.pipesvg .bs { font-size:10px; fill:#57606a; }
-svg.pipesvg .arw { stroke:#57606a; stroke-width:1.4; fill:none; }
-svg.pipesvg .arw.dash { stroke:#8250df; stroke-dasharray:5 3; }
-svg.pipesvg .edgelbl { font-size:10px; fill:#8250df; }
-svg.pipesvg .edgebg { fill:#fff; }
-svg.pipesvg .dimmed { opacity:0.35; }
-svg.pipesvg .todaycut { font-size:10.5px; font-weight:700; fill:#9a6700; }
-svg.pipesvg .bx rect { stroke-width:1.2; }
-svg.pipesvg .code rect { fill:#f6f8fa; stroke:#afb8c1; }
-svg.pipesvg .paddle rect { fill:#ddf4ff; stroke:#54aeff; }
-svg.pipesvg .vlm rect { fill:#faf0ff; stroke:#c297ff; }
-svg.pipesvg .out rect { fill:#f0fdf1; stroke:#4ac26b; }
-svg.pipesvg .io rect { fill:#fff; stroke:#8b949e; stroke-dasharray:4 3; }
-svg.pipesvg .note rect { fill:#fff8c5; stroke:#d4a72c; }
-svg.pipesvg .note .bt { fill:#7d4e00; }
+img.pipediagram { width:100%; min-width:900px; height:auto; display:block; border:1px solid #d0d7de; border-radius:6px; }
+.diagramnote { margin-top:10px; }
+.diagsteps { margin:0 0 10px; padding-left:20px; font-size:12.5px; line-height:1.7; color:#1f2328; }
+.diagsteps li { margin-bottom:3px; }
+p.diagfix { background:#fff8c5; border-left:3px solid #d4a72c; border-radius:4px; padding:9px 13px; font-size:12.5px; color:#57606a; line-height:1.7; margin:0; }
+p.nodiagram { color:#cf222e; font-size:13px; }
 details.stepswrap { margin-bottom:14px; }
 details.stepswrap > summary { background:#f6f8fa; padding:6px 10px; font-size:12.5px; }
 details.stepswrap .phases { padding:10px; margin-bottom:0; }
@@ -1063,147 +1050,54 @@ _TERMS: list[tuple[str, str, str]] = [
 ]
 
 
-# 도식 — 텍스트 단계표(_PHASES)와 같은 내용을 그림으로. 순수 인라인 SVG 로 그린다:
-# 폐쇄망이라 외부 도식 라이브러리(mermaid 등)를 못 쓰고, PNG 로 굽는 것보다 SVG 가
-# 확대해도 안 깨지고 diff 도 된다. (id, 주체, 제목, 부제줄들, 폭) — id 는 특수 화살표
-# (structured 우회 / 미배정 되돌림)가 좌표를 찾을 때 쓴다.
-_LANES: list[tuple[str, list[tuple[str, str, str, list[str], int]]]] = [
-    ("0 라우팅", [
-        ("in", "io", "입력", ["PDF · PNG · HWP"], 130),
-        ("triage", "code", "⓿ 트리아지", ["디지털 텍스트를 믿을 수 있나", "structured / hybrid / scan_like"], 210),
-    ]),
-    ("1 글자 획득", [
-        ("tile", "code", "① 타일 분할", ["글자 없는 행에서 자른다"], 165),
-        ("ocr", "paddle", "② OCR + 레이아웃", ["글자·좌표·레이아웃 블록", "타일당 1회"], 185),
-        ("merge", "code", "③④ 좌표복원·병합", ["중복 제거 · 디지털 우선"], 185),
-        ("region", "code", "⑤ 영역 조립", ["블록에 라인 배정", "= 굵은 박스"], 165),
-    ]),
-    ("2 구조 정리", [
-        ("card", "vlm", "⑥⑦ 카드 배정", ["개수=밀도(코드)", "배정=VLM"], 165),
-        ("role", "vlm", "⑧ 역할 판정", ["제목·유의사항 등 9종", "= 박스 라벨 괄호"], 185),
-        ("absorb", "code", "⑨ 낱줄 귀속", ["포함 → 같은 칼럼 근접", "좌표만, VLM 없음"], 185),
-    ]),
-    ("3 통합 판독", [
-        ("band", "vlm", "⑩ 밴드 통독", ["OCR 과 같은 크롭으로", "교정 + 누락 회수"], 175),
-        ("sweep", "vlm", "⑪ 통짜 스윕", ["대형 장식 타이포"], 150),
-        ("reread", "vlm", "⑫⑬ 재판독", ["중복·저신뢰 라인"], 150),
-        ("keep", "note", "정본은 안 덮는다", ["후보(vlm_reading)로만 부착", "선택은 STAGE_3 몫"], 200),
-    ]),
-    ("4 정렬 · 산출물", [
-        ("sort", "code", "⑭ 읽기순서 정렬", ["카드 → 위아래 → 좌우", "라인 좌표 기준"], 175),
-        ("json", "out", "out/json", ["전체 기록 — 좌표·신뢰도", "출처·판단 로그 (감사용)"], 190),
-        ("view", "out", "out/llm_view", ["정제 텍스트 + 통독 후보", "= STAGE_3 입력"], 190),
-    ]),
-    ("5 스키마 추출", [
-        ("s3", "vlm", "STAGE_3 5그룹 호출", ["상품기본·금리·의무고지", "위험표현·이벤트"], 190),
-        ("absence", "code", "부재 4분류 · bbox 재부착", ["미표시/해당없음/확인필요", "/판정제외 — 모델 호출 0"], 210),
-        ("ext", "out", "out/extracted", ["값·상태·근거 필드"], 175),
-    ]),
-]
-
-_SVG_LANE_H = 108      # 레인 하나의 높이
-_SVG_BOX_H = 66
-_SVG_X0 = 118          # 레인 이름 칸 폭
-_SVG_GAP = 34          # 박스 사이 화살표 자리
+# 도식 — 손으로 만든 SVG 레인 그림은 2026-08-06 에 뺐다. 실측 근거대로 그리는 게 아니라
+# 손으로 좌표를 잡다 보니 팀 공유 때 "가시성이 떨어진다"는 피드백을 받았고, 사용자가
+# Obsidian/Excalidraw 로 만들어 둔 다이어그램(docs/architecture/pipeline-diagram.png)이
+# 이미 있어 그걸 그대로 쓰기로 했다. 대신 그림은 8/5 스냅샷이라 8/6 수정분(관계 딱지
+# 타이밍 등)과 어긋나는 지점이 있어, 그 격차를 밑에 텍스트로 보충한다.
+def _pipeline_diagram_uri() -> str | None:
+    return _img_data_uri(ROOT / "docs" / "architecture" / "pipeline-diagram.png", mime="image/png")
 
 
-def _pipeline_svg(dim_from_lane: int | None = None) -> str:
-    """레인(단계) x 박스(세부단계) 도식. 특수 화살표 2개를 곡선으로 얹는다.
-
-    dim_from_lane: 그 인덱스부터의 레인을 흐리게 — 파싱만 보여줄 때 "여기까지가 오늘
-    범위"를 그림에서 바로 읽히게 한다(스키마 단계를 지우면 전체 그림이 안 보이므로
-    지우지 않고 흐린다).
+def _pipeline_diagram_html() -> str:
+    """다이어그램 이미지 + 8/6 기준 최신 설명. 그림 자체는 8/5 스냅샷이라 코드와
+    어긋나는 지점(⑦↔⑧ 순서)을 감추지 않고 문장으로 짚는다 — 조용히 넘기면 그림만 보고
+    옛 순서를 사실로 믿게 된다.
     """
-    pos: dict[str, tuple[float, float, float, float]] = {}   # id → (x, y, w, h)
-    body: list[str] = []
-    for li, (lane, boxes) in enumerate(_LANES):
-        dim = " dimmed" if dim_from_lane is not None and li >= dim_from_lane else ""
-        cy = 30 + li * _SVG_LANE_H + _SVG_BOX_H / 2
-        top = cy - _SVG_BOX_H / 2
-        if dim and li == dim_from_lane:
-            body.append(
-                f'<text class="todaycut" x="8" y="{top - 8:.0f}">'
-                '↓ 여기부터는 오늘 범위 밖 (스키마 미완)</text>'
-            )
-        body.append(
-            f'<text class="lanelbl{dim}" x="8" y="{cy + 4:.0f}">{html.escape(lane)}</text>'
-            f'<line class="lanerule" x1="0" y1="{cy + _SVG_LANE_H / 2 - 4:.0f}" '
-            f'x2="1180" y2="{cy + _SVG_LANE_H / 2 - 4:.0f}"/>'
-        )
-        x = _SVG_X0
-        for bi, (bid, actor, title, subs, w) in enumerate(boxes):
-            if bi:
-                body.append(
-                    f'<path class="arw" d="M{x - _SVG_GAP + 4} {cy} H{x - 5}" marker-end="url(#ah)"/>'
-                )
-            pos[bid] = (x, top, w, _SVG_BOX_H)
-            sub_y = top + 36
-            subs_svg = "".join(
-                f'<text class="bs" x="{x + w / 2:.0f}" y="{sub_y + i * 13:.0f}" '
-                f'text-anchor="middle">{html.escape(s)}</text>'
-                for i, s in enumerate(subs)
-            )
-            body.append(
-                f'<g class="bx {actor}{dim}"><rect x="{x}" y="{top:.0f}" width="{w}" '
-                f'height="{_SVG_BOX_H}" rx="7"/>'
-                f'<text class="bt" x="{x + w / 2:.0f}" y="{top + 21:.0f}" '
-                f'text-anchor="middle">{html.escape(title)}</text>{subs_svg}</g>'
-            )
-            x += w + _SVG_GAP
-        # 레인 사이 연결: 마지막 박스 아래 → 다음 레인 첫 박스 위
-        if li + 1 < len(_LANES):
-            lx, _, lw, _h = pos[boxes[-1][0]]
-            from_x, from_y = lx + lw / 2, top + _SVG_BOX_H
-            to_x = _SVG_X0 + _LANES[li + 1][1][0][4] / 2
-            mid = from_y + (_SVG_LANE_H - _SVG_BOX_H) / 2
-            body.append(
-                f'<path class="arw" d="M{from_x:.0f} {from_y:.0f} V{mid:.0f} '
-                f'H{to_x:.0f} V{from_y + _SVG_LANE_H - _SVG_BOX_H - 5:.0f}" marker-end="url(#ah)"/>'
-            )
-
-    def edge_label(x: float, y: float, text: str) -> str:
-        """점선 위에 얹는 설명. 선이 글자를 관통하지 않게 흰 받침을 깐다(실측 겹침)."""
-        w = len(text) * 6.2 + 8
-        return (
-            f'<rect class="edgebg" x="{x - 4:.0f}" y="{y - 10:.0f}" width="{w:.0f}" height="13"/>'
-            f'<text class="edgelbl" x="{x:.0f}" y="{y:.0f}">{html.escape(text)}</text>'
-        )
-
-    # ㉠ structured 우회 — 디지털 텍스트가 정본이면 ①② 를 건너뛴다
-    tx, ty, tw, th = pos["triage"]
-    rx, ry, rw, _rh = pos["region"]
-    body.append(
-        f'<path class="arw dash" d="M{tx + tw} {ty + th / 2:.0f} H{rx + rw - 24:.0f} '
-        f'V{ry - 5:.0f}" marker-end="url(#ah2)"/>'
-        + edge_label(tx + tw + 10, ty + th / 2 - 6, "structured → OCR 생략 (디지털 텍스트가 정본)")
-    )
-    # ㉡ ⑤ 에서 남은 미배정 낱줄이 ⑨ 로 되돌아온다
-    ax, ay, aw, _ah = pos["absorb"]
-    loop_y = ry + _SVG_BOX_H + 17
-    body.append(
-        f'<path class="arw dash" d="M{rx + 24} {ry + _SVG_BOX_H} V{loop_y:.0f} '
-        f'H{ax + aw / 2:.0f} V{ay - 5:.0f}" marker-end="url(#ah2)"/>'
-        + edge_label(rx + 34, loop_y + 4, "⑤ 에서 어느 영역에도 못 붙은 미배정 낱줄")
-    )
-
-    legend = "".join(
-        f'<g class="bx {a}"><rect x="{118 + i * 150}" y="668" width="18" height="12" rx="3"/></g>'
-        f'<text class="edgelbl" x="{140 + i * 150}" y="678">{lab}</text>'
-        for i, (a, lab) in enumerate(
-            [("code", "순수 코드"), ("paddle", "PaddleX OCR"), ("vlm", "Gemma VLM"),
-             ("out", "산출물 파일"), ("io", "입·출력")]
-        )
-    )
+    uri = _pipeline_diagram_uri()
+    if not uri:
+        return '<p class="nodiagram">다이어그램 이미지를 못 찾았습니다 (docs/architecture/pipeline-diagram.png).</p>'
+    steps = [
+        ("①입력", "PDF · PNG · HWP. 오늘 기준 샘플 5건(PDF 2 · PNG 2 · HWP 1)."),
+        ("②라우팅", "이미지는 곧장 OCR. PDF는 페이지마다 <code>structured</code>(디지털 텍스트가 정본 → "
+         "OCR 생략) / <code>hybrid</code>(이미지 비중↑ — 5문서에서 한 번도 안 탐, 고도화 보류 중) / "
+         "<code>scan_like</code>(스캔 이미지 → OCR) 로 나눈다. HWP는 사내 파서가 정본이라 이 판정이 "
+         "없다(0.7~1.6초)."),
+        ("③조각 분할", "세로로 긴 이미지를 글자 밀도 기준으로 최대 1600px 씩 자른다."),
+        ("④StructureV3(+OCR)", "조각당 1회 호출로 글자·좌표·레이아웃 블록을 함께 받는다."),
+        ("⑤좌표 복원·영역 조립", "겹치게 잘랐던 조각 좌표를 되돌리고, 라인 중심점이 들어가는 블록에 "
+         "배정한다. 못 들어간 라인은 <b>미배정</b>으로 남아 좌표만으로 재배정을 한 번 더 시도한다 "
+         "(VLM 호출 없음)."),
+        ("⑥구조 판정", "영역마다 역할(9종)을 VLM 이 정하고, 카드형이면 개수는 밀도(코드)로 세고 "
+         "배정만 VLM 이 한다."),
+        ("⑦통합 재판독", "VLM 이 같은 조각을 다시 읽어 밴드 통독·통짜 스윕·오차 재판독·저신뢰 재판독 "
+         "4갈래로 검증한다. 결과는 <code>vlm_reading</code> 후보로만 붙고, 정본(그림의 빨간 상자)은 "
+         "덮지 않는다."),
+        ("⑧읽기순서 정렬", "카드 → 위아래 → 좌우로 최종 순서를 정한다."),
+        ("⑨산출물", "<code>out/json</code>(전체 기록) · <code>out/llm_view</code>(정제 텍스트) · "
+         "<code>out/extracted</code>(스키마 필드) 세 파일이 <code>region_id</code> 로 서로 연결된다."),
+    ]
+    steps_html = "".join(f"<li><b>{t}</b> — {d}</li>" for t, d in steps)
     return (
-        '<svg class="pipesvg" viewBox="0 0 1190 692" role="img" '
-        'aria-label="파싱 파이프라인 처리 단계 도식">'
-        '<defs>'
-        '<marker id="ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" '
-        'orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#57606a"/></marker>'
-        '<marker id="ah2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" '
-        'orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#8250df"/></marker>'
-        '</defs>'
-        f'{"".join(body)}{legend}</svg>'
+        f'<img class="pipediagram" src="{uri}" alt="파이프라인 다이어그램 — 상자 9개 흐름도">'
+        '<div class="diagramnote">'
+        '<ol class="diagsteps">' + steps_html + '</ol>'
+        '<p class="diagfix"><b>2026-08-06 수정과 그림이 어긋나는 지점</b> — 그림은 8/5 스냅샷이라 '
+        '⑦(통합 재판독)이 ⑧(읽기순서 정렬)보다 앞에 그려져 있다. 실제로는 <b>정본-후보 관계 딱지 계산만 '
+        '⑧ 뒤로 옮겨졌다</b>(읽기순서가 확정된 뒤에 비교해야 순서가 안 흔들리기 때문 — 수정 전 관계 딱지 '
+        '불일치 18건 → 수정 후 0건, 181건 중 재계산). VLM 재판독 호출 자체(⑦의 4갈래)는 그림대로 ⑧ 전에 '
+        '실행된다.</p>'
+        '</div>'
     )
 
 
@@ -1275,9 +1169,11 @@ def _pipeline_overview_html(parsing_only: bool = False) -> str:
         '(RAG/DB 엔진 + 심의 담당자) 몫입니다.</p>'
         '<div class="ovhead">처리 단계 — 입력 1건이 아래 순서를 그대로 지나갑니다'
         f'<span class="actlegend">{actor_legend}</span></div>'
-        f'<div class="svgwrap">{_pipeline_svg(dim_from_lane=5 if parsing_only else None)}</div>'
-        '<details class="toggle stepswrap"><summary class="sechead">단계별 설명 (글로 보기)'
-        '<span class="meta">위 그림의 각 상자가 왜 필요한지 · 실측 근거</span></summary>'
+        f'<div class="svgwrap">{_pipeline_diagram_html()}</div>'
+        + ('<p class="scopebar">그림 좌측 하단 "stage3 최종 산출물 필드 뽑는 단계(임시)" 박스는 '
+           '참고용입니다 — 이 화면은 파싱(그림의 ①~⑨)까지만 봅니다.</p>' if parsing_only else "")
+        + '<details class="toggle stepswrap"><summary class="sechead">단계별 설명 (글로 보기)'
+        '<span class="meta">위 그림보다 더 세분화된 번호체계(0~4단계 · ①~⑮) · 실측 근거</span></summary>'
         f'<div class="phases">{"".join(phases)}</div></details>'
         '<p class="howto"><b>이 배치가 원칙입니다</b> — <b>의미 판단은 모델이, 검산은 코드가</b> 합니다. '
         '카드 개수는 픽셀 밀도가 세고(⑦), 낱줄 귀속은 좌표 게이트가 막고(⑨), 통독 후보는 관계 딱지로 '

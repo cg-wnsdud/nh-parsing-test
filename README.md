@@ -40,7 +40,15 @@ uv run python tools/verify_numbers.py   # 문서에 쓰는 모든 숫자를 out/
 
 # 육안 검수 — 원본 위 bbox 하이라이트 + OCR/VLM 판독 대조
 uv run python tools/make_review.py      # → out/review.html
+
+# 팀원에게 공유할 스냅샷 (out/ 는 gitignore 대상이라 밖으로 빼서 저장)
+uv run python tools/make_review.py --out docs/review.html
 ```
+
+`review.html` 은 원본 이미지·OCR/VLM 판독 결과를 **base64 로 파일 안에 그대로 내장**한다
+(모든 페이지 이미지 포함 5MB 안팎) — 폴더 없이 파일 하나만 보내도 그대로 열린다.
+[docs/review.html](docs/review.html) 은 2026-08-06 실행 스냅샷이다 — **재실행하면 갱신되지
+않으니**, 최신 결과가 필요하면 위 명령을 다시 돌려 덮어써야 한다.
 
 외부 서비스(PaddleX/Gemma)는 사내 엔드포인트 — [.env.example](.env.example) 참고.
 `VLM_CACHE=r`(기록)/`=p`(재생) 환경변수로 결정론적 A/B가 가능하다(개발 전용).
@@ -136,6 +144,7 @@ uv run python tools/make_review.py      # → out/review.html
 | **인계 시 정할 것** (스키마·DB·RAG 경계) | [docs/handoff.md](docs/handoff.md) |
 | 스키마 내부 구조 상세 | [docs/schema-explained.md](docs/schema-explained.md) |
 | 검수 화면(review.html) 읽는 법 | [docs/screen-guide-review-html.md](docs/screen-guide-review-html.md) |
+| 검수 화면 실물 (팀 공유용 스냅샷, 8/6) | [docs/review.html](docs/review.html) |
 | 다이어그램 캔버스 동반 설명 | [docs/architecture/pipeline-diagram-guide.md](docs/architecture/pipeline-diagram-guide.md) (이미지는 코드 맵 위쪽 참조) |
 | 팀장님 레포(nh-ad-compliance)와의 비교 | [docs/compare-nh-ad-compliance.md](docs/compare-nh-ad-compliance.md) |
 
