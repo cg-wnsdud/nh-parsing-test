@@ -8,10 +8,15 @@
 
 | 파일 | 대상 경로 | 상태 |
 |---|---|---|
-| `vlm_ocr_app.py` | `apps/parser-services/vlm_ocr_app.py` | ✅ 실파일 HTTP 로 검증 |
-| `requirements-vlm-ocr.txt` | `apps/parser-services/requirements-vlm-ocr.txt` | ✅ 깨끗한 환경 설치 검증 |
-| `Dockerfile.vlm-ocr` | `apps/parser-services/Dockerfile.vlm-ocr` | ⚠️ **빌드 미검증** (도커 데몬 없음) |
-| 아래 §2·§3 | `compose*.yml` · 워커 3파일 | ⚠️ 미적용 (읽기 전용이라 쓰지 않았다) |
+| `nh-ad-compliance.patch` | (전부) | ✅ 복사본에 적용해 대상 테스트 101개 통과 — **§7** |
+| `vlm_ocr_app.py` | `apps/parser-services/vlm_ocr_app.py` | ✅ 컨테이너로 띄워 실파일 검증 |
+| `requirements-vlm-ocr.txt` | `apps/parser-services/requirements-vlm-ocr.txt` | ✅ 이미지 빌드 성공 (290MB) |
+| `Dockerfile.vlm-ocr` | `apps/parser-services/Dockerfile.vlm-ocr` | ⚠️ 패키지 **받아오는 줄만** 미검증 (§5·§7-3) |
+| 아래 §2 (compose) | `compose*.yml` | ⚠️ **미검증** — 스택 전체를 못 띄웠다 |
+
+**결론부터**: 이 패치를 그대로 병합하면 서비스는 뜨고 호출도 되지만 **우리 결과가
+승자 선정에서 탈락한다**(§7-4). 그 이유는 구조적이고(§7-5), 함께 정해야 할 것이
+남아 있다. 즉 **이대로는 목적을 달성하지 못한다.**
 
 파싱 알맹이는 `nh_parsing.vlm_ocr_service.parse_to_normalized()` 하나이고, 계약 dict
 생성은 `nh_parsing.normalized_export` 가 한다. 둘 다 이 저장소에 테스트와 함께 있다.
