@@ -765,8 +765,19 @@ header.top .legend .tag { margin-left: 10px; }
   padding:1px 5px; border-radius:3px; margin-right:4px; }
 /* 도식 — 2026-08-06 부터는 손그림 SVG 대신 사용자가 Obsidian 에서 만든 PNG 를 그대로 쓴다.
    좁은 화면에서는 가로 스크롤. */
+/* 2026-08-07: min-width:900px 을 뺐다. 노트북은 화면 배율(150~200%)이 걸려 논리 폭이
+   900px 아래로 내려가는데, 그러면 이 값이 가로 스크롤을 강제해 다이어그램이 잘려 보였다
+   (큰 모니터에서는 폭이 넉넉해 재현되지 않아 늦게 발견). 기본은 화면에 맞추고, 글자가
+   작아 안 보이면 아래 토글로 원본 크기(스크롤)로 편다. */
 .svgwrap { overflow-x:auto; margin-bottom:10px; }
-img.pipediagram { width:100%; min-width:900px; height:auto; display:block; border:1px solid #d0d7de; border-radius:6px; }
+img.pipediagram { width:100%; max-width:100%; height:auto; display:block;
+  border:1px solid #d0d7de; border-radius:6px; }
+.dgchk { display:none; }
+.dgctl { display:inline-block; margin:0 0 6px; font-size:11.5px; color:#0969da; cursor:pointer;
+  border:1px solid #d0d7de; border-radius:4px; padding:3px 9px; background:#fff; user-select:none; }
+.dgctl:hover { background:#f6f8fa; }
+.dgchk:checked ~ .svgwrap img.pipediagram { width:auto; max-width:none; min-width:1500px; }
+.dgchk:checked ~ .dgctl { background:#ddf4ff; border-color:#54aeff; }
 .diagramnote { margin-top:10px; }
 .diagsteps { margin:0 0 10px; padding-left:20px; font-size:12.5px; line-height:1.7; color:#1f2328; }
 .diagsteps li { margin-bottom:3px; }
@@ -962,13 +973,23 @@ details.evidencewrap > summary, details.noteswrap > summary { background:#f6f8fa
   .cols { display:block; }
   .imgcol { flex:none; max-width:none; width:100%; position:static;
             border-right:none; border-bottom:1px solid #eaecef; }
-  /* 덩어리 중간에서 쪽이 갈리지 않게 */
-  .page, .doc, .outbox, .phase, table { break-inside:avoid; }
+  /* 쪽나눔 회피는 **작은 덩어리에만** 건다. 2026-08-07 실측: .page/.doc 처럼 A4 한 장보다
+     훨씬 큰 요소에 break-inside:avoid 를 걸었더니 크롬이 지키지 못하고 내용을 통째로
+     버려서, 머리줄만 남은 빈 쪽이 나왔다(올원e 7쪽). */
+  .outbox, .phase, .terms tr, .colcalc tr { break-inside:avoid; }
   h2 { break-before:page; }
   .pipeline-overview h2 { break-before:auto; }
+  /* 세로로 긴 광고(예: 1122x6429)는 그대로 두면 한 쪽에 안 들어가 사라진다.
+     이미지는 쪽을 가로질러 쪼갤 수 없으므로 한 쪽 높이에 맞춰 줄인다. */
+  .imgcol img { max-height:225mm; width:auto; max-width:100%; margin:0 auto; }
   /* 화면 전용 조작 장치는 종이에서 뜻이 없다 */
-  .lblctl, .lblchk { display:none; }
+  .lblctl, .lblchk, .dgctl, .dgchk { display:none; }
   .hlbox { display:none; }        /* hover 하이라이트 — 종이에선 항상 꺼진 상태 */
+  /* 영역 라벨(r002 유의사항)은 인쇄에서 뺀다. 위 max-height 로 광고가 세로 한 쪽에
+     맞춰 줄면(1122x6429 → 폭 약 40mm) 8px 라벨이 서로 겹쳐 못 읽고, 라벨 좌표는
+     %(imgstack 기준)라 이미지만 줄면 이미지 밖으로 흩어진다(2026-08-07 실측).
+     같은 정보는 오른쪽 증거층에 region_id·역할로 그대로 실린다. */
+  .rlbl { display:none; }
   a { color:inherit; text-decoration:none; }
 }
 """
@@ -1170,7 +1191,11 @@ def _pipeline_diagram_html() -> str:
     ]
     steps_html = "".join(f"<li><b>{t}</b> — {d}</li>" for t, d in steps)
     return (
+        '<input type="checkbox" class="dgchk" id="dgfull">'
+        '<label class="dgctl" for="dgfull">🔍 원본 크기로 보기 (가로 스크롤)</label>'
+        f'<div class="svgwrap">'
         f'<img class="pipediagram" src="{uri}" alt="파이프라인 다이어그램 — 상자 9개 흐름도">'
+        '</div>'
         '<div class="diagramnote">'
         '<ol class="diagsteps">' + steps_html + '</ol>'
         '<p class="diagfix"><b>2026-08-06 수정과 그림이 어긋나는 지점</b> — 그림은 8/5 스냅샷이라 '
@@ -1250,7 +1275,7 @@ def _pipeline_overview_html(parsing_only: bool = False) -> str:
         '(RAG/DB 엔진 + 심의 담당자) 몫입니다.</p>'
         '<div class="ovhead">처리 단계 — 입력 1건이 아래 순서를 그대로 지나갑니다'
         f'<span class="actlegend">{actor_legend}</span></div>'
-        f'<div class="svgwrap">{_pipeline_diagram_html()}</div>'
+        f'{_pipeline_diagram_html()}'
         + ('<p class="scopebar">그림 좌측 하단 "stage3 최종 산출물 필드 뽑는 단계(임시)" 박스는 '
            '참고용입니다 — 이 화면은 파싱(그림의 ①~⑨)까지만 봅니다.</p>' if parsing_only else "")
         + '<details class="toggle stepswrap"><summary class="sechead">단계별 설명 (글로 보기)'
