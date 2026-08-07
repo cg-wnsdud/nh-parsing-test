@@ -41,6 +41,9 @@ uv run python tools/verify_numbers.py   # 문서에 쓰는 모든 숫자를 out/
 # 육안 검수 — 원본 위 bbox 하이라이트 + OCR/VLM 판독 대조
 uv run python tools/make_review.py      # → out/review.html
 
+# 검수 화면과 같은 그림을 이미지 파일로 (영역 라벨까지 찍힘 — 남에게 그림만 보낼 때)
+uv run python tools/export_previews.py  # → out/previews_labeled/*.jpg
+
 # 팀원에게 공유할 스냅샷 (out/ 는 gitignore 대상이라 밖으로 빼서 저장)
 uv run python tools/make_review.py --out docs/review.html
 
@@ -133,6 +136,7 @@ uv run python tools/make_review.py --for-print --out out/review_print.html
 | `evaluate.py` | 골드셋 채점 — 분류·영역검출·문장 회수 | 없음 |
 | `verify_extract.py` | 골드셋 채점 — 필드 회수 | 없음 |
 | `make_review.py` | 육안 검수 화면 `out/review.html` 생성 | 없음 |
+| `export_previews.py` | 검수 화면과 같은 그림을 **이미지 파일로** (영역 라벨 포함) | 없음 |
 | `rebuild_views.py` | `out/json` → `out/llm_view` 재생성 (파싱은 안 다시 함) | 없음 |
 | `reclassify_absences.py` | 부재 4분류를 스키마 메타로 재계산 (스키마 수정 후 검증용) | 없음 |
 
