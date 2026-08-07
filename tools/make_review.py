@@ -945,6 +945,32 @@ details.evidencewrap > summary, details.noteswrap > summary { background:#f6f8fa
 .notes { padding:8px 12px 2px; }
 .notes ul { margin:0; padding-left:20px; font-size:12px; color:#57606a; }
 .notes li { margin:2px 0; }
+
+/* ── 인쇄 (2026-08-07) ────────────────────────────────────────────────
+   미팅에 종이로 들고 가겠다는 요청. 그냥 인쇄하면 두 가지가 깨진다:
+     1. 접힌 <details> 안의 내용이 통째로 빠진다 (실측: 42쪽 중 단계별 설명·
+        용어 사전·표 보는 법이 제목만 찍혔다) → --for-print 가 열어서 낸다.
+     2. 좌우 2단(cols/imgcol)이 A4 폭에 안 들어가고 sticky 가 인쇄에서 깨진다
+        → 인쇄에서는 위아래 1단으로 편다.
+   화면 표시에는 영향이 없다(@media print 안에만 있다). */
+@media print {
+  @page { size: A4; margin: 11mm; }
+  body { background:#fff; }
+  .wrap { padding:0; max-width:none; }
+  .top { position:static; }
+  /* 2단 → 1단. sticky 는 인쇄에서 의미가 없고 이미지가 잘린다 */
+  .cols { display:block; }
+  .imgcol { flex:none; max-width:none; width:100%; position:static;
+            border-right:none; border-bottom:1px solid #eaecef; }
+  /* 덩어리 중간에서 쪽이 갈리지 않게 */
+  .page, .doc, .outbox, .phase, table { break-inside:avoid; }
+  h2 { break-before:page; }
+  .pipeline-overview h2 { break-before:auto; }
+  /* 화면 전용 조작 장치는 종이에서 뜻이 없다 */
+  .lblctl, .lblchk { display:none; }
+  .hlbox { display:none; }        /* hover 하이라이트 — 종이에선 항상 꺼진 상태 */
+  a { color:inherit; text-decoration:none; }
+}
 """
 
 # 표 행에 hover 하면 같은 data-key 를 가진 이미지 위 오버레이 box 만 밝힌다.
@@ -1268,6 +1294,10 @@ def main() -> None:
         "--parsing-only", action="store_true",
         help="STAGE_3(스키마 추출) 결과를 뺀 파싱 전용 화면. 스키마 확정 전 공유용",
     )
+    parser.add_argument(
+        "--for-print", action="store_true",
+        help="인쇄·PDF 용. 접힌 토글을 전부 펼치고 A4 1단으로 낸다 (종이로 들고 갈 때)",
+    )
     args = parser.parse_args()
 
     preview_dir = args.src / "previews"
@@ -1394,11 +1424,21 @@ def main() -> None:
         f'<script>{HOVER_JS}</script>'
         '</body></html>'
     )
+    if args.for_print:
+        # 접힌 토글은 **인쇄에 아예 안 실린다**(실측: 단계별 설명·용어 사전·표 보는 법이
+        # 제목만 찍혔다). CSS 로 여는 방법은 브라우저 UA 스타일과 싸워야 해서, 생성 시점에
+        # open 을 박는 쪽이 확실하다. 화면용 산출물은 그대로 두고 이 옵션에서만 편다.
+        doc = doc.replace("<details ", "<details open ")
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(doc, encoding="utf-8")
     size_kb = args.out.stat().st_size / 1024
     print(f"→ {args.out}  ({size_kb:.0f} KB, {len(json_files)}개 파일)")
-    print("브라우저로 열어서 확인하세요.")
+    if args.for_print:
+        print("인쇄용: 토글이 전부 펼쳐졌고 A4 1단으로 나옵니다.")
+        print("PDF 로 만들려면 브라우저에서 Ctrl+P → '대상: PDF로 저장'.")
+    else:
+        print("브라우저로 열어서 확인하세요.")
 
 
 if __name__ == "__main__":

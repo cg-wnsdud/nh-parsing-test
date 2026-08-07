@@ -43,6 +43,11 @@ uv run python tools/make_review.py      # → out/review.html
 
 # 팀원에게 공유할 스냅샷 (out/ 는 gitignore 대상이라 밖으로 빼서 저장)
 uv run python tools/make_review.py --out docs/review.html
+
+# 인쇄·PDF 용 (미팅에 종이로 들고 갈 때) — 접힌 토글을 전부 펼치고 A4 1단으로
+uv run python tools/make_review.py --for-print --out out/review_print.html
+#   → 브라우저에서 Ctrl+P → "PDF로 저장". 전체 118쪽 / --parsing-only 96쪽 /
+#     --only "올원e" 27쪽 (실측 2026-08-07)
 ```
 
 `review.html` 은 원본 이미지·OCR/VLM 판독 결과를 **base64 로 파일 안에 그대로 내장**한다
