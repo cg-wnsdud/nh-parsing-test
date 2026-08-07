@@ -14,7 +14,7 @@
   uv run python tools/verify_numbers.py --json     # 기계 판독용
 
 섹션: parse(파싱 집계) / relation(관계 딱지 재계산) / linecand(라인 후보 전달 여부)
-      role(역할 3층) / card(카드 게이트 재현) / stage3(STAGE_3 집계)
+      role(역할 3층) / card(카드 게이트 재현) / export(대상 계약 변환) / stage3(STAGE_3 집계)
 """
 from __future__ import annotations
 
@@ -383,6 +383,47 @@ def section_card(res: dict) -> None:
     res["card_gate"] = rows
 
 
+# ────────────────────────────── export ──────────────────────────────
+
+def section_export(res: dict) -> None:
+    """대상 계약(NormalizedDocument v1)으로 내보낼 때의 집계.
+
+    PR 1단계 합격 기준이 이 숫자다. **입력 라인 수와 계약에 들어가는 블록 수는 다르다** —
+    빈 텍스트 라인을 걸러 내기 때문이다. 문서에 "488건이 검증을 통과한다"고 쓰면 틀린다:
+        입력 라인 = 내보낸 textBlock + 빈 텍스트로 걸러 낸 건수
+    계약 자체의 검증(model_validate)은 파이썬 3.12 를 요구해 여기서 못 돈다 —
+    `tools/export_normalized.py` → `tools/verify_contract.py` 순서로 돌린다.
+    """
+    from nh_parsing.normalized_export import export_normalized_document
+
+    rows, tot, skipped = [], collections.Counter(), []
+    for stem, d in _docs():
+        result = export_normalized_document(
+            d, source_file_id=f"file-{stem}", review_id="review-local-verify",
+            raw_artifact_ref=f"nh-ad-review-poc:out/json/{stem}.json",
+        )
+        if result.skipped:
+            skipped.append({"doc": stem, "reason": result.skipped})
+            continue
+        rows.append({"doc": stem, **result.stats})
+        tot.update(result.stats)
+
+    res["export"] = {"rows": rows, "totals": dict(tot), "skipped": skipped}
+    print(f'{"문서":26s} {"라인입력":>6s} {"블록":>5s} {"빈텍스트":>7s} {"스윕":>4s} '
+          f'{"영역":>5s} {"digital채움":>10s} {"rules채움":>9s} {"클램프":>5s}')
+    for r in rows:
+        print(f'{r["doc"][:24]:26s} {r["lines_in"]:6d} {r["text_blocks"]:5d} '
+              f'{r["dropped_empty_text"]:7d} {r["sweep_blocks"]:4d} {r["layout_blocks"]:5d} '
+              f'{r["digital_filled_confidence"]:10d} {r["rules_filled_role_confidence"]:9d} '
+              f'{r["clamped_coordinates"]:5d}')
+    for r in skipped:
+        print(f'{r["doc"][:24]:26s} 제외 — {r["reason"]}')
+    print(f'\n합계: 입력 {tot["lines_in"]} = 블록 {tot["text_blocks"]} + 걸러냄 '
+          f'{tot["dropped_empty_text"]} | 영역 {tot["layout_blocks"]} | 제외 문서 {len(skipped)}')
+    print(f'계약에 못 싣는 후보 판독: 영역 {tot["region_readings_not_carried"]} · '
+          f'라인 {tot["line_readings_not_carried"]} (out/json 에는 그대로 남아 있다)')
+
+
 # ────────────────────────────── stage3 ──────────────────────────────
 
 def section_stage3(res: dict) -> None:
@@ -439,6 +480,7 @@ SECTIONS = {
     "linecand": ("라인 단위 후보의 llm_view 전달 여부", section_linecand),
     "role": ("역할 3층 재계산", section_role),
     "card": ("카드 게이트 재현 (모델 호출 0회)", section_card),
+    "export": ("대상 계약(NormalizedDocument v1) 변환 집계", section_export),
     "stage3": ("STAGE_3 집계와 코드 검산 장치 발동", section_stage3),
 }
 
