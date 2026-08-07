@@ -12,13 +12,18 @@
 그래서 여기서는 **`nh_parsing` 을 import 하지 않는다** — 표준 라이브러리와 계약
 패키지만 쓴다. 입력은 `tools/export_normalized.py` 가 미리 써 둔 파일이다.
 
-합격 기준(2026-08-06 무캐시 실행 기준, HWP 12라인·1영역은 범위 밖이라 제외):
-  · 문서 4건이 전부 model_validate 통과, 실패 0
-  · 입력 라인 488 = 검증 통과한 textBlock 477 + 빈 텍스트로 걸러 낸 11
-  · layoutBlock 224
+**합격 기준은 개수가 아니라 적합성이다.** 블록 개수를 못박지 않는 이유는 실측이다 —
+같은 코드·같은 입력으로 2회 돌린 결과(2026-08-06 vs 08-07) 스윕 라인이 15→17 로 갈렸고
+그만큼 라인 총계도 488→490 으로 움직였다. 스윕 회수는 비결정이라고 `ir.py:29` 에 이미
+적혀 있다. 개수를 합격 조건으로 박으면 코드가 멀쩡해도 다음 실행에서 빨간불이 뜬다.
+
+  합격 = 모든 문서가 model_validate 통과 · 실패 0 · 없는 블록을 가리키는 참조 0
+
+개수는 찍어만 준다. 실행 간 비교는 `tools/verify_numbers.py --section export` 로 한다.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -27,18 +32,14 @@ from nh_ad_parser_contracts.models import NormalizedDocument
 
 sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "out" / "normalized"
-
-EXPECTED = {
-    "documents": 4,
-    "text_blocks": 477,
-    "layout_blocks": 224,
-    "dropped_empty_text": 11,
-    "band_only": 15,
-}
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--src", type=Path, default=ROOT / "out",
+                        help="이 폴더의 normalized/ 를 읽는다 (기본 out/)")
+    args = parser.parse_args()
+    SRC = args.src / "normalized"
     paths = sorted(SRC.glob("*.json"))
     if not paths:
         print(f"입력 없음: {SRC} — 먼저 tools/export_normalized.py 를 돌려야 한다")
@@ -100,13 +101,7 @@ def main() -> int:
     )
     if dangling:
         print(f"✗ 없는 textBlock 을 가리키는 참조 {len(dangling)}건: {dangling[:5]}")
-    ok = not failures and not dangling \
-        and text_blocks == EXPECTED["text_blocks"] \
-        and layout_blocks == EXPECTED["layout_blocks"] \
-        and band_only == EXPECTED["band_only"] \
-        and len(paths) == EXPECTED["documents"]
-    if not ok:
-        print(f"기대값과 다르다: {EXPECTED}")
+    ok = bool(paths) and not failures and not dangling
     print("합격" if ok else "불합격")
     return 0 if ok else 1
 

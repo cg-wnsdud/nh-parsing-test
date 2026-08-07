@@ -14,6 +14,7 @@
 """
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,7 +31,10 @@ from nh_parsing.normalized_export import (
     export_normalized_document,
 )
 
-OUT_JSON = Path(__file__).resolve().parents[1] / "out" / "json"
+# 기본은 out/. 다른 실행본으로도 돌릴 수 있어야 한다 — 아래 실산출물 테스트가 한 번의
+# 실행에 맞춰 깎인 게 아님을 증명하는 방법이 이것뿐이다. 2026-08-07 에 이렇게 확인했다:
+#   NH_OUT=out_run3 uv run python -m pytest tests/test_normalized_export.py -q
+OUT_JSON = Path(os.environ.get("NH_OUT") or Path(__file__).resolve().parents[1] / "out") / "json"
 STAMP = datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc)
 
 
@@ -305,32 +309,94 @@ def test_캔버스가_0인_문서는_확장자와_무관하게_제외된다():
 # ───────────────────── 실산출물 집계 고정 ─────────────────────
 
 
-@pytest.mark.skipif(not OUT_JSON.is_dir(), reason="out/json 없음 — 먼저 파싱을 돌려야 한다")
-def test_실산출물_집계가_합격_기준과_맞는다():
-    """2026-08-06 무캐시 실행 기준. 파싱이 바뀌면 이 테스트가 먼저 깨져야 한다.
-
-    입력 라인 488 = 내보낸 477 + 빈 텍스트로 걸러 낸 11.  ⚠️ '488건이 계약 검증을
-    통과한다'가 아니다 — 검증에 들어가는 것은 477 이다.
-    """
+def _totals(source: Path):
     totals, skipped = {}, []
-    for path in sorted(OUT_JSON.glob("*.json")):
+    for path in sorted(source.glob("*.json")):
         result = _export(json.loads(path.read_text(encoding="utf-8")))
         if result.skipped:
             skipped.append(path.stem)
             continue
         for key, value in result.stats.items():
             totals[key] = totals.get(key, 0) + value
+    return totals, skipped
+
+
+@pytest.mark.skipif(not OUT_JSON.is_dir(), reason="out/json 없음 — 먼저 파싱을 돌려야 한다")
+def test_실산출물_집계_중_안정된_값을_고정한다():
+    """⚠️ **라인 총계는 못박지 않는다.** 실행마다 움직이기 때문이다.
+
+    같은 코드·같은 입력으로 2회 돌린 실측(2026-08-06 vs 08-07):
+
+        영역 224          224      같음
+        걸러낸 빈 텍스트 11   11      같음
+        digital 채움 25    25      같음
+        rules 채움 20      20      같음
+        스윕 라인 15  →    17      ★ 갈림
+        라인 총계 488 →   490      ★ 갈림 (스윕 +2 가 그대로 설명한다)
+
+    스윕 회수가 비결정이라는 건 `ir.py:29` 에 이미 적혀 있다. 개수를 합격 조건으로
+    박으면 코드가 멀쩡해도 다음 실행에서 빨간불이 뜬다. 그래서 흔들리는 값은 개수
+    대신 **성질**로 검사한다(아래 test_스윕_라인은_전부_...).
+    """
+    totals, skipped = _totals(OUT_JSON)
 
     assert len(skipped) == 1                                # HWP 004 만 제외
-    assert totals["lines_in"] == 488
-    assert totals["text_blocks"] == 477
-    assert totals["dropped_empty_text"] == 11
     assert totals["layout_blocks"] == 224
-    assert totals["sweep_blocks"] == 15
+    assert totals["dropped_empty_text"] == 11
     assert totals["digital_filled_confidence"] == 25
     assert totals["rules_filled_role_confidence"] == 20
     assert totals["clamped_coordinates"] == 0               # 좌표는 손 안 대고 통과한다
     assert totals["layout_blocks_without_coordinate"] == 0
+
+
+@pytest.mark.skipif(not OUT_JSON.is_dir(), reason="out/json 없음 — 먼저 파싱을 돌려야 한다")
+def test_입력_라인이_한_줄도_새지_않는다():
+    """실행마다 총계가 달라져도 **이 항등식은 항상 참이어야 한다.**
+
+    라인은 내보내지거나 걸러지거나 둘 중 하나다. 셋째 길(조용히 사라짐)이 생기면
+    여기서 잡힌다 — 개수를 못박는 것보다 이쪽이 진짜 지키려던 것이다.
+    """
+    totals, _ = _totals(OUT_JSON)
+    assert totals["lines_in"] == totals["text_blocks"] + totals["dropped_empty_text"]
+
+
+@pytest.mark.skipif(not OUT_JSON.is_dir(), reason="out/json 없음 — 먼저 파싱을 돌려야 한다")
+def _sweep_block_ids(source):
+    """스윕 라인의 textBlockId — 변환기와 같은 규칙으로 짚는다.
+
+    ⚠️ 텍스트로 짝지으면 안 된다. 003 재실행본에서 'Last Updated' 가 스윕으로도,
+    일반 OCR 라인으로도 잡혀 엉뚱한 블록이 걸렸다(2026-08-07 실측).
+    """
+    ids = set()
+    for page in source["pages"]:
+        for region in page["regions"]:
+            for index, line in enumerate(region["lines"]):
+                if line["source"] == "vlm_sweep":
+                    ids.add(f"{region['region_id']}_t{index:03d}")
+        for index, line in enumerate(page["unassigned_lines"]):
+            if line["source"] == "vlm_sweep":
+                ids.add(f"p{page['page_no']}_u_t{index:03d}")
+    return ids
+
+
+@pytest.mark.skipif(not OUT_JSON.is_dir(), reason="out/json 없음 — 먼저 파싱을 돌려야 한다")
+def test_스윕_라인은_전부_좌표_신뢰도가_낮다():
+    """개수(실행마다 15~17)가 아니라 성질을 본다 — 몇 개가 나오든 전부 낮아야 한다."""
+    checked = 0
+    for path in sorted(OUT_JSON.glob("*.json")):
+        source = json.loads(path.read_text(encoding="utf-8"))
+        result = _export(source)
+        if result.skipped:
+            continue
+        sweep_ids = _sweep_block_ids(source)
+        for block in result.document["textBlocks"]:
+            if block["textBlockId"] not in sweep_ids:
+                continue
+            checked += 1
+            assert block["coordinate"]["coordinateConfidence"] < 0.5, (
+                f"{path.stem} {block['textBlockId']}: 스윕인데 좌표 신뢰도가 높다"
+            )
+    assert checked > 0, "스윕 라인이 하나도 없다 — 표본이 바뀌었는지 확인할 것"
 
 
 @pytest.mark.skipif(not OUT_JSON.is_dir(), reason="out/json 없음 — 먼저 파싱을 돌려야 한다")

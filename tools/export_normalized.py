@@ -21,9 +21,6 @@ from nh_parsing.normalized_export import export_normalized_document
 
 sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "out"
-SRC = OUT / "json"
-DST = OUT / "normalized"
 
 # 신원 2개는 원래 대상 워커의 요청에서 온다(pr-plan §6-3). 단독 실행에서는 문서마다
 # 재현 가능한 값을 만들어 넣는다 — 검증만 하는 자리라 값 자체에 뜻은 없다.
@@ -37,8 +34,13 @@ def _identity(stem: str) -> tuple[str, str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="집계를 JSON 으로 stdout 에")
+    # run_nhdata --out 과 대칭 (make_review --src 와 같은 규약). 실행마다 산출물이
+    # 흔들리는지 재 보려면 두 실행본을 각각 여기에 넣는다.
+    ap.add_argument("--src", type=Path, default=ROOT / "out",
+                    help="이 폴더의 json/ 을 읽는다 (기본 out/)")
     args = ap.parse_args()
 
+    SRC, DST = args.src / "json", args.src / "normalized"
     if not SRC.is_dir():
         print(f"입력 없음: {SRC} — 먼저 tools/run_nhdata.py 를 돌려야 한다", file=sys.stderr)
         return 2
