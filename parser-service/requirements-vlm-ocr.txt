@@ -1,0 +1,13 @@
+# 이 파일이 갈 자리: nh-ad-compliance/apps/parser-services/requirements-vlm-ocr.txt
+#
+# requirements-common.txt(fastapi·pydantic·uvicorn)에 더해 nh_parsing 이 런타임에
+# 실제로 쓰는 것만. 우리 pyproject 의 `dependencies` 에서 사내 HWP 파서
+# (document-processor — git URL + Java)를 뺀 목록이다. 이 서비스는 HWP 를 받지
+# 않고, hwp_ingest 가 그 패키지를 함수 안에서 지연 import 하므로 없어도 된다.
+#
+# 아래 하한은 우리 pyproject 를 따랐고, 오른쪽 주석은 2026-08-07 에 깨끗한 3.13
+# 환경(24개 패키지)에서 실제로 설치돼 실파일 POST 가 HTTP 200 을 낸 버전이다.
+pypdfium2>=5.9.0,<6.0.0   # 검증 5.12.1 — PDF 렌더·triage
+pillow>=10.0              # 검증 12.3.0 — 캔버스·타일링·미리보기
+requests>=2.32            # 검증 2.34.2 — PaddleX·Gemma HTTP 호출
+pyyaml>=6.0.3             # 검증 6.0.3  — 스키마 팩 로드

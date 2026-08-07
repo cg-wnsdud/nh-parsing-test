@@ -1,0 +1,57 @@
+# VLM+OCR parser service — 이 파일이 갈 자리:
+#   nh-ad-compliance/apps/parser-services/Dockerfile.vlm-ocr
+#
+# ⚠️ **이 Dockerfile 은 아직 빌드해 보지 않았다.** 작성 환경에 도커 데몬이 없었다
+#    (2026-08-07). 아래 결정들은 전부 실측 근거가 있지만, `docker build` 자체는
+#    대상 저장소에서 처음 돌아간다. 리뷰 시 그 전제로 볼 것.
+#
+# 확인하고 정한 것 (근거는 각 줄에):
+#
+#  · **python:3.13** — Dockerfile.document-processor 와 같다. 이 서비스는 계약
+#    패키지(`>=3.12,<3.13`)를 import 하지 않으므로 3.13 을 막을 이유가 없다.
+#    형제 서비스 4개도 전부 계약 패키지를 안 쓴다(전수 확인). 계약 검증은 워커가 한다.
+#    우리 패키지가 `requires-python >=3.13` 이라 3.12 로는 설치되지 않는다.
+#
+#  · **Java 를 안 깐다** — 사내 HWP 파서(document-processor)가 필요 없다.
+#    `nh_parsing.hwp_ingest` 가 `document_processor` 를 함수 안에서 지연 import 하고
+#    (hwp_ingest.py:221), 이 서비스는 HWP 를 받지 않는다(대상 라우터가 .hwp 를
+#    hwp-hybrid 로 보낸다). 깨끗한 3.13 환경에 사내 파서 **없이** 설치해 확인했다:
+#    24개 패키지로 `vlm_ocr_app` import·`/health`·`/v1/parse` 전부 정상,
+#    실파일 POST 도 HTTP 200 (2026-08-07 실측).
+#    → 그래서 `--no-deps` 로 우리 패키지를 넣고 런타임 의존성만 따로 깐다.
+#      우리 pyproject 의 `dependencies` 에 사내 파서가 들어 있어 그대로 설치하면
+#      git·Java 가 딸려 온다. (이 목록은 pyproject 와 손으로 맞춰야 한다 —
+#      갈리면 import 에서 바로 터지므로 조용히 틀리지는 않는다.)
+#
+#  · **NH_PARSING_COMMIT 을 못박는다** — Dockerfile.document-processor 와 같은 방식
+#    (커밋 고정 + archive tarball). 우리 pyproject 는 커밋을 안 박은 git URL 이라
+#    빌드가 재현되지 않는다.
+#    ⚠️ 전제: 이 저장소가 대상 빌드에서 닿을 수 있는 곳에 있어야 한다. 지금은
+#    개인 저장소(cg-wnsdud/nh-parsing-test)라 **옮기거나 권한을 열어야 한다.**
+
+FROM python:3.13-slim AS build
+
+ARG NH_PARSING_COMMIT=REPLACE_WITH_COMMIT_SHA
+ARG NH_PARSING_ARCHIVE=https://github.com/CGINSIDE-ROOKIES/nh-parsing/archive/${NH_PARSING_COMMIT}.tar.gz
+COPY apps/parser-services/requirements-common.txt /tmp/requirements-common.txt
+COPY apps/parser-services/requirements-vlm-ocr.txt /tmp/requirements-vlm-ocr.txt
+RUN pip wheel --wheel-dir /wheels \
+    -r /tmp/requirements-common.txt \
+    -r /tmp/requirements-vlm-ocr.txt \
+    && pip wheel --wheel-dir /wheels --no-deps "nh-ad-review-poc @ ${NH_PARSING_ARCHIVE}"
+
+FROM python:3.13-slim
+
+ARG NH_PARSING_COMMIT=REPLACE_WITH_COMMIT_SHA
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    NH_PARSING_VERSION=${NH_PARSING_COMMIT}
+WORKDIR /app
+COPY --from=build /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links /wheels --no-deps nh-ad-review-poc \
+    && pip install --no-cache-dir --no-index --find-links /wheels \
+    fastapi uvicorn pydantic pypdfium2 pillow requests pyyaml \
+    && rm -rf /wheels
+COPY apps/parser-services/service.py apps/parser-services/vlm_ocr_app.py ./
+EXPOSE 8095
+CMD ["uvicorn", "vlm_ocr_app:app", "--host", "0.0.0.0", "--port", "8095"]
