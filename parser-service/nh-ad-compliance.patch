@@ -1,0 +1,241 @@
+diff --git a/apps/parser-services/Dockerfile.vlm-ocr b/apps/parser-services/Dockerfile.vlm-ocr
+new file mode 100644
+index 0000000..93a7a68
+--- /dev/null
++++ b/apps/parser-services/Dockerfile.vlm-ocr
+@@ -0,0 +1,57 @@
++# VLM+OCR parser service — 이 파일이 갈 자리:
++#   nh-ad-compliance/apps/parser-services/Dockerfile.vlm-ocr
++#
++# ⚠️ **이 Dockerfile 은 아직 빌드해 보지 않았다.** 작성 환경에 도커 데몬이 없었다
++#    (2026-08-07). 아래 결정들은 전부 실측 근거가 있지만, `docker build` 자체는
++#    대상 저장소에서 처음 돌아간다. 리뷰 시 그 전제로 볼 것.
++#
++# 확인하고 정한 것 (근거는 각 줄에):
++#
++#  · **python:3.13** — Dockerfile.document-processor 와 같다. 이 서비스는 계약
++#    패키지(`>=3.12,<3.13`)를 import 하지 않으므로 3.13 을 막을 이유가 없다.
++#    형제 서비스 4개도 전부 계약 패키지를 안 쓴다(전수 확인). 계약 검증은 워커가 한다.
++#    우리 패키지가 `requires-python >=3.13` 이라 3.12 로는 설치되지 않는다.
++#
++#  · **Java 를 안 깐다** — 사내 HWP 파서(document-processor)가 필요 없다.
++#    `nh_parsing.hwp_ingest` 가 `document_processor` 를 함수 안에서 지연 import 하고
++#    (hwp_ingest.py:221), 이 서비스는 HWP 를 받지 않는다(대상 라우터가 .hwp 를
++#    hwp-hybrid 로 보낸다). 깨끗한 3.13 환경에 사내 파서 **없이** 설치해 확인했다:
++#    24개 패키지로 `vlm_ocr_app` import·`/health`·`/v1/parse` 전부 정상,
++#    실파일 POST 도 HTTP 200 (2026-08-07 실측).
++#    → 그래서 `--no-deps` 로 우리 패키지를 넣고 런타임 의존성만 따로 깐다.
++#      우리 pyproject 의 `dependencies` 에 사내 파서가 들어 있어 그대로 설치하면
++#      git·Java 가 딸려 온다. (이 목록은 pyproject 와 손으로 맞춰야 한다 —
++#      갈리면 import 에서 바로 터지므로 조용히 틀리지는 않는다.)
++#
++#  · **NH_PARSING_COMMIT 을 못박는다** — Dockerfile.document-processor 와 같은 방식
++#    (커밋 고정 + archive tarball). 우리 pyproject 는 커밋을 안 박은 git URL 이라
++#    빌드가 재현되지 않는다.
++#    ⚠️ 전제: 이 저장소가 대상 빌드에서 닿을 수 있는 곳에 있어야 한다. 지금은
++#    개인 저장소(cg-wnsdud/nh-parsing-test)라 **옮기거나 권한을 열어야 한다.**
++
++FROM python:3.13-slim AS build
++
++ARG NH_PARSING_COMMIT=REPLACE_WITH_COMMIT_SHA
++ARG NH_PARSING_ARCHIVE=https://github.com/CGINSIDE-ROOKIES/nh-parsing/archive/${NH_PARSING_COMMIT}.tar.gz
++COPY apps/parser-services/requirements-common.txt /tmp/requirements-common.txt
++COPY apps/parser-services/requirements-vlm-ocr.txt /tmp/requirements-vlm-ocr.txt
++RUN pip wheel --wheel-dir /wheels \
++    -r /tmp/requirements-common.txt \
++    -r /tmp/requirements-vlm-ocr.txt \
++    && pip wheel --wheel-dir /wheels --no-deps "nh-ad-review-poc @ ${NH_PARSING_ARCHIVE}"
++
++FROM python:3.13-slim
++
++ARG NH_PARSING_COMMIT=REPLACE_WITH_COMMIT_SHA
++ENV PYTHONDONTWRITEBYTECODE=1 \
++    PYTHONUNBUFFERED=1 \
++    NH_PARSING_VERSION=${NH_PARSING_COMMIT}
++WORKDIR /app
++COPY --from=build /wheels /wheels
++RUN pip install --no-cache-dir --no-index --find-links /wheels --no-deps nh-ad-review-poc \
++    && pip install --no-cache-dir --no-index --find-links /wheels \
++    fastapi uvicorn pydantic pypdfium2 pillow requests pyyaml \
++    && rm -rf /wheels
++COPY apps/parser-services/service.py apps/parser-services/vlm_ocr_app.py ./
++EXPOSE 8095
++CMD ["uvicorn", "vlm_ocr_app:app", "--host", "0.0.0.0", "--port", "8095"]
+diff --git a/apps/parser-services/requirements-vlm-ocr.txt b/apps/parser-services/requirements-vlm-ocr.txt
+new file mode 100644
+index 0000000..9b44653
+--- /dev/null
++++ b/apps/parser-services/requirements-vlm-ocr.txt
+@@ -0,0 +1,13 @@
++# 이 파일이 갈 자리: nh-ad-compliance/apps/parser-services/requirements-vlm-ocr.txt
++#
++# requirements-common.txt(fastapi·pydantic·uvicorn)에 더해 nh_parsing 이 런타임에
++# 실제로 쓰는 것만. 우리 pyproject 의 `dependencies` 에서 사내 HWP 파서
++# (document-processor — git URL + Java)를 뺀 목록이다. 이 서비스는 HWP 를 받지
++# 않고, hwp_ingest 가 그 패키지를 함수 안에서 지연 import 하므로 없어도 된다.
++#
++# 아래 하한은 우리 pyproject 를 따랐고, 오른쪽 주석은 2026-08-07 에 깨끗한 3.13
++# 환경(24개 패키지)에서 실제로 설치돼 실파일 POST 가 HTTP 200 을 낸 버전이다.
++pypdfium2>=5.9.0,<6.0.0   # 검증 5.12.1 — PDF 렌더·triage
++pillow>=10.0              # 검증 12.3.0 — 캔버스·타일링·미리보기
++requests>=2.32            # 검증 2.34.2 — PaddleX·Gemma HTTP 호출
++pyyaml>=6.0.3             # 검증 6.0.3  — 스키마 팩 로드
+diff --git a/apps/parser-services/vlm_ocr_app.py b/apps/parser-services/vlm_ocr_app.py
+new file mode 100644
+index 0000000..db91e24
+--- /dev/null
++++ b/apps/parser-services/vlm_ocr_app.py
+@@ -0,0 +1,50 @@
++"""VLM+OCR private service for image and scanned-PDF advertisements.
++
++이 파일이 갈 자리:  nh-ad-compliance/apps/parser-services/vlm_ocr_app.py
++
++형제 서비스들과 같은 모양이다 — `service.py` 의 `app_for(engine)` 에 엔진 하나를 물리면
++`/health` 와 `/v1/parse` 가 생긴다. 실제 파싱은 전부 `nh_parsing` 안에 있고 여기는
++전송 계층뿐이라, 대상 저장소가 리뷰할 코드가 이 파일로 끝난다.
++
++형제들과 다른 점 하나: **`service.py` 의 `normalized_document()`·`text_block()` 헬퍼를
++쓰지 않는다.** 그 헬퍼는 `coordinateConfidence = confidenceScore` 로 둘을 묶어 두는데
++(`service.py:134`), 우리는 "글자는 맞고 위치는 못 믿는" 통짜 스윕 라인 때문에 둘을
++갈라야 한다. 계약 dict 는 `nh_parsing.normalized_export` 가 만든다 — 그쪽에 근거가
++주석으로 붙어 있고 테스트도 거기 있다.
++
++컨테이너 메모:
++  · 파이썬 3.13 으로 지어도 된다. 이 서비스는 계약 패키지(`>=3.12,<3.13`)를 import
++    하지 않는다 — 형제 서비스 4개도 전부 그렇고, Dockerfile.document-processor 는
++    이미 python:3.13-slim 이다. 계약 검증은 워커가 한다.
++  · Java·사내 HWP 파서가 필요 없다. `nh_parsing.hwp_ingest` 가 `document_processor`
++    를 함수 안에서 지연 import 하고(hwp_ingest.py:221), 이 서비스는 HWP 를 받지
++    않는다(대상 라우터가 .hwp 를 hwp-hybrid 로 보낸다).
++  · PaddleX·Gemma 서버에 닿아야 한다 (PADDLEX_URL · GEMMA_URL · GEMMA_MODEL).
++    형제 서비스들이 자기 컨테이너 안에서 자족하는 것과 다른 점이라 배포 시 확인이
++    필요하다. ⚠️ GEMMA_MODEL 이 게이트웨이 목록과 다르면 VLM 호출이 전부 400 으로
++    죽는데 OCR 은 멀쩡히 돌아 산출물이 그럴듯하게 나온다.
++  · 문서당 100~300초가 걸린다(그중 97%가 모델 대기). 형제 서비스보다 훨씬 느리므로
++    워커의 PARSER_SERVICE_TIMEOUT_SECONDS(기본 120)를 늘려야 한다.
++"""
++
++from __future__ import annotations
++
++from nh_parsing.vlm_ocr_service import PARSER_NAME, parse_to_normalized
++
++from service import ParseRequest, app_for
++
++
++class VlmOcrEngine:
++    name = PARSER_NAME
++
++    def parse(self, request: ParseRequest, body: bytes) -> dict[str, object]:
++        return parse_to_normalized(
++            source_file_id=request.source_file_id,
++            review_id=request.review_id,
++            file_name=request.file_name,
++            body=body,
++        )
++
++
++engine = VlmOcrEngine()
++app = app_for(engine)
+diff --git a/apps/worker/src/nh_ad_worker/main.py b/apps/worker/src/nh_ad_worker/main.py
+index 89b0365..f1f13f6 100644
+--- a/apps/worker/src/nh_ad_worker/main.py
++++ b/apps/worker/src/nh_ad_worker/main.py
+@@ -171,6 +171,7 @@ def _parser_router(settings: Settings) -> ParserRouter:
+         parser_service_adapters(
+             opendataloader_endpoint=settings.opendataloader_pdf_endpoint,
+             paddleocr_endpoint=settings.paddleocr_endpoint,
++            vlm_ocr_endpoint=settings.vlm_ocr_endpoint,
+             rhwp_endpoint=settings.rhwp_endpoint,
+             document_processor_endpoint=settings.document_processor_endpoint,
+             timeout_seconds=settings.parser_service_timeout_seconds,
+diff --git a/apps/worker/src/nh_ad_worker/parser_services.py b/apps/worker/src/nh_ad_worker/parser_services.py
+index adb0245..927ed77 100644
+--- a/apps/worker/src/nh_ad_worker/parser_services.py
++++ b/apps/worker/src/nh_ad_worker/parser_services.py
+@@ -77,6 +77,7 @@ def parser_service_adapters(
+     *,
+     opendataloader_endpoint: str,
+     paddleocr_endpoint: str,
++    vlm_ocr_endpoint: str,
+     rhwp_endpoint: str,
+     document_processor_endpoint: str,
+     timeout_seconds: float,
+@@ -98,6 +99,9 @@ def parser_service_adapters(
+         "paddleocr": ParserServiceAdapter(
+             "paddleocr", paddleocr_endpoint, timeout_seconds=timeout_seconds
+         ),
++        "vlm-ocr": ParserServiceAdapter(
++            "vlm-ocr", vlm_ocr_endpoint, timeout_seconds=timeout_seconds
++        ),
+         "hwp-hybrid": HwpHybridParserAdapter(
+             rhwp,
+             document_processor,
+diff --git a/apps/worker/src/nh_ad_worker/settings.py b/apps/worker/src/nh_ad_worker/settings.py
+index d9575dd..b93263a 100644
+--- a/apps/worker/src/nh_ad_worker/settings.py
++++ b/apps/worker/src/nh_ad_worker/settings.py
+@@ -43,6 +43,7 @@ class Settings(BaseSettings):
+     parser_service_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+     opendataloader_pdf_endpoint: str = "http://opendataloader-pdf:8091"
+     paddleocr_endpoint: str = "http://paddleocr:8092"
++    vlm_ocr_endpoint: str = "http://vlm-ocr:8095"
+     rhwp_endpoint: str = "http://rhwp:8093"
+     document_processor_endpoint: str = "http://document-processor:8094"
+     hwp_structure_attempts: int = Field(default=3, ge=1, le=5)
+diff --git a/apps/worker/tests/test_openai_provider.py b/apps/worker/tests/test_openai_provider.py
+index 80baf4c..737beae 100644
+--- a/apps/worker/tests/test_openai_provider.py
++++ b/apps/worker/tests/test_openai_provider.py
+@@ -329,6 +329,7 @@ def test_production_runner_registers_adr_0079_services_and_shared_review_client(
+     assert set(router._adapters) == {  # type: ignore[attr-defined]
+         "opendataloader-pdf",
+         "paddleocr",
++        "vlm-ocr",
+         "hwp-hybrid",
+     }
+     assert isinstance(captured["response_client"], OpenAIResponsesClient)
+@@ -358,6 +359,7 @@ def test_production_runner_keeps_private_parser_services_without_external_ai(
+     assert set(router._adapters) == {  # type: ignore[attr-defined]
+         "opendataloader-pdf",
+         "paddleocr",
++        "vlm-ocr",
+         "hwp-hybrid",
+     }
+     assert captured["response_client"] is None
+diff --git a/apps/worker/tests/test_parser_services.py b/apps/worker/tests/test_parser_services.py
+index c811200..d36995b 100644
+--- a/apps/worker/tests/test_parser_services.py
++++ b/apps/worker/tests/test_parser_services.py
+@@ -133,10 +133,11 @@ def test_factory_exposes_one_hybrid_adapter_instead_of_component_engines() -> No
+     adapters = parser_service_adapters(
+         opendataloader_endpoint="http://opendataloader:8091",
+         paddleocr_endpoint="http://paddleocr:8092",
++        vlm_ocr_endpoint="http://vlm-ocr:8095",
+         rhwp_endpoint="http://rhwp:8093",
+         document_processor_endpoint="http://document-processor:8094",
+         timeout_seconds=1,
+     )
+ 
+-    assert set(adapters) == {"opendataloader-pdf", "paddleocr", "hwp-hybrid"}
++    assert set(adapters) == {"opendataloader-pdf", "paddleocr", "vlm-ocr", "hwp-hybrid"}
+     assert adapters["hwp-hybrid"].name == "hwp-hybrid"
+diff --git a/packages/parser-contracts/src/nh_ad_parser_contracts/routing.py b/packages/parser-contracts/src/nh_ad_parser_contracts/routing.py
+index 8b716e0..d94fb25 100644
+--- a/packages/parser-contracts/src/nh_ad_parser_contracts/routing.py
++++ b/packages/parser-contracts/src/nh_ad_parser_contracts/routing.py
+@@ -74,8 +74,13 @@ class ParserRouter:
+             reason = "TABLE_EXTRACTION_MISSING" if document.complex_layout else None
+             return ParserRoute("opendataloader-pdf", ("mineru",), reason)
+         if extension in {".jpg", ".jpeg", ".png"}:
+-            secondary = ("vlm-ocr",) if document.external_ai_allowed else ()
+-            return ParserRoute("paddleocr", secondary)
++            # A secondary adapter only runs when a rerun reason is present
++            # (see parse_with_attempts).  Without one the reserved "vlm-ocr"
++            # slot was declared but never invoked, so paddleocr images kept
++            # shipping an empty layoutBlocks array.
++            if document.external_ai_allowed:
++                return ParserRoute("paddleocr", ("vlm-ocr",), "LAYOUT_BLOCKS_MISSING")
++            return ParserRoute("paddleocr", ())
+         raise ValueError("FILE_NOT_SUPPORTED")
+ 
+     def parse(self, document: DocumentInput) -> NormalizedDocument:
