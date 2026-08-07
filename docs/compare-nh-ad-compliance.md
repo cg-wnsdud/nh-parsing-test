@@ -479,3 +479,68 @@ DocumentIngestionService → ParserRouter → {Adapter} → NormalizedDocument v
 | 우리 코드 실제 실행 경로 | 문서(pipeline-map)와 `src/` 실제 코드를 이번엔 재대조하지 않았다 (out/ JSON으로 간접 확인) |
 
 **특히 마지막 두 개는 다음 단계에서 먼저 볼 가치가 있다** — `test-cases.md`가 우리 통합의 합격 조건을 이미 적어놨을 가능성이 높고, `광고예시`가 같은 샘플이면 두 저장소가 같은 데이터로 비교 가능해진다.
+
+---
+
+## 11. 2026-08-07 재확인 — 무엇이 아직 유효한가
+
+> 위 §0~10 은 **2026-07-29 작성분이며 지우지 않았다**(시점 기록). 이 절만 8/7 에 덧붙였다.
+> 방법: 대상 저장소를 **읽기만** 했다(`dev` 브랜치, 커밋 `3cfcbb5` 시점).
+
+### 11-1. 결론 — parser 계층은 3주째 안 움직였다
+
+```
+git -C <대상> log --oneline --since=2026-07-29 -- apps/parser-services packages/parser-contracts
+→ 결과 없음 (커밋 0건)
+```
+
+그 사이 `dev` 가 움직인 곳은 프론트엔드 검토화면·Q&A·문서·Notion 동기화였다.
+**따라서 §1~§9 의 parser 관련 분석은 재조사 없이 그대로 쓸 수 있다.**
+
+### 11-2. 재확인한 계약 (실제 코드 대조)
+
+| 항목 | 07-29 기록 | 08-07 실제 | 위치 |
+|---|---|---|---|
+| `ParserAdapter` Protocol | 멤버 2개 | `name: str` + `parse(document) -> NormalizedDocument` — 동일 | `routing.py:51` |
+| `paddleocr` 의 `layoutBlocks` | 빈 배열 | 동일 — `normalized_document()` 에 `layout_blocks` 인자를 **아예 안 넘긴다** | `paddleocr_app.py:79` |
+| 예약 슬롯 | (미기록) | `"vlm-ocr"`(이미지·외부AI허용 시) · `"mineru"` 가 라우팅에만 있고 구현 없음 | `routing.py:73-77` |
+| 문서 confidence | (미기록) | `min(모든 블록 confidenceScore)`, `default=0.0` | `service.py:65` |
+| confidence 임계 | (미기록) | `≥0.80` READABLE · `≥0.50` LOW_CONFIDENCE · 그 미만 **UNREADABLE** | `models.py:20-25` |
+
+### 11-3. 새로 확인한 **하드 제약** — 계약이 생각보다 엄격하다
+
+`Coordinate` 는 단순한 좌표 상자가 아니라 검증기가 붙어 있다(`models.py:40-72`):
+
+```
+source_width / source_height : gt=0        ← 0 이면 실패
+width / height               : gt=0        ← 빈 상자 실패
+x + width <= source_width                  ← 경계 이탈 실패
+normalized_* 가 source 와 일치 (abs_tol=0.0001)
+```
+
+`TextBlock` 은 `coordinate` 와 `text_path` 가 **개별로는 선택**이지만 검증기가 하나를 강제한다:
+
+```python
+if self.coordinate is None and not self.text_path:
+    raise ValueError("a text block requires a coordinate or textPath")
+```
+
+또 `confidence_status` 가 `confidence_score` 와 **일치해야** 한다(`models.py:105`) — 점수는 낮게
+주면서 상태만 좋게 적을 수 없다.
+
+### 11-4. 우리 산출물을 이 검증에 넣어 보면 (2026-08-06 무캐시 실행분 전수)
+
+| 대상 | 통과 | 실패 | 실패 내용 |
+|---|---|---|---|
+| 라인(→`TextBlock`) | **488** | 12 | 전부 004 HWP — `bbox` 없음, `canvas 0×0` |
+| 영역(→`LayoutBlock`) | **224** | 1 | 위와 같은 HWP 페이지 |
+
+**폭 0 · 경계 이탈 · 음수 좌표는 0건이다.** 즉 이미지·PDF 트랙 좌표는 손대지 않고 그대로
+넘어가고, **막히는 것은 HWP 하나로 국소화된다.**
+
+### 11-5. §10 미확인 항목 중 해소된 것
+
+- `document_processor_app.py` 가 `layout_blocks=layouts` 를 넘기는 유일한 서비스임을 확인
+  (`document_processor_app.py:206`) — 즉 레이아웃을 채우는 경로가 대상 저장소에 이미 있다.
+  우리 어댑터가 만들 `layoutBlocks` 도 같은 자리에 들어간다.
+- 나머지(`test-cases.md`·`광고예시` 동일성·프론트엔드)는 **여전히 미확인**이다.

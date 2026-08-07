@@ -146,7 +146,8 @@ uv run python tools/make_review.py --out docs/review.html
 | 검수 화면(review.html) 읽는 법 | [docs/screen-guide-review-html.md](docs/screen-guide-review-html.md) |
 | 검수 화면 실물 (팀 공유용 스냅샷, 8/6) | [docs/review.html](docs/review.html) |
 | 다이어그램 캔버스 동반 설명 | [docs/architecture/pipeline-diagram-guide.md](docs/architecture/pipeline-diagram-guide.md) (이미지는 코드 맵 위쪽 참조) |
-| 팀장님 레포(nh-ad-compliance)와의 비교 | [docs/compare-nh-ad-compliance.md](docs/compare-nh-ad-compliance.md) |
+| **붙일 때 무엇이 막히나** (필드 대응표·해법) | ⭐ [docs/pr-plan-2026-08-07.md](docs/pr-plan-2026-08-07.md) |
+| 팀장님 레포(nh-ad-compliance)와의 비교 | [docs/compare-nh-ad-compliance.md](docs/compare-nh-ad-compliance.md) (§11 에 8/7 재확인) |
 
 **갱신하지 않는 옛 문서** — 어긋나는 지점은
 [walkthrough §10](docs/architecture/pipeline-walkthrough.md) 에 모아 두었다:
