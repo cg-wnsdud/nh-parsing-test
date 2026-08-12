@@ -10,6 +10,11 @@
 "[image:<asset키>]" 마커가 남는다(2026-07-18 실측) → 캡션 청크를 마커가 있는
 청크 바로 뒤에 삽입한다. 마커가 없는 이미지만 문서 말미에 부착.
 
+- 스캔형 PDF 페이지: document-processor 는 OCR 이 없어 **조용히 건너뛴다**
+  (`page.parse_status == "skipped"`). 그 페이지만 렌더 → OCR 해서 되살린다.
+  실측(2026-08-12): `(2025년)대출성 상품 광고시 준수사항_은행연합회.pdf` 6쪽 중
+  3쪽이 `pdf_scan_like` 로 스킵돼 **규정 원문 한 쪽이 RAG 인덱스에 없었다.**
+
 청크 분할은 구조적 경계(조항 번호 등 개요 기호)와 길이 상한만 쓴다.
 내용 판단(무엇이 중요한 기준인지)은 이후 RAG/VLM 단계의 몫이다.
 """
@@ -118,6 +123,95 @@ _CAPTION_PROMPT = """금융상품 광고 심의 기준 문서에 삽입된 예�
    빨간 박스 등 강조 표시가 있으면 어느 부분이 강조됐는지 반드시 명시하세요."""
 
 
+# ──────────────────────── 스캔형 PDF 페이지 OCR 복원 ────────────────────────
+
+def _page_lead_text(pdf, page_index: int, take: int = 24) -> str:
+    """페이지의 첫 글자들(공백 제거) — 스킵 페이지를 끼워 넣을 위치의 앵커.
+
+    DocIR 문단에는 쪽 번호가 없다(실측: `native_anchor.debug_path` 가 전부 `s1.pN`).
+    그래서 "스킵된 쪽 **다음** 쪽의 첫 글자"를 텍스트 레이어에서 직접 읽어,
+    그 글자로 시작하는 청크 **앞**에 복원 청크를 끼운다.
+    """
+    try:
+        text = pdf[page_index].get_textpage().get_text_bounded() or ""
+    except Exception:
+        return ""
+    return re.sub(r"\s+", "", text)[:take]
+
+
+def _ocr_skipped_pdf_pages(path: Path, docir, doc: RagDocument) -> None:
+    """사내 파서가 건너뛴 스캔형 페이지를 렌더+OCR 해 청크로 복원한다.
+
+    광고 트랙에서 이미 쓰는 부품(canvas 렌더 · tiling · PaddleX)만 재사용하고,
+    역할 판정·카드 분할·필드 추출 같은 광고 전용 단계는 **타지 않는다** —
+    법령 조문에 '제목/유의사항' 역할은 의미가 없고 비용만 든다.
+    """
+    pages = getattr(docir, "pages", None) or []
+    skipped = [
+        p.page_number for p in pages
+        if getattr(p, "parse_status", None) == "skipped" and p.page_number
+    ]
+    if not skipped:
+        return
+
+    import pypdfium2 as pdfium
+
+    from .canvas import native_image_dpi, render_pdf_page
+    from .paddlex_client import request_layout_parsing
+    from .tiling import dedupe_lines, make_tiles, restore_coords, sort_reading_order
+
+    try:
+        pdf = pdfium.PdfDocument(str(path))
+    except Exception as exc:
+        doc.notes.append(f"스킵 페이지 {skipped} OCR 복원 실패 — PDF 열기: {exc}")
+        return
+
+    for page_no in skipped:
+        try:
+            pdf_page = pdf[page_no - 1]
+            # 스캔형은 내장 래스터의 네이티브 해상도로 렌더한다 — 업스케일하면
+            # OCR 검출이 단어 단위로 조각난다(001 실측, canvas.native_image_dpi 주석).
+            canvas = render_pdf_page(pdf_page, page_no, dpi=native_image_dpi(pdf_page))
+            lines = []
+            for tile in make_tiles(canvas.image):
+                result = request_layout_parsing(tile.image)
+                lines.extend(restore_coords(result.ocr_lines, tile.y_offset))
+            lines = sort_reading_order(dedupe_lines(lines))
+        except Exception as exc:
+            doc.notes.append(f"{page_no}쪽 OCR 복원 실패: {exc}")
+            continue
+
+        text = "\n".join(ln.text.strip() for ln in lines if ln.text.strip())
+        if not text:
+            doc.notes.append(f"{page_no}쪽 OCR 복원 — 글자 0건 (빈 쪽이거나 판독 실패)")
+            continue
+
+        chunk = RagChunk(
+            chunk_id=f"{doc.doc_id}_p{page_no:03d}_ocr",
+            kind="ocr_page",
+            heading=f"[{page_no}쪽 — OCR 복원]",
+            text=text,
+            notes=[
+                f"사내 파서가 스캔형으로 건너뛴 쪽(라인 {len(lines)}개)을 OCR 로 복원. "
+                "디지털 추출이 아니라 판독이므로 정본 신뢰도가 낮다."
+            ],
+        )
+        anchor = _page_lead_text(pdf, page_no)  # 다음 쪽(0-based 인덱스 = page_no)
+        idx = None
+        if anchor:
+            idx = next(
+                (i for i, c in enumerate(doc.chunks)
+                 if anchor[:12] and anchor[:12] in re.sub(r"\s+", "", c.text)),
+                None,
+            )
+        if idx is None:
+            chunk.notes.append("다음 쪽 앵커를 못 찾음 — 문서 말미 부착")
+            doc.chunks.append(chunk)
+        else:
+            doc.chunks.insert(idx, chunk)
+        doc.notes.append(f"{page_no}쪽 OCR 복원 완료 (라인 {len(lines)}개, {len(text)}자)")
+
+
 def caption_image(img: Image.Image) -> dict:
     return chat_json(
         [{"type": "text", "text": _CAPTION_PROMPT}, image_part(img)],
@@ -156,6 +250,12 @@ def ingest_rag_file(path: Path, asset_dir: Path | None = None) -> RagDocument:
                 if rows:
                     blocks.append(("table", "\n".join(rows)))
     doc.chunks = _chunk_blocks(blocks, doc.doc_id)
+
+    # 1-b) 사내 파서가 조용히 건너뛴 스캔형 PDF 페이지 → 렌더 + OCR 복원
+    try:
+        _ocr_skipped_pdf_pages(path, docir, doc)
+    except Exception as exc:  # 복원 실패가 문서 전체를 죽이지 않게
+        doc.notes.append(f"스캔형 페이지 OCR 복원 단계 실패: {exc}")
 
     # 2) 내장 이미지 → VLM 캡션 청크
     decorative: list[str] = []
