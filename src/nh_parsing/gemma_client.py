@@ -124,20 +124,36 @@ def chat_json(
 
 
 def _repair_trailing_escape(text: str) -> dict | None:
-    """guided-decoding 서빙 결함 보정 — 문자열을 닫기 직전 불필요한 역슬래시를
-    내보내고 그대로 생성을 멈추는 경우가 실측됨(gemma-4-26b-NVFP4-MTP,
-    finish_reason=stop, temperature=0 에서도 호출마다 미묘하게 다른 위치/길이로
-    재현 — 끝에서 고정 길이를 자르는 방식은 통하지 않아 텍스트 전체에서
-    마지막 역슬래시 하나만 제거해본다. 그래도 파싱되지 않으면 None(원래
-    예외 유지) — 여기서 만든 값은 호출측의 형식 가드로 다시 검증된다."""
-    idx = text.rfind("\\")
-    if idx == -1:
-        return None
-    candidate = text[:idx] + text[idx + 1:]
+    """guided-decoding 서빙 결함 보정 — 불필요한 역슬래시를 내보내고 그대로
+    생성을 멈추는 경우가 실측됨(gemma-4-26b-NVFP4-MTP, finish_reason=stop,
+    temperature=0 에서도 호출마다 미묘하게 다른 위치/길이로 재현).
+
+    **문제 지점의 역슬래시를 먼저 지운다**(2026-08-12 수정). 예전에는 텍스트
+    전체의 마지막 역슬래시만 지웠는데, 오발행이 문자열 **중간**에서 나고 그
+    뒤에 정상 역슬래시(`\\n` 등)가 더 있으면 엉뚱한 것을 지워 복구에 실패했다.
+    실측(new-sample-data 실행): `Invalid \\uXXXX escape: line 1 column 3244` 가
+    3회 재시도 뒤 밴드 통독 실패로 떨어졌다.
+
+    파싱 오류 위치(JSONDecodeError.pos) 이하에서 가장 가까운 역슬래시를 지워
+    보고, 안 되면 예전 방식(마지막 역슬래시)으로 폴백한다. 둘 다 실패하면
+    None(원래 예외 유지) — 여기서 만든 값은 호출측의 형식 가드로 다시 검증된다.
+    """
+    def _try(idx: int) -> dict | None:
+        if idx == -1:
+            return None
+        try:
+            return json.loads(text[:idx] + text[idx + 1:])
+        except Exception:
+            return None
+
     try:
-        return json.loads(candidate)
-    except Exception:
-        return None
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        # exc.pos 는 깨진 이스케이프의 바로 뒤 문자를 가리킨다(`\u00` 이면 'u').
+        repaired = _try(text.rfind("\\", 0, max(exc.pos, 0) + 1))
+        if repaired is not None:
+            return repaired
+    return _try(text.rfind("\\"))
 
 
 def image_part(image: Image.Image, box: tuple[int, int] = (896, 2400), quality: int = 85) -> dict:
