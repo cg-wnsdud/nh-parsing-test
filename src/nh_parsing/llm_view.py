@@ -100,6 +100,20 @@ def build_page_view(page: AdPage) -> dict:
             # 받는다. 관계 라벨을 같이 실어 '이 후보는 뒤가 잘렸다'를 말로 알려준다.
             if r.vlm_reading_relation:
                 item["vlm_reading_relation"] = r.vlm_reading_relation
+
+        # 결함 수정(2026-08-12): 라인 단위 재판독 후보(sweep_dedupe/lowconf_reread)가
+        # 지금까지 여기서 안 실려 STAGE_3 에 도달하지 못했다. 영역 후보(위)와 트리거가
+        # 다르고(밴드 통합판독 vs 개별 라인 재판독) **밴드가 그 영역을 못 채택한 경우
+        # (실측: "밴드 통합판독 일부 미채택" 003 p2, 22개 중 0개 채택) 영역 후보가 아예
+        # 없을 수 있다 — 그럴 때 라인 후보가 유일한 교정 신호다. 영역 후보가 이미 있어도
+        # 서로 다른 관측이므로 조용히 버리지 않고 같이 싣는다.
+        line_cands = [
+            {"line_text": ln.text, "vlm_reading": ln.vlm_reading}
+            for ln in r.lines
+            if ln.vlm_reading and ln.vlm_reading.strip() and ln.vlm_reading.strip() != ln.text.strip()
+        ]
+        if line_cands:
+            item["line_candidates"] = line_cands
         regions.append(item)
 
     view: dict = {"page_number": page.page_no, "regions": regions}

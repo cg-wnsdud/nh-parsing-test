@@ -91,3 +91,64 @@ def test_llm_view_exposes_vlm_candidate_only_when_it_differs():
     assert "vlm_reading" not in regions[0]
     assert regions[1]["vlm_reading"] == "① 0.1%p"
     assert regions[1]["vlm_reading_relation"] == "diverged"
+
+
+def test_llm_view_exposes_line_level_candidates_even_without_region_candidate():
+    """결함 수정(2026-08-12): 라인 재판독 후보(sweep_dedupe/lowconf_reread)가
+
+    영역 후보(vlm_reading)와 트리거가 다르다 — 밴드 통합판독이 그 영역을
+    채택하지 못하면(실측: 003 p2 '밴드 통합판독 일부 미채택') region.vlm_reading
+    은 비어 있고 라인 후보가 유일한 교정 신호다. 이게 STAGE_3 에 안 실리면
+    이미 얻은 재판독이 통째로 버려진다.
+    """
+    region = Region(
+        region_id="p1_r016", bbox=[0, 0, 200, 100], role="본문",
+        lines=[
+            Line(text="1O.1%p:[NH올원e통장]에서 출금", bbox=[0, 0, 200, 40], source="ocr",
+                 vlm_reading="① 0.1%p : 「NH올원e통장」에서 출금"),
+            Line(text="20.2%p:상품서비스 안내동의서", bbox=[0, 40, 200, 80], source="ocr",
+                 vlm_reading="② 0.2%p : 상품서비스 안내동의서"),
+        ],
+    )
+    doc = _doc(AdPage(page_no=1, canvas_w=200, canvas_h=400, parse_route="ocr",
+                      regions=[region]))
+    item = llm_view.build_doc_view(doc)["pages"][0]["regions"][0]
+
+    assert "vlm_reading" not in item  # 영역 후보는 원래 없던 상태 그대로
+    assert item["line_candidates"] == [
+        {"line_text": "1O.1%p:[NH올원e통장]에서 출금", "vlm_reading": "① 0.1%p : 「NH올원e통장」에서 출금"},
+        {"line_text": "20.2%p:상품서비스 안내동의서", "vlm_reading": "② 0.2%p : 상품서비스 안내동의서"},
+    ]
+
+
+def test_llm_view_line_candidate_coexists_with_region_candidate():
+    """서로 다른 관측이므로 영역 후보가 있어도 라인 후보를 조용히 버리지 않는다."""
+    region = Region(
+        region_id="p1_r016", bbox=[0, 0, 200, 100], role="본문",
+        vlm_reading="① 0.1%p : 「NH올원e통장」에서 출금 ② 0.2%p : 상품서비스 안내동의서",
+        lines=[
+            Line(text="1O.1%p:[NH올원e통장]에서 출금", bbox=[0, 0, 200, 40], source="ocr",
+                 vlm_reading="① 0.1%p : 「NH올원e통장」에서 출금"),
+        ],
+    )
+    doc = _doc(AdPage(page_no=1, canvas_w=200, canvas_h=400, parse_route="ocr",
+                      regions=[region]))
+    item = llm_view.build_doc_view(doc)["pages"][0]["regions"][0]
+
+    assert item["vlm_reading"]  # 영역 후보 유지
+    assert item["line_candidates"] == [
+        {"line_text": "1O.1%p:[NH올원e통장]에서 출금", "vlm_reading": "① 0.1%p : 「NH올원e통장」에서 출금"},
+    ]
+
+
+def test_llm_view_skips_line_candidate_identical_to_ocr():
+    """정본과 같은 라인 후보는 노이즈라 안 싣는다 (영역 후보와 같은 원칙)."""
+    region = Region(
+        region_id="p1_r000", bbox=[0, 0, 200, 50], role="본문",
+        lines=[Line(text="가입기간 12개월", bbox=[0, 0, 200, 40], source="ocr",
+                    vlm_reading="가입기간 12개월")],
+    )
+    doc = _doc(AdPage(page_no=1, canvas_w=200, canvas_h=400, parse_route="ocr",
+                      regions=[region]))
+    item = llm_view.build_doc_view(doc)["pages"][0]["regions"][0]
+    assert "line_candidates" not in item

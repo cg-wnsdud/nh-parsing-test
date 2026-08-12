@@ -217,6 +217,38 @@ def test_미배정이_없으면_가상_ID를_만들지_않는다():
     assert "p1_unassigned" not in _region_texts(view)
 
 
+# ───────────────────────── 라인 단위 후보 (결함 수정 2026-08-12) ─────────────────────────
+
+
+def test_라인후보가_프롬프트에_찍히고_근거대조_대상에도_들어간다():
+    """llm_view 가 line_candidates 를 실어도 extract.py 가 안 읽으면 도로 유실이다.
+
+    렌더(_render_doc)와 근거대조(_region_texts) 양쪽 다 확인한다 — 전자만 되면
+    LLM 은 후보를 보지만 그 값을 쓴 필드가 '환각 의심(evidence_backed=False)'으로
+    잘못 걸린다(후보 텍스트가 region_texts 에 없어서).
+    """
+    from nh_parsing.extract import _region_texts, _render_doc
+
+    view = {"pages": [{
+        "page_number": 1,
+        "regions": [{
+            "region_id": "p1_r016", "role": "본문",
+            "text": "1O.1%p:[NH올원e통장]에서 출금",
+            "line_candidates": [
+                {"line_text": "1O.1%p:[NH올원e통장]에서 출금",
+                 "vlm_reading": "① 0.1%p : 「NH올원e통장」에서 출금"},
+            ],
+        }],
+    }]}
+
+    rendered = _render_doc(view)
+    assert "[라인후보]" in rendered
+    assert "① 0.1%p" in rendered
+
+    texts = _region_texts(view)
+    assert "① 0.1%p" in texts["p1_r016"], "근거대조 대상에 없으면 이 값을 쓴 필드가 환각으로 오판된다"
+
+
 # ───────────────────────── 유령 이벤트 방어 ─────────────────────────
 
 

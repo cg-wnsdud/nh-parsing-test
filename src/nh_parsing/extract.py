@@ -115,6 +115,12 @@ def _render_doc(view: dict) -> str:
                 # '네이버페이 20,000원' 이 통째로 빠진 판독이었다.
                 tag = _RELATION_TAG.get(r.get("vlm_reading_relation") or "", "후보")
                 out.append(f"      [{tag}] {cand.replace(chr(10), ' / ')}")
+            for lc in r.get("line_candidates") or []:
+                # 영역 후보와 별개 관측(밴드 통합판독이 못 채택한 영역엔 이게 유일한
+                # 교정 신호일 수 있다) — 규칙 5의 "정본 vs 후보" 판단을 그대로 적용.
+                out.append(
+                    f"      [라인후보] 정본 '{lc['line_text']}' → 후보 '{lc['vlm_reading']}'"
+                )
         if page.get("unassigned"):
             # 미배정 텍스트에도 근거 ID를 준다. 없으면 전수수집 배열('표기 그대로 (region_id)')에
             # 담을 수가 없어 조용히 빠진다 — 003 실측: 배너의 'NH Benefit 2025.10.01-2025.10.31'
@@ -425,6 +431,7 @@ def _region_texts(view: dict) -> dict[str, str]:
     for page in view.get("pages", []):
         for r in page.get("regions", []):
             parts = [r.get("text") or "", r.get("vlm_reading") or ""]
+            parts += [lc["vlm_reading"] for lc in r.get("line_candidates") or []]
             out[r["region_id"]] = " ".join(p for p in parts if p)
         # 미배정 덩어리도 근거로 지목할 수 있게 됐으므로(_render_doc), 대조 대상에 넣는다.
         # 안 넣으면 정상 인용이 '존재하지 않는 region_id'= 환각 신호로 잘못 잡힌다.
