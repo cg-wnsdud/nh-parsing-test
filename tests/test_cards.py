@@ -184,6 +184,81 @@ def test_assign_cards_vlm_failure_returns_empty(monkeypatch):
     monkeypatch.setattr(cards, "chat_json", boom)
     assert cards.assign_cards_vlm(_page(), Image.new("RGB", (2000, 1120), "white")) == {}
 
+
+def test_공통헤더에_가려도_부분구간_신호로_VLM을_부른다(monkeypatch):
+    """실측(2.카드상품.pdf) 재현 — 전폭 헤더 탓에 전체밀도=1 이 나와도 VLM 호출은 막지 않는다.
+
+    수정 전엔 이 게이트에서 곧장 False 를 반환해 VLM 이 판단할 기회 자체가 없었다
+    (진짜 두 카드 비교 페이지였는데도). 부분구간 신호(has_banded_card_split)가 게이트를
+    통과시켜야 한다 — 실제로 몇 개인지는 이 테스트가 아니라 VLM(아래 fake)이 정한다.
+    """
+    img = Image.new("RGB", (900, 700), "white")
+    d = ImageDraw.Draw(img)
+    for x in range(20, 880, 6):                       # 공통 헤더 — 전체 폭
+        d.line([(x, 20), (x, 100)], fill=(0, 0, 0), width=2)
+    for x0, x1 in ((20, 400), (500, 880)):             # 카드 1·2 — 부분구간에서만 분리
+        for x in range(x0, x1, 6):
+            d.line([(x, 150), (x, 680)], fill=(0, 0, 0), width=2)
+    assert cards.density_card_count(img) == 1, "실측 전제 — 전체밀도는 1이어야 한다"
+
+    called = {"n": 0}
+    def fake(parts, schema_name, schema, max_tokens):
+        called["n"] += 1
+        return {"analysis": "좌우 2개 카드 + 상단 공통 배너", "page_kind": "card_collage",
+                "card_count": 2, "assignments": [
+                    {"region_id": "p1_r0", "card_no": 0},
+                    {"region_id": "p1_r1", "card_no": 1},
+                    {"region_id": "p1_r2", "card_no": 2},
+                ]}
+    monkeypatch.setattr(cards, "chat_json", fake)
+    out = cards.assign_cards_vlm(_page(), img)
+    assert called["n"] >= 1, "게이트가 막아 VLM 을 아예 안 불렀다"
+    assert out == {"p1_r0": 0, "p1_r1": 1, "p1_r2": 2}
+
+
+def _banded_canvas():
+    """전폭 헤더 + 좌우 두 덩어리 — 전체밀도 1, 구간별로는 2."""
+    img = Image.new("RGB", (900, 700), "white")
+    d = ImageDraw.Draw(img)
+    for x in range(20, 880, 6):
+        d.line([(x, 20), (x, 100)], fill=(0, 0, 0), width=2)
+    for x0, x1 in ((20, 400), (500, 880)):
+        for x in range(x0, x1, 6):
+            d.line([(x, 150), (x, 680)], fill=(0, 0, 0), width=2)
+    return img
+
+
+def test_구간분리_신호로_열린_경우_투표하지_않고_한_번만_묻는다(monkeypatch):
+    """게이트 완화(2026-08-13)로 이 경로에 드는 페이지가 89개 중 45개로 늘었다.
+
+    힌트가 비면 호출측이 '근거 없음'으로 보고 3회 투표로 빠지므로 호출이 3배가 된다.
+    같은 질문 반복은 새 정보를 주지 않으므로(_density_hint 주석의 실측), 엇갈리는
+    관측 두 개를 **근거로 실어** 1회만 묻는다.
+    """
+    calls = {"n": 0}
+    seen = []
+
+    def fake(parts, schema_name, schema, max_tokens):
+        calls["n"] += 1
+        seen.append(parts[0]["text"])
+        return {"analysis": "단일 상품의 2단 배치", "page_kind": "single_scroll",
+                "card_count": 1, "assignments": []}
+
+    monkeypatch.setattr(cards, "chat_json", fake)
+    cards.assign_cards_vlm(_page(), _banded_canvas(), votes=3)
+
+    assert calls["n"] == 1, f"근거를 실었으면 1회면 충분하다 (실제 {calls['n']}회)"
+    assert "1덩어리" in seen[0] and "좌우로 갈라진" in seen[0], "엇갈리는 관측 둘을 다 줘야 한다"
+    assert "카드인지 아닌지 알 수 없습니다" in seen[0], "이 신호가 카드를 못 가른다는 걸 알려야 한다"
+
+
+def test_구간분리_신호만으로는_카드로_확정하지_않는다(monkeypatch):
+    """VLM 이 '카드 아님'으로 답하면 그대로 따른다 — 게이트는 질문 기회만 준다."""
+    monkeypatch.setattr(cards, "chat_json", lambda *a, **k: {
+        "analysis": "한 상품의 좌우 2단 표", "page_kind": "single_scroll",
+        "card_count": 1, "assignments": []})
+    assert cards.assign_cards_vlm(_page(), _banded_canvas()) == {}
+
 # test_judge_uses_card_assignment_as_group 는 2026-08-03 삭제했다.
 # 카드 배정을 섹션 group_no 로 확정하던 연결이 사라졌기 때문이다(섹션 계층 제거).
 # cards 모듈 자체(개수 세기·배정·게이트)는 그대로라 위 테스트들은 유지한다 —

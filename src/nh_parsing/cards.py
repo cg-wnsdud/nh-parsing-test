@@ -70,6 +70,19 @@ _DENSITY_HINT = """
   판단되면 다른 개수로 답하세요.** 근거는 analysis 에 적으세요.
 """
 
+# 전체 폭으로는 1덩어리인데 일부 구간에서만 좌우 분리가 보이는 경우의 근거문.
+# 이 신호는 '진짜 카드'와 '단일 상품의 2단 표'를 못 가른다(bands.has_banded_card_split
+# 주석의 실측 참조) — 그래서 정답이 아니라 **양쪽 관측을 다 적어** VLM 이 판단하게 한다.
+_BANDED_HINT = """
+참고(픽셀 글자밀도 분석 결과 — 서로 엇갈리는 관측 두 개):
+  ① 화면 전체 높이로 재면 세로 여백으로 갈라지는 자리가 없어 **1덩어리**로 보입니다.
+  ② 그런데 화면을 가로로 몇 구간 나눠 보면, 일부 구간에서는 좌우로 갈라진 자리가 있습니다.
+  ②는 서로 다른 상품이 나란히 놓인 경우에도, 한 상품의 2단 표·좌우 배치 설명글에서도
+  똑같이 나옵니다. 즉 **이 관측만으로는 카드인지 아닌지 알 수 없습니다.**
+  화면을 보고 판단하세요 — 서로 **다른 상품**이 나열된 것이 아니라면 카드가 아니며,
+  그때는 page_kind 를 card_collage 가 아닌 값으로 답하세요. 근거는 analysis 에 적으세요.
+"""
+
 
 def _assign_once(
     page: AdPage,
@@ -166,6 +179,15 @@ def _density_hint(canvas: Image.Image | None) -> tuple[str, int | None]:
 
     count, spans = count_cards_by_density(canvas)
     if not count or count < 2 or not spans:
+        # 전체 폭으로는 1덩어리지만 구간별로는 갈리는 경우(should_detect_cards 가 이 신호로
+        # 게이트를 통과시킨 경우)에도 **근거를 실어 1회만 묻는다**. 예전엔 힌트가 빈
+        # 문자열이라 호출측이 '근거 없음'으로 보고 3회 투표로 빠졌는데, 같은 질문을 세 번
+        # 던지는 것은 새 정보를 주지 않는다(이 함수 위 주석의 실측). 게이트 완화(2026-08-13)로
+        # 이 경로에 드는 페이지가 크게 늘어(89개 중 45개) 투표를 그대로 두면 호출이 3배가 된다.
+        from .bands import has_banded_card_split
+
+        if count == 1 and has_banded_card_split(canvas):
+            return _BANDED_HINT, count
         return "", (count or None)
     ranges = ", ".join(
         f"{i}번 x_ratio {x0 / canvas.width:.2f}~{x1 / canvas.width:.2f}"
@@ -181,13 +203,29 @@ def should_detect_cards(page: AdPage, canvas: Image.Image | None = None) -> bool
             섹션이 있어도 카드가 아니다.
     제외 2) 단일 패널: 003 p3 같은 한 덩어리 텍스트 슬라이드 — 글자밀도로 판정한다.
     → 둘 다 아닌 '가로 슬라이드 + 다중 덩어리'만 카드 후보 → 여기서만 VLM 호출.
+
+    전체 페이지 밀도가 1로 나와도 곧장 제외하지 않는다(2026-08-13 보완). 실측
+    `2. 카드상품.pdf`: 서로 다른 두 카드를 비교하는 페이지인데 상단 공통 헤더가 전체
+    높이에 걸쳐 있어 전체 프로파일엔 깨끗한 자리가 없었다 — VLM 이 판단할 기회 자체가
+    막혔다. `has_banded_card_split` 로 부분 구간의 분리 신호를 한 번 더 본다. 이 신호는
+    단일 상품의 2단 표에서도 똑같이 나온다(과적합 휴리스틱 금지 — 개수·경계의 '정답'을
+    픽셀로 확정하려 하지 않는다). 그래서 여기서 가르지 않고 VLM 호출 여부만 완화한다 —
+    틀린 후보를 몇 건 더 물어보는 비용은 감수하고, 진짜 카드분할을 놓치지 않는 쪽을 택한다.
     """
     if not (page.canvas_w and page.canvas_h):
         return False
     if page.canvas_h / page.canvas_w >= SETTINGS.card_split_max_aspect:
         return False  # 스크롤
     n = density_card_count(canvas)
-    return _has_separable_clusters(page) if n is None else n >= 2
+    if n is None:
+        return _has_separable_clusters(page)
+    if n >= 2:
+        return True
+    if canvas is None:
+        return False
+    from .bands import has_banded_card_split
+
+    return has_banded_card_split(canvas)
 
 
 def assign_cards_vlm(page: AdPage, canvas: Image.Image | None, votes: int = 3) -> dict[str, int]:

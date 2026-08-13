@@ -57,10 +57,25 @@ _REVIEW_NO = re.compile(
 # 부르는 곳이 없어졌다.
 
 
-def _center_inside(line_bbox: list[int], region_bbox: list[int]) -> bool:
-    cx = (line_bbox[0] + line_bbox[2]) / 2
-    cy = (line_bbox[1] + line_bbox[3]) / 2
-    return region_bbox[0] <= cx <= region_bbox[2] and region_bbox[1] <= cy <= region_bbox[3]
+def _overlap_ratio(line_bbox: list[int], region_bbox: list[int]) -> float:
+    """라인 bbox 가 영역 bbox 와 겹치는 면적 — 라인 자신의 면적 대비 비율(0~1).
+
+    예전엔 라인 중심점이 영역 안에 있는가만 봤다. 표 칸이 한 줄로 합쳐진 경우
+    (extract_digital_lines 참조) 중심점이 어느 칸에 찍히느냐에 따라 통짜 줄 전체가
+    엉뚱한 영역에 붙었다(올원 p1_r006 실측: 오른쪽 칸 '가입금액100만원이상'이 왼쪽
+    영역에 붙음). 겹침 비율로 재면 "이 줄의 대부분을 담은 영역"이 이기므로 같은
+    상황에서도 더 안전하고, 가로 분리가 덜 된 잔여 케이스의 이중 방어가 된다.
+    """
+    ix0 = max(line_bbox[0], region_bbox[0])
+    iy0 = max(line_bbox[1], region_bbox[1])
+    ix1 = min(line_bbox[2], region_bbox[2])
+    iy1 = min(line_bbox[3], region_bbox[3])
+    inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+    line_area = max(1, (line_bbox[2] - line_bbox[0]) * (line_bbox[3] - line_bbox[1]))
+    return inter / line_area
+
+
+_MIN_REGION_OVERLAP = 0.5  # 라인 면적의 절반 이상이 겹쳐야 그 영역 소속으로 본다
 
 
 def build_regions(
@@ -96,10 +111,21 @@ def build_regions(
     for line in lines:
         target = None
         if line.bbox:
+            best_ratio, best_key = 0.0, (-1.0, 0)
             for region in regions:
-                if region.bbox and _center_inside(line.bbox, region.bbox):
-                    target = region
-                    break
+                if not region.bbox:
+                    continue
+                ratio = _overlap_ratio(line.bbox, region.bbox)
+                area = (region.bbox[2] - region.bbox[0]) * (region.bbox[3] - region.bbox[1])
+                # 겹침비율이 같으면(중첩 영역이 라인을 둘 다 완전히 품는 경우) 더 작은
+                # (구체적인) 영역을 우선한다 — _absorb_unassigned_into_regions 의 기존
+                # 규칙("가장 작은 영역")과 같은 원칙이라 여기도 목록 순서에 안 흔들린다.
+                key = (ratio, -area)
+                if key > best_key:
+                    best_key, target = key, region
+            best_ratio = best_key[0]
+            if best_ratio < _MIN_REGION_OVERLAP:
+                target = None
         if target is not None:
             target.lines.append(line)
         else:

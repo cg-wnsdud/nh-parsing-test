@@ -400,6 +400,32 @@ def _column_overlap(line_box: list[int], region_box: list[int]) -> float:
 _MIN_COLUMN_OVERLAP = 0.5  # 라인 폭의 절반 이상이 영역 가로 구간에 들어와야 후보
 
 
+def _cluster_by_column(regions: list[Region], gutter_px: int) -> list[list[Region]]:
+    """가로 구간이 맞닿거나 겹치는 영역끼리 묶는다(전이적) — gutter_px 넘게 떨어지면 분리.
+
+    밴드 통합판독(_merged_band_read)이 한 밴드에 좌우로 분리된 여러 컬럼(카드 비교,
+    2단 표)의 영역을 함께 소유할 때, 통독 크롭을 "이 그룹의 가로 구간"으로만 좁히기
+    위한 그룹 나누기다. bbox 를 x0 오름차순으로 처리하면서 그때까지의 모든 그룹과
+    겹치는지 검사하므로, 전폭에 걸친 요소(배너 등)가 두 그룹을 이어 붙이는 경우도
+    한 그룹으로 자연스럽게 남는다(자기 자신이 잘리지 않는다) — 별도의 재병합 패스가
+    필요 없다(x0 정렬 순서상 '이어붙이는 요소'는 항상 자신이 잇는 대상보다 먼저 처리됨).
+    """
+    ranges: list[list[int]] = []
+    groups: list[list[Region]] = []
+    for r in sorted(regions, key=lambda r: r.bbox[0]):
+        x0, x1 = r.bbox[0], r.bbox[2]
+        for g, rng in zip(groups, ranges):
+            if x0 <= rng[1] + gutter_px and x1 >= rng[0] - gutter_px:
+                g.append(r)
+                rng[0] = min(rng[0], x0)
+                rng[1] = max(rng[1], x1)
+                break
+        else:
+            groups.append([r])
+            ranges.append([x0, x1])
+    return groups
+
+
 def _absorb_unassigned_into_regions(page: AdPage) -> None:
     """정밀 bbox 미배정 라인을 좌표만 보고 영역에 귀속시킨다 (VLM 무관, 결정론).
 
@@ -553,6 +579,18 @@ def _resolve_sweep_duplicates(
             continue
         twin = _find_twin(s, known_lines)
         if twin is None or resolved >= _MAX_SWEEP_RESOLVE:
+            remaining.append(s)
+            continue
+        # 스윕이 기존 줄을 뒤에 포함하면서 훨씬 더 길면(잔여 4자 이상), 앞쪽 잔여는
+        # 기존 줄 밖의 내용(디지털/OCR 이 못 본 로고·장식 문구 등)일 수 있다. 실측
+        # (2026-08-13, `1. 카드상품.pdf`): 스윕 '올바른 NEW HAVE 주요 서비스' 가 기존
+        # 줄 '주요서비스' 를 뒤쪽에 포함한다는 이유로 통째로 버려져 'NEW HAVE'(카드
+        # 브랜드명 자체)가 전 출력에서 사라졌다. 쌍둥이 탐지(포함관계)는 그대로 두되,
+        # 스윕이 진짜 더 긴 경우엔 버리지 않고 unassigned 로 흘려보낸다 — '주요서비스'
+        # 중복 표기가 잠깐 남는 게 'NEW HAVE' 영구 유실보다 낫다. 반대 방향(스윕이
+        # 기존 줄의 부분집합 — 스윕이 덜 읽은 진짜 중복)은 기존대로 재판독해 흡수한다.
+        twin_core = _stable_core(twin.text)
+        if twin_core in s_core and len(s_core) - len(twin_core) >= 4:
             remaining.append(s)
             continue
         reading = transcribe_line_crop(twin.bbox, canvas_img)
@@ -719,7 +757,9 @@ def _merged_band_read(page: AdPage, canvas_img: Image.Image, all_lines: list[Lin
                           max_span=SETTINGS.tile_max_height_px)
     known = _n_join(all_lines)
     recovered: list[Line] = []
-    corrected = attached = expanded = 0
+    corrected = attached = expanded = calls = split_bands = 0
+    # 컬럼 그룹을 가를 최소 가로 간격 — 이보다 좁으면 같은 그룹(같은 크롭)으로 묶는다.
+    gutter_px = max(40, int(canvas_img.width * 0.02))
 
     # 영역을 밴드에 **정확히 하나씩** 배정한다. 밴드는 서로 200px 겹치므로(오버랩은
     # 경계 글자를 놓치지 않으려고 일부러 둔 것) '중심이 이 밴드 범위에 드는가'로 고르면
@@ -752,68 +792,81 @@ def _merged_band_read(page: AdPage, canvas_img: Image.Image, all_lines: list[Lin
         if not mine:
             continue
 
-        # 밴드 경계가 영역을 반토막 내면 그 영역은 반쪽만 보인 채로 판독된다. 실측(2026-07-28):
-        # 영역의 5~14%가 경계를 가로지르고, 하필 그중에 값을 하던 것들이 있다 — 001 p1_r069
-        # (우대금리 조건, OCR 유사도 0.56→VLM 1.0 으로 교정된 영역)와 올원e p1_r014
-        # ('① 0.1%p : 「NH올원e통장」…', ④+ 가 존재하는 이유인 원문자 교정 케이스)가 그렇다.
-        # 그래서 컷을 옮기는 대신 **크롭을 넓혀** 내가 맡은 영역이 통째로 보이게 한다.
-        # 컷을 옮기면 밀도 등량 분할이 깨지고 옆 밴드까지 연쇄로 흔들리지만, 크롭을 넓히는
-        # 것은 그 밴드 안에서만 끝난다.
-        need_top = min(top, min(r.bbox[1] for r in mine))
-        need_bottom = max(bottom, max(r.bbox[3] for r in mine))
-        if (need_top, need_bottom) != (top, bottom):
-            expanded += 1
-        crop = canvas_img.crop((0, max(0, need_top), canvas_img.width,
-                                min(canvas_img.height, need_bottom)))
-        crop_top = max(0, need_top)
-        entries = [(r.region_id, " ".join(l.text for l in r.lines)) for r in mine]
-        try:
-            readings, missing, dropped = read_band_regions(crop, entries)
-        except Exception as exc:
-            page.notes.append(f"밴드 통합판독 실패(y={band.offset}, 이 구간 원값 유지): {exc}")
-            continue
-        # 예외 없이 성공하면서 아무것도 안 돌려주는 경우가 있다 — 실측(2026-08-06)
-        # 003 p2 가 영역 22개 중 0개 부착으로 나왔고(직전 실행은 22/22) 원인이
-        # 기록되지 않아 못 가렸다. 버리는 규칙은 그대로 두고 이유만 남긴다.
-        if dropped:
-            page.notes.append(
-                f"밴드 통합판독 일부 미채택(y={band.offset}, 요청 {len(entries)}개 중 "
-                f"채택 {len(readings)}개): "
-                + ", ".join(f"{k} {v}" for k, v in sorted(dropped.items()))
-            )
+        # 좌우로 뚜렷이 떨어진 컬럼(카드 비교, 2단 표)이 한 밴드에 같이 걸리면, 전폭
+        # 크롭에 옆 컬럼 내용까지 보여서 재판독이 그 내용을 다시 끌어들일 수 있다
+        # (실측 2026-08-13, 올원 p1_r006: 옆 칸 내용이 '기존 판독' 힌트에도 이미 섞여
+        # 있어 재판독이 오염을 고치기는커녕 재확인/강화했다). 컬럼 그룹별로 나눠 그
+        # 그룹의 가로 구간으로만 크롭을 좁힌다 — 전폭에 걸친 요소가 있으면 그 요소가
+        # 자연히 그룹들을 이어 붙이므로(cluster_by_column 주석 참조) 단일 컬럼 페이지의
+        # 기존 동작(밴드당 1회 호출, 전폭 크롭)은 그대로 유지된다.
+        groups = _cluster_by_column(mine, gutter_px)
+        if len(groups) > 1:
+            split_bands += 1
 
-        by_id = {r.region_id: r for r in page.regions}
-        for rid, (text, conf) in readings.items():
-            region = by_id.get(rid)
-            if region is None:
+        for group in groups:
+            need_top = min(top, min(r.bbox[1] for r in group))
+            need_bottom = max(bottom, max(r.bbox[3] for r in group))
+            if (need_top, need_bottom) != (top, bottom):
+                expanded += 1
+            gx0 = min(r.bbox[0] for r in group)
+            gx1 = max(r.bbox[2] for r in group)
+            pad = max(20, int((gx1 - gx0) * 0.03))
+            crop_x0 = max(0, gx0 - pad) if len(groups) > 1 else 0
+            crop_x1 = min(canvas_img.width, gx1 + pad) if len(groups) > 1 else canvas_img.width
+            crop = canvas_img.crop((crop_x0, max(0, need_top), crop_x1,
+                                    min(canvas_img.height, need_bottom)))
+            crop_top = max(0, need_top)
+            entries = [(r.region_id, " ".join(l.text for l in r.lines)) for r in group]
+            calls += 1
+            try:
+                readings, missing, dropped = read_band_regions(crop, entries)
+            except Exception as exc:
+                page.notes.append(f"밴드 통합판독 실패(y={band.offset}, x=[{crop_x0},{crop_x1}], 이 구간 원값 유지): {exc}")
                 continue
-            ocr = " ".join(l.text for l in region.lines)
-            # B안 유지 — OCR 정본은 안 건드리고 후보로만 붙인다. 판단은 STAGE_3 몫.
-            region.vlm_reading = text
-            # 점수·관계 딱지는 여기서 매기지 않는다 → _score_reading_candidates 참조.
-            # 이 시점의 정본은 아직 확정이 아니다(라인 순서 미정렬 + 유령 라인 미제거).
-            attached += 1
-            if _n_squash(text) != _n_squash(ocr):
-                corrected += 1
+            # 예외 없이 성공하면서 아무것도 안 돌려주는 경우가 있다 — 실측(2026-08-06)
+            # 003 p2 가 영역 22개 중 0개 부착으로 나왔고(직전 실행은 22/22) 원인이
+            # 기록되지 않아 못 가렸다. 버리는 규칙은 그대로 두고 이유만 남긴다.
+            if dropped:
+                page.notes.append(
+                    f"밴드 통합판독 일부 미채택(y={band.offset}, 요청 {len(entries)}개 중 "
+                    f"채택 {len(readings)}개): "
+                    + ", ".join(f"{k} {v}" for k, v in sorted(dropped.items()))
+                )
 
-        for item in missing[:20]:
-            text = str(item.get("text", "")).strip()
-            if not text or len(_n_squash(text)) < 2 or _n_squash(text) in known:
-                continue
-            y = min(max(float(item.get("y_ratio", 0.0)), 0.0), 1.0)
-            half = max(12, int(crop.height * 0.012))
-            cy = crop_top + int(y * crop.height)   # 넓힌 크롭 기준으로 환산
-            recovered.append(Line(
-                text=text,
-                bbox=[0, max(0, cy - half), page.canvas_w, min(page.canvas_h, cy + half)],
-                confidence=item.get("confidence"),
-                source="vlm_sweep",
-            ))
+            by_id = {r.region_id: r for r in page.regions}
+            for rid, (text, conf) in readings.items():
+                region = by_id.get(rid)
+                if region is None:
+                    continue
+                ocr = " ".join(l.text for l in region.lines)
+                # B안 유지 — OCR 정본은 안 건드리고 후보로만 붙인다. 판단은 STAGE_3 몫.
+                region.vlm_reading = text
+                # 점수·관계 딱지는 여기서 매기지 않는다 → _score_reading_candidates 참조.
+                # 이 시점의 정본은 아직 확정이 아니다(라인 순서 미정렬 + 유령 라인 미제거).
+                attached += 1
+                if _n_squash(text) != _n_squash(ocr):
+                    corrected += 1
+
+            for item in missing[:20]:
+                text = str(item.get("text", "")).strip()
+                if not text or len(_n_squash(text)) < 2 or _n_squash(text) in known:
+                    continue
+                y = min(max(float(item.get("y_ratio", 0.0)), 0.0), 1.0)
+                half = max(12, int(crop.height * 0.012))
+                cy = crop_top + int(y * crop.height)   # 넓힌 크롭 기준으로 환산
+                recovered.append(Line(
+                    text=text,
+                    # 컬럼 그룹으로 좁힌 크롭이면 그 가로 구간만 준다 — 페이지 전폭으로
+                    # 돌려주면 이 회수 라인도 옆 컬럼까지 걸치는 결함②를 재현하게 된다.
+                    bbox=[crop_x0, max(0, cy - half), crop_x1, min(page.canvas_h, cy + half)],
+                    confidence=item.get("confidence"),
+                    source="vlm_sweep",
+                ))
 
     page.notes.append(
-        f"밴드 통합판독: {len(bands)}회 호출로 영역 {attached}개 후보 부착"
-        f"(OCR 과 다른 것 {corrected}개) + 누락 후보 {len(recovered)}건"
-        f" / 영역 절단 방지로 크롭 확장 {expanded}개 밴드"
+        f"밴드 통합판독: {calls}회 호출({len(bands)}개 밴드, 컬럼분리 {split_bands}개)로 "
+        f"영역 {attached}개 후보 부착(OCR 과 다른 것 {corrected}개) + 누락 후보 {len(recovered)}건"
+        f" / 영역 절단 방지로 크롭 확장 {expanded}회"
     )
     return recovered
 

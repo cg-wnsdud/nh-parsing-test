@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw
 
 from nh_parsing.bands import (
     CLEAN_MAX, band_count_for, content_bands, content_spans, vlm_band_span,
-    count_cards_by_density, edge_profile, plan_cuts,
+    count_cards_by_density, edge_profile, has_banded_card_split, plan_cuts,
 )
 
 
@@ -147,6 +147,40 @@ def test_content_spans_는_비중을_함께_돌려준다():
     spans = content_spans(edge_profile(img, "x"))
     assert len(spans) == 2
     assert abs(sum(m for _, _, m in spans) - 1.0) < 0.05
+
+
+# ───────────────── 부분구간 카드 분리 신호(§C) ─────────────────
+
+
+def _blocks(width, height, rects):
+    """rects = [(x0, x1, y0, y1), ...] 각 사각형 안을 세로 줄무늬로 채운다."""
+    img = Image.new("RGB", (width, height), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    for x0, x1, y0, y1 in rects:
+        for x in range(x0, x1, 6):
+            d.line([(x, y0), (x, y1)], fill=(0, 0, 0), width=2)
+    return img
+
+
+def test_전체프로파일은_1이어도_부분구간_분리가_있으면_잡는다():
+    """실측(2. 카드상품.pdf) 재현 — 전폭 공통 헤더가 전체 높이의 깨끗한 자리를 없앤다.
+
+    헤더(y 20~100)는 전체 폭에 걸쳐 있어 전체 프로파일엔 컬럼 사이 빈틈이 어디에도
+    없다. 카드 본문(y 150~680)만 떼어 보면 두 카드 사이 거터가 뚜렷하다.
+    """
+    img = _blocks(900, 700, [
+        (20, 880, 20, 100),    # 공통 헤더 — 전체 폭
+        (20, 400, 150, 680),   # 카드 1
+        (500, 880, 150, 680),  # 카드 2
+    ])
+    assert count_cards_by_density(img)[0] == 1, "실측 전제 — 전체 프로파일은 1이어야 한다"
+    assert has_banded_card_split(img) is True
+
+
+def test_단일_패널은_부분구간에서도_안_잡힌다():
+    """오탐 방지 하한 — 정말 한 덩어리면 어느 조각으로 나눠도 분리가 없어야 한다."""
+    img = _blocks(900, 700, [(20, 880, 20, 680)])
+    assert has_banded_card_split(img) is False
 
 
 def test_높이_상한을_넘으면_조각을_더_쪼갠다():

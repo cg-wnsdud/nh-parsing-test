@@ -322,3 +322,32 @@ def count_cards_by_density(img: Image.Image) -> tuple[int, list[tuple[int, int, 
     """
     spans = content_spans(edge_profile(img, "x"))
     return len(spans), spans
+
+
+_CARD_BAND_STRIPS = 6  # 전체 프로파일에서는 안 보이는 부분 구간 분리를 찾을 때 나눌 조각 수
+
+
+def has_banded_card_split(img: Image.Image, n_strips: int = _CARD_BAND_STRIPS) -> bool:
+    """전체 페이지 프로파일로는 안 보여도, 일부 세로 구간에서 뚜렷한 좌우 분리가 있는가.
+
+    실측(2026-08-13, `2. 카드상품.pdf`): 서로 다른 두 카드(GS리테일 vs 올바른POINT UP)
+    를 비교하는 페이지인데도 count_cards_by_density(전체 페이지)=1 이 나왔다 — 상단
+    공통 헤더/여백이 전체 높이에 걸쳐 있어, 전체 프로파일에는 '완전히 깨끗한 자리'가
+    어디에도 없었기 때문이다(가장 넓은 빈틈이 161px 뿐). 페이지를 몇 조각으로 나눠
+    보면 카드 본문이 있는 조각에서 좌우 분리가 뚜렷이 드러난다.
+
+    주의 — 이 신호는 '카드인지'를 가르지 못한다. 단일 상품의 2단 표도 조각 단위로는
+    똑같이 잡힌다(실측: `1. 예금성상품(적립식).pdf` 도 조각 대부분에서 2단 이상). 그래서
+    여기서는 가르지 않는다 — 이 함수는 게이트('VLM 에게 물어볼 가치가 있는가')만 완화
+    하고, 실제 '몇 개의 다른 상품인가' 판단은 그대로 VLM 몫으로 남긴다(assign_cards_vlm).
+    """
+    h = img.height
+    if h <= 0:
+        return False
+    step = max(1, h // n_strips)
+    for y0 in range(0, h, step):
+        strip = img.crop((0, y0, img.width, min(h, y0 + step)))
+        count, _ = count_cards_by_density(strip)
+        if count >= 2:
+            return True
+    return False

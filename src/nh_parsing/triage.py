@@ -146,8 +146,37 @@ def _normal_ratio(stripped: str) -> float:
     return normal / len(stripped)
 
 
+_LINE_GAP_MULTIPLIER = 4.0  # 평균 글자 폭의 이 배수 이상 벌어지면 다른 칸(줄)으로 본다
+_LINE_GAP_MIN_PX = 6.0      # 위 배수가 너무 작아지는 것을 막는 하한
+
+
+def _split_by_column_gap(
+    group: list[tuple[str, tuple[float, float, float, float]]],
+) -> list[list[tuple[str, tuple[float, float, float, float]]]]:
+    """세로 겹침만으로 묶인 한 그룹을, 가로로 비정상 벌어진 지점에서 다시 쪼갠다.
+
+    표 칸("가입금액" | "100만원이상" | "조건" | "금리(%p)")은 세로 위치가 같아 위 군집
+    에서 한 줄로 합쳐진다. 실측(2026-08-13, `1. 예금성상품(거치식).pdf`): 정상 낱말
+    사이 간격은 평균 글자 폭의 최대 2.2배인데, 표 칸 경계 간격은 5.6~19배였다 — 그
+    사이 어디에도 정상 문장이 없어 4배를 경계로 쓴다. 이 경계를 못 넘으면 한 줄이
+    옆 칸 내용까지 끌고 들어가 영역 배정 때 엉뚱한 영역에 붙는다(p1_r006 실측).
+    """
+    if len(group) < 2:
+        return [group]
+    widths = [b[2] - b[0] for _, b in group]
+    avg_w = sum(widths) / len(widths)
+    gap_limit = max(avg_w * _LINE_GAP_MULTIPLIER, _LINE_GAP_MIN_PX)
+    segments: list[list[tuple[str, tuple[float, float, float, float]]]] = [[group[0]]]
+    for ch, box in group[1:]:
+        prev_right = segments[-1][-1][1][2]
+        if box[0] - prev_right > gap_limit:
+            segments.append([])
+        segments[-1].append((ch, box))
+    return segments
+
+
 def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
-    """텍스트 레이어 → 라인(문자 bbox y-겹침 군집). 좌표는 렌더 픽셀로 환산."""
+    """텍스트 레이어 → 라인(문자 bbox y-겹침 군집 + 가로 공백 분리). 좌표는 렌더 픽셀로 환산."""
     textpage = page.get_textpage()
     _, page_h = page.get_size()
     n = textpage.count_chars()
@@ -183,19 +212,20 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
     lines: list[Line] = []
     for group in lines_raw:
         group.sort(key=lambda c: c[1][0])
-        text = "".join(ch for ch, _ in group)
-        left = min(b[0] for _, b in group)
-        bottom = min(b[1] for _, b in group)
-        right = max(b[2] for _, b in group)
-        top = max(b[3] for _, b in group)
-        # PDF pt(원점 좌하단) → 렌더 픽셀(원점 좌상단)
-        bbox = [
-            int(left * px_per_pt),
-            int((page_h - top) * px_per_pt),
-            int(right * px_per_pt),
-            int((page_h - bottom) * px_per_pt),
-        ]
-        lines.append(Line(text=text, bbox=bbox, confidence=None, source="digital"))
+        for segment in _split_by_column_gap(group):
+            text = "".join(ch for ch, _ in segment)
+            left = min(b[0] for _, b in segment)
+            bottom = min(b[1] for _, b in segment)
+            right = max(b[2] for _, b in segment)
+            top = max(b[3] for _, b in segment)
+            # PDF pt(원점 좌하단) → 렌더 픽셀(원점 좌상단)
+            bbox = [
+                int(left * px_per_pt),
+                int((page_h - top) * px_per_pt),
+                int(right * px_per_pt),
+                int((page_h - bottom) * px_per_pt),
+            ]
+            lines.append(Line(text=text, bbox=bbox, confidence=None, source="digital"))
     from .tiling import sort_reading_order
 
     return sort_reading_order(lines)
