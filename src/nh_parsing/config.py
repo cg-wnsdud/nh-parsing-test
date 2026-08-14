@@ -83,6 +83,11 @@ class Settings:
     max_fffd_ratio: float = 0.3           # U+FFFD 비율 초과 시 SCAN_LIKE
     min_fffd_count: int = 8               # 절대 개수 하한 (오탐 방지)
     hybrid_image_area_ratio: float = 0.5  # STRUCTURED여도 이미지 면적비 초과 시 OCR 병행
+    # 페이지의 글자 획 픽셀 중 텍스트 레이어가 덮은 비율이 이 값 미만이면 STRUCTURED 를
+    # HYBRID 로 내린다 — 글자를 도형·그림으로 그려 텍스트 레이어에 안 들어온 페이지.
+    # structured 29쪽 실측(2026-08-14): 2.5% 다음이 56.3% 로 53.8%p 가 비어 있어
+    # 5~50% 어디에 그어도 같다. 근거는 bands.ink_coverage 주석.
+    min_ink_coverage: float = 0.30
 
     # ── 렌더/타일링 ─────────────────────────────────────────────
     pdf_render_dpi: int = 200

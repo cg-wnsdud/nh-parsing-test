@@ -81,6 +81,7 @@ def _process_pdf(path: Path, preview_dir: Path | None) -> AdDocument:
         doc.pages.append(AdPage(page_no=1, parse_route="ocr", parse_status="unreadable"))
         return doc
 
+    from .bands import ink_coverage
     from .canvas import native_image_dpi
 
     first_canvas: Image.Image | None = None
@@ -97,7 +98,21 @@ def _process_pdf(path: Path, preview_dir: Path | None) -> AdDocument:
 
         if verdict.verdict == "structured":
             lines = extract_digital_lines(pdf_page, canvas.px_per_pt)
-            page = _assemble_page(canvas, lines, blocks=[], route="digital", page_no=page_no)
+            # 텍스트 레이어가 페이지에 보이는 글자를 설명하지 못하면 OCR 을 건너뛰면 안 된다
+            # (bands.ink_coverage 주석의 실측 — 의무고지 14문구 유실). 판정을 scan_like 가
+            # 아니라 hybrid 로 내리는 이유: 뽑힌 디지털 글자(심의필 번호 등)는 정확하므로
+            # 버릴 이유가 없고, 못 잡은 부분만 OCR 이 보완하면 된다.
+            cov = ink_coverage(canvas.image, [l.bbox for l in lines if l.bbox])
+            if cov < SETTINGS.min_ink_coverage:
+                verdict.verdict = "hybrid"
+                verdict.reasons.append(
+                    f"글자 획 픽셀 중 텍스트 레이어가 덮은 비율 {cov:.1%} "
+                    f"(< {SETTINGS.min_ink_coverage:.0%}) — 글자를 도형·그림으로 그린 페이지로 "
+                    f"보고 OCR 병행으로 내림"
+                )
+                page = _ocr_canvas_to_page(canvas, page_no, extra_digital=lines, route="hybrid")
+            else:
+                page = _assemble_page(canvas, lines, blocks=[], route="digital", page_no=page_no)
         elif verdict.verdict == "hybrid":
             digital = extract_digital_lines(pdf_page, canvas.px_per_pt)
             page = _ocr_canvas_to_page(canvas, page_no, extra_digital=digital, route="hybrid")

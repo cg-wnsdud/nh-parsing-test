@@ -314,6 +314,48 @@ def content_spans(
     return spans
 
 
+def ink_coverage(img: Image.Image, boxes: list[list[int]]) -> float:
+    """페이지의 글자 획 픽셀 중 주어진 상자들이 덮은 비율 (0~1).
+
+    **무엇을 재는가.** "화면에 글자처럼 보이는 것"과 "텍스트 레이어가 설명하는 것"의
+    차이다. 낮으면 글자를 도형(벡터)이나 그림으로 그려서 텍스트 레이어에 안 들어온
+    페이지다 — 그런 페이지에서 OCR 을 생략하면 본문이 통째로 사라진다.
+
+    **왜 이 축이 필요한가**(2026-08-14 실측). 기존 판정(글자수·U+FFFD·PUA 비율·이미지
+    면적비)은 전부 **뽑힌 글자가 이상한가**만 본다. 글자가 아예 안 뽑히는 경우는
+    글자수 하한(20자)으로 거르는데, 심의필 도장처럼 몇 줄만 진짜 텍스트면 그 하한을
+    넘겨 버린다. `2. 예금성상품(입출식).pdf` p1 이 그랬다 — 124자(심의필 문구와 숫자
+    파편)로 structured 판정을 받아 OCR 을 건너뛰었고, 예금자보호법·금융소비자보호법
+    등 **의무고지 14개 문구가 통째로 유실**됐다.
+
+    같은 파일을 외부 파서(kordoc 4.7.3)로 돌려도 `totalTextChars: 124`,
+    `needsOcr: false` 로 **똑같이 오판했다** — 텍스트 레이어의 글자만 세는 지표로는
+    구조적으로 못 잡는다는 뜻이다. 이 함수는 그 빈 축을 채운다.
+
+    **임계값이 1건 과적합이 아닌 근거.** structured 판정 29쪽 전부를 계산했더니
+    2.5%(위 파일) 다음이 56.3% 로, 그 사이 **53.8%p 가 비어 있다**. 5~50% 어디에
+    선을 그어도 결과가 같다.
+
+    잉크는 edge_mask(국소 대비)로 잰다 — 색 배경 위 흰 글자도 잡히고, 밝기로 재면
+    무의미해지는 이유는 이 모듈 상단 주석 참조.
+    """
+    if not img.width or not img.height:
+        return 1.0            # 잴 수 없으면 판정을 바꾸지 않는다(안전측)
+    mask = edge_mask(img).point(lambda v: 255 if v else 0)
+    total = mask.histogram()[255]
+    if total <= 0:
+        return 1.0            # 잉크가 없는 빈 페이지 — 덮을 것도 없다
+    cover = Image.new("L", img.size, 0)
+    draw = ImageDraw.Draw(cover)
+    for b in boxes:
+        if not b or len(b) < 4:
+            continue
+        # 글자 상자는 획 바깥 여백이 거의 없어 경계 픽셀이 밖으로 새어 나온다 — 2px 만 넓힌다
+        draw.rectangle([b[0] - 2, b[1] - 2, b[2] + 2, b[3] + 2], fill=255)
+    both = ImageChops.multiply(mask, cover)
+    return both.histogram()[255] / total
+
+
 def count_cards_by_density(img: Image.Image) -> tuple[int, list[tuple[int, int, float]]]:
     """가로로 나란한 카드 개수를 좌표 계산만으로 센다 (모델 호출 0회).
 
