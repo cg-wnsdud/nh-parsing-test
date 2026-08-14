@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from .ir import AdDocument, AdPage, Line, Region
 from .tiling import sort_reading_order
+from .truncation import OVERFLOWED
 
 
 def _rows_from_lines(lines: list[Line]) -> list[str]:
@@ -92,7 +93,16 @@ def build_page_view(page: AdPage) -> dict:
         item = {"region_id": r.region_id, "role": r.role, "text": text}
         # VLM 통독 후보(§6, B안): OCR 정본과 다를 때만 후보로 병존 노출.
         # STAGE_3 가 정밀도/커버리지를 보고 raw(text)와 후보 중 선택 (§1A).
-        if r.vlm_reading and r.vlm_reading.strip() and r.vlm_reading.strip() != text.strip():
+        # 범람 후보(다른 영역 내용을 통째로 삼킨 것)는 아예 안 싣는다 — 실으면 STAGE_3 가
+        # 그 값을 이 영역의 근거로 채택해 **엉뚱한 좌표를 가리키는 근거**가 만들어진다.
+        # 판정 근거는 out/json 의 notes 와 vlm_reading_relation 에 남으므로 조용한 삭제가
+        # 아니다 (pipeline._swallowed_regions 주석 참조).
+        if (
+            r.vlm_reading
+            and r.vlm_reading.strip()
+            and r.vlm_reading.strip() != text.strip()
+            and r.vlm_reading_relation != OVERFLOWED
+        ):
             item["vlm_reading"] = r.vlm_reading
             item["vlm_reading_score"] = r.vlm_reading_score
             item["vlm_reading_coverage"] = r.vlm_reading_coverage

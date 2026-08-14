@@ -268,6 +268,55 @@ def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
     _score_reading_candidates(page)
 
 
+_OVERFLOW_MIN_LEN_RATIO = 3.0   # 후보가 자기 정본보다 이 배수 이상 길 때만 의심
+_OVERFLOW_MIN_SPAN_RATIO = 3.0  # 삼킨 영역들이 자기 bbox 높이의 이 배수 이상에 걸칠 때만
+_OVERFLOW_MIN_CHARS = 8         # 이보다 짧은 문구는 우연히 포함될 수 있어 삼킴으로 안 센다
+
+
+def _swallowed_regions(region: Region, page: AdPage) -> list[str]:
+    """이 영역의 통독 후보가 **다른 영역의 정본을 통째로 삼켰는지** 본다.
+
+    **왜 생기나.** 밴드 통합판독은 밴드 이미지 1장 + 영역 목록 N개를 한 번에 보내
+    "영역마다 하나씩 나눠 채워라"고 시킨다. 그런데 VLM 이 이 분배를 무시하고 **밴드
+    전체 판독문을 목록의 첫 항목에 통째로** 넣는 일이 있다. 실측(2026-08-13, 89문서):
+    범람 13건 중 **12건이 자기 밴드 요청목록의 첫 항목**이었다. `12. 카드상품` p1_r000
+    은 121x113px 짜리 SNS 게시자 표시(자기 3줄 20자)인데 후보에 페이지 전체 344자가
+    들어와 다른 영역 6개를 삼켰다.
+
+    **왜 버리지 않고 딱지만 붙이나.** 이 저장소의 원칙은 정본을 안 덮고 후보로만 붙이는
+    것이고(ir.Line.vlm_reading 주석), 조용히 버리지 않는 것이다. 진짜 문제는 후보의
+    존재가 아니라 **`expanded`(정본보다 많이 읽음 — 회수 가능)로 분류돼 검수 화면에
+    초록색으로 뜨는 것**이다. 오염인데 이득으로 보인다. 딱지만 바꾸면 오탐이 나도
+    정본은 그대로고 사람이 눈으로 되돌릴 수 있다.
+
+    **왜 길이와 기하를 함께 보나.** 둘 중 하나만으로는 못 가른다(실측 1,547개 후보):
+      · 길이만(3배 이상): 10건 — 자기 6자를 32자로 제대로 회수한 정상 건이 섞였다
+      · 기하만(3배 이상): 45건 — 자기 21자 → 후보 21자로 **길이가 그대로인데** 멀리
+        있는 짧은 문구를 우연히 포함한 건이 대량으로 걸렸다
+      · 둘 다: **7건(0.45%)** — 위 오탐이 모두 빠지고 진짜 범람만 남았다
+    """
+    cand = _n_squash(region.vlm_reading or "")
+    if not (cand and region.bbox):
+        return []
+    mine = _n_squash(" ".join(l.text for l in region.lines))
+    if len(cand) < len(mine) * _OVERFLOW_MIN_LEN_RATIO:
+        return []
+    swallowed, ys = [], [region.bbox[1], region.bbox[3]]
+    for other in page.regions:
+        if other is region or not other.bbox:
+            continue
+        text = _n_squash(" ".join(l.text for l in other.lines))
+        if len(text) >= _OVERFLOW_MIN_CHARS and text in cand:
+            swallowed.append(other.region_id)
+            ys += [other.bbox[1], other.bbox[3]]
+    if not swallowed:
+        return []
+    height = max(1, region.bbox[3] - region.bbox[1])
+    if (max(ys) - min(ys)) / height < _OVERFLOW_MIN_SPAN_RATIO:
+        return []   # 바로 옆 영역 한 줄이 섞인 정도 — 물리적으로 가능한 범위다
+    return swallowed
+
+
 def _score_reading_candidates(page: AdPage) -> None:
     """확정된 정본과 통독 후보를 대조해 점수·관계 딱지를 매긴다.
 
@@ -296,9 +345,10 @@ def _score_reading_candidates(page: AdPage) -> None:
     받으므로 같이 여기서 계산한다 — 정본 판정 근거를 한 곳에 모은다.
     """
     from .field_judge import check_field_consistency
-    from .truncation import Relation, classify_reading
+    from .truncation import OVERFLOWED, Relation, classify_reading
 
     truncated: list[tuple[str, Relation]] = []
+    overflowed: list[str] = []
     for region in page.regions:
         cand = region.vlm_reading
         if not cand:
@@ -308,10 +358,20 @@ def _score_reading_candidates(page: AdPage) -> None:
         region.vlm_reading_coverage = round(check_field_consistency(ocr, cand), 3)
         # 위 두 점수는 토큰 겹침이라 순서를 못 본다 — 뒤가 잘린 판독이 정밀도 만점을
         # 받는다(실측 5건). 경계 기준으로 관계를 따로 판정해 후보에 딱지를 붙인다.
+        swallowed = _swallowed_regions(region, page)
+        if swallowed:
+            region.vlm_reading_relation = OVERFLOWED
+            overflowed.append(f"{region.region_id}←{','.join(swallowed)}")
+            continue
         rel = classify_reading(ocr, cand)
         region.vlm_reading_relation = rel.kind
         if rel.is_truncated:
             truncated.append((region.region_id, rel))
+
+    if overflowed:
+        page.notes.append(
+            "통독 후보 범람 경보(정본 우선, 근거 채택 금지): " + " / ".join(overflowed)
+        )
 
     # 잘린 후보 경보 — 통합판독으로 옮길 때 빠뜨렸던 것을 복구(2026-07-29). 옛 경로
     # (_transcribe_regions_vlm)에는 '절단 의심' 표시가 있었는데 그 함수엔 없었다.

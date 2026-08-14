@@ -36,6 +36,7 @@ TAIL_TRUNCATED = "tail_cut"      # 뒤가 잘림 → 정본이 더 완전 (위�
 HEAD_DROPPED = "head_drop"       # 앞(항목명 등)을 뺌 → 값은 온전 (보통 무해)
 EXPANDED = "expanded"            # VLM 이 더 많이 읽음 → OCR 누락 회수 (이득)
 DIVERGED = "diverged"            # 서로 다른 내용 — 어느 쪽이 맞는지 여기서 못 정함
+OVERFLOWED = "overflow"          # 다른 영역 내용을 통째로 삼킴 → 이 영역 근거로 쓰면 안 됨
 
 # 잘림/누락으로 부를 최소 비율. 이 미만이면 표기 흔들림으로 보고 SAME 취급.
 # 0.15 = 정본의 15% 이상이 사라져야 '없어졌다'고 말한다 (구두점 한둘로 경보가 뜨면
