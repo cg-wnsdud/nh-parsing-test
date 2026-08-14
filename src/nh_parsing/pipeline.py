@@ -96,25 +96,35 @@ def _process_pdf(path: Path, preview_dir: Path | None) -> AdDocument:
         if first_canvas is None:
             first_canvas = canvas.image
 
-        if verdict.verdict == "structured":
-            lines = extract_digital_lines(pdf_page, canvas.px_per_pt)
-            # 텍스트 레이어가 페이지에 보이는 글자를 설명하지 못하면 OCR 을 건너뛰면 안 된다
-            # (bands.ink_coverage 주석의 실측 — 의무고지 14문구 유실). 판정을 scan_like 가
-            # 아니라 hybrid 로 내리는 이유: 뽑힌 디지털 글자(심의필 번호 등)는 정확하므로
-            # 버릴 이유가 없고, 못 잡은 부분만 OCR 이 보완하면 된다.
-            cov = ink_coverage(canvas.image, [l.bbox for l in lines if l.bbox])
-            if cov < SETTINGS.min_ink_coverage:
-                verdict.verdict = "hybrid"
-                verdict.reasons.append(
-                    f"글자 획 픽셀 중 텍스트 레이어가 덮은 비율 {cov:.1%} "
-                    f"(< {SETTINGS.min_ink_coverage:.0%}) — 글자를 도형·그림으로 그린 페이지로 "
-                    f"보고 OCR 병행으로 내림"
-                )
-                page = _ocr_canvas_to_page(canvas, page_no, extra_digital=lines, route="hybrid")
-            else:
-                page = _assemble_page(canvas, lines, blocks=[], route="digital", page_no=page_no)
-        elif verdict.verdict == "hybrid":
+        if verdict.verdict in ("structured", "hybrid"):
+            # structured 도 레이아웃 검출(StructureV3)을 부른다. 예전에는 "디지털 텍스트가
+            # 이미 있으니 무거운 모델을 또 부를 것 없다"고 건너뛰었는데, 실측해 보니 그
+            # 절약은 **StructureV3 호출 하나(단일 타일 3.67초, GPU)**뿐이었다 — VLM(카드
+            # 분할·역할 판정·밴드 통독·분류)은 _apply_vlm_judgments 가 route 를 안 가리고
+            # 항상 부르므로 이미 전부 지불 중이다. 그 3.67초를 아끼는 대가로 가로 인식을
+            # 통째로 잃고 있었다: 블록이 없으면 _assemble_page 가 _pseudo_regions 폴백을
+            # 타는데, 그건 세로 간격만 보므로 좌우 2단 페이지가 한 덩어리로 뭉친다
+            # (실측 2026-08-14, `6. 대출성상품.pdf` p1: 원금및이자상환방법부터 신청채널까지
+            # 라벨 5줄이 한 영역 27줄로 뭉쳤다).
+            #
+            # 그래서 hybrid 가 이미 하던 조합(구조는 StructureV3, 값은 디지털 텍스트가 정본)
+            # 을 structured 에도 그대로 쓴다. 3갈래 판정은 진단·기록용으로 page.triage 에
+            # 남고, 여기서는 "OCR 을 부르느냐 마느냐"의 분기만 없앤다. route 를 "hybrid" 로
+            # 통일하는 이유: 실제로 두 출처를 병합하므로 "digital"(디지털 텍스트만 썼다)은
+            # 이제 사실이 아니다. structured 였다는 사실은 page.triage 가 그대로 들고 있다.
             digital = extract_digital_lines(pdf_page, canvas.px_per_pt)
+            if verdict.verdict == "structured":
+                # 커버리지는 더 이상 라우팅을 가르지 않는다(어차피 OCR 을 부른다). 다만
+                # "텍스트 레이어가 화면의 글자를 얼마나 설명하는가"는 산출물 신뢰도를 읽는
+                # 재료라 계속 재서 근거에 남긴다 — H(4efb092)가 찾아낸 진단 가치다.
+                cov = ink_coverage(canvas.image, [l.bbox for l in digital if l.bbox])
+                note = f"글자 획 픽셀 중 텍스트 레이어가 덮은 비율 {cov:.1%}"
+                if cov < SETTINGS.min_ink_coverage:
+                    note += (
+                        f" (< {SETTINGS.min_ink_coverage:.0%}) — 글자를 도형·그림으로 그린 "
+                        f"페이지로, 디지털 텍스트만으로는 화면을 설명하지 못한다"
+                    )
+                verdict.reasons.append(note)
             page = _ocr_canvas_to_page(canvas, page_no, extra_digital=digital, route="hybrid")
         else:  # scan_like
             page = _ocr_canvas_to_page(canvas, page_no)
