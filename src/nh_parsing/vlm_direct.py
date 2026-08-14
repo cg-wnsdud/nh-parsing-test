@@ -519,6 +519,21 @@ _BAND_READ_PROMPT = """첨부 이미지는 광고 화면의 한 구간입니다.
 먼저 analysis 에 이 구간의 구성을 한두 문장으로 정리한 뒤 regions 와 missing 을 채우세요."""
 
 
+# 응답이 도중에 끊겼을 때만 나오는 JSON 파서 메시지들. 모델명 오타·서버 다운 같은
+# 다른 실패까지 쪼개 재시도하면 실패 1건이 2건이 될 뿐이라 유형을 좁힌다.
+# 실측(2026-08-14, 89문서): 정상 서버에서 남은 11건이 전부 'Unterminated string' 이었다.
+_TRUNCATION_MARKERS = (
+    "unterminated string",
+    "expecting property name",
+    "expecting value",
+    "expecting ',' delimiter",
+)
+
+
+def _is_truncated_response(exc: Exception) -> bool:
+    return any(m in str(exc).lower() for m in _TRUNCATION_MARKERS)
+
+
 def read_band_regions(
     band: Image.Image, entries: list[tuple[str, str]]
 ) -> tuple[dict[str, tuple[str, float | None]], list[dict], collections.Counter]:
@@ -544,13 +559,36 @@ def read_band_regions(
         {"type": "text", "text": _BAND_READ_PROMPT.format(regions=listing or "(없음)")},
         image_part(band),
     ]
-    data = chat_json(
-        parts,
-        schema_name="band_read",
-        schema=_BAND_READ_SCHEMA,
-        # 영역 수에 비례해 넉넉히 — 잘리면 그 밴드 결과가 통째로 사라진다(스윕 실측)
-        max_tokens=min(8000, 800 + 260 * max(1, len(entries))),
-    )
+    try:
+        data = chat_json(
+            parts,
+            schema_name="band_read",
+            schema=_BAND_READ_SCHEMA,
+            # 영역 수에 비례해 넉넉히 — 잘리면 그 밴드 결과가 통째로 사라진다(스윕 실측)
+            max_tokens=min(8000, 800 + 260 * max(1, len(entries))),
+        )
+    except Exception as exc:
+        # 응답이 중간에 끊긴 경우(Unterminated string 등)에만 **요청을 반으로 쪼개** 다시
+        # 묻는다. 실측(2026-08-14, 89문서 재실행): 정상 서버에서도 11건이 남았고 전부
+        # 이 유형이었다. 원인은 서버측 guided-decoding 결함이라 우리가 못 고치지만,
+        # 한 번에 요구하는 출력량을 줄이면 잘리기 전에 끝날 확률이 올라간다.
+        #
+        # max_tokens 를 올리지 않는 이유: 지금도 상한 8000 이고, 올리면 정상 호출까지
+        # 전부 느려진다. 실패한 것만 쪼개는 쪽이 싸고 정확하다.
+        # 영역이 1개면 더 쪼갤 수 없으므로 그대로 올려 호출측이 기록하게 둔다.
+        if len(entries) < 2 or not _is_truncated_response(exc):
+            raise
+        half = len(entries) // 2
+        merged_readings: dict[str, tuple[str, float | None]] = {}
+        merged_missing: list[dict] = []
+        merged_dropped: collections.Counter = collections.Counter()
+        for chunk in (entries[:half], entries[half:]):
+            r, m, dr = read_band_regions(band, chunk)
+            merged_readings.update(r)
+            merged_missing += m
+            merged_dropped.update(dr)
+        merged_dropped["잘림_분할재시도"] += 1
+        return merged_readings, merged_missing, merged_dropped
 
     known = {rid for rid, _ in entries}
     readings: dict[str, tuple[str, float | None]] = {}
