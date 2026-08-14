@@ -176,43 +176,67 @@ def _split_by_column_gap(
 
 
 def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
-    """텍스트 레이어 → 라인(문자 bbox y-겹침 군집 + 가로 공백 분리). 좌표는 렌더 픽셀로 환산."""
+    """텍스트 레이어 → 라인(문자 글꼴칸 y-겹침 군집 + 가로 공백 분리). 좌표는 렌더 픽셀로 환산.
+
+    **줄 묶기는 글꼴칸(loose charbox), 좌표는 잉크칸(tight charbox)을 쓴다.** 잉크칸은
+    글자마다 높이가 제각각이라(같은 줄에서 `ㆍ` 5.3px · `임` 25.8px 실측) 겹침 비율이
+    글자 모양에 좌우된다. 그래서 키 큰 글자가 윗줄 글자와 임계값을 아슬하게 넘겨
+    **윗줄에 흡수되고 형제 글자만 남아 라벨이 쪼개졌다** — 실측(2026-08-14,
+    `7. 대출성상품.pdf` p1): `필`(높이 28.7)이 윗줄 `임`(25.8)과 51.6% 겹쳐 흡수되고
+    `류`·`요`는 46~49%로 탈락해 `필요서류` → `필서` + `요류` 로 갈렸다. 같은 원인으로
+    `대출한도` → `대출한` + `도`, `대출용도` → `대출용` + `도`(6. 대출성상품).
+
+    글꼴칸은 글꼴 메트릭이 정하므로 **같은 줄 글자가 전부 같은 상자**가 된다(위 실측에서
+    `필요서류` 넷 다 1916.3~1948.9, `임대차계약서` 전부 1903.6~1933.0) — 글자 모양에
+    흔들리지 않는다. 다만 글꼴칸은 실제 획보다 크므로 화면 하이라이트·영역 배정이 쓰는
+    bbox 는 종전대로 잉크칸으로 낸다.
+    """
     textpage = page.get_textpage()
     _, page_h = page.get_size()
     n = textpage.count_chars()
-    chars: list[tuple[str, tuple[float, float, float, float]]] = []
+    # (글자, 잉크칸, 글꼴칸)
+    chars: list[tuple[str, tuple[float, ...], tuple[float, ...]]] = []
     for i in range(n):
         ch = textpage.get_text_range(i, 1)
         if not ch or ch.isspace():
             continue
         try:
-            left, bottom, right, top = textpage.get_charbox(i)
+            tight = textpage.get_charbox(i)
         except Exception:
             continue
-        chars.append((ch, (left, bottom, right, top)))
+        try:
+            loose = textpage.get_charbox(i, loose=True)
+        except Exception:
+            loose = tight  # 글꼴칸을 못 얻는 글자는 종전(잉크칸) 동작으로 되돌아간다
+        if loose[3] - loose[1] <= 0:
+            loose = tight
+        chars.append((ch, tight, loose))
     if not chars:
         return []
 
-    # top 기준 정렬 후 수직 겹침 50% 이상이면 같은 라인으로 군집
-    chars.sort(key=lambda c: (-c[1][3], c[1][0]))
-    lines_raw: list[list[tuple[str, tuple[float, float, float, float]]]] = []
-    for ch, box in chars:
+    # 글꼴칸 top 기준 정렬 후 수직 겹침 50% 이상이면 같은 라인으로 군집
+    chars.sort(key=lambda c: (-c[2][3], c[1][0]))
+    lines_raw: list[list[tuple[str, tuple[float, ...], tuple[float, ...]]]] = []
+    for entry in chars:
+        box = entry[2]
         placed = False
         for group in lines_raw:
-            _, gbox = group[0]
+            gbox = group[0][2]
             overlap = min(box[3], gbox[3]) - max(box[1], gbox[1])
             height = min(box[3] - box[1], gbox[3] - gbox[1])
             if height > 0 and overlap / height >= 0.5:
-                group.append((ch, box))
+                group.append(entry)
                 placed = True
                 break
         if not placed:
-            lines_raw.append([(ch, box)])
+            lines_raw.append([entry])
 
     lines: list[Line] = []
     for group in lines_raw:
         group.sort(key=lambda c: c[1][0])
-        for segment in _split_by_column_gap(group):
+        # 가로 공백 분리와 최종 좌표는 잉크칸 기준 (글꼴칸은 좌우로도 넉넉해 칸 경계가 뭉갠다)
+        tight_group = [(ch, tight) for ch, tight, _ in group]
+        for segment in _split_by_column_gap(tight_group):
             text = "".join(ch for ch, _ in segment)
             left = min(b[0] for _, b in segment)
             bottom = min(b[1] for _, b in segment)
