@@ -123,7 +123,7 @@ def chat_json(
     raise RuntimeError(f"VLM 호출 실패({retries + 1}회): {last_exc}")
 
 
-def _repair_trailing_escape(text: str) -> dict | None:
+def _repair_trailing_escape(text: str, max_fixes: int = 8) -> dict | None:
     """guided-decoding 서빙 결함 보정 — 불필요한 역슬래시를 내보내고 그대로
     생성을 멈추는 경우가 실측됨(gemma-4-26b-NVFP4-MTP, finish_reason=stop,
     temperature=0 에서도 호출마다 미묘하게 다른 위치/길이로 재현).
@@ -137,23 +137,36 @@ def _repair_trailing_escape(text: str) -> dict | None:
     파싱 오류 위치(JSONDecodeError.pos) 이하에서 가장 가까운 역슬래시를 지워
     보고, 안 되면 예전 방식(마지막 역슬래시)으로 폴백한다. 둘 다 실패하면
     None(원래 예외 유지) — 여기서 만든 값은 호출측의 형식 가드로 다시 검증된다.
-    """
-    def _try(idx: int) -> dict | None:
-        if idx == -1:
-            return None
-        try:
-            return json.loads(text[:idx] + text[idx + 1:])
-        except Exception:
-            return None
 
+    **한 응답에 오발행이 여러 개 나온다**(2026-08-14 수정). 예전에는 한 개만
+    지우고 끝냈다 — 합성 입력으로 확인: 오발행 1개는 살리고 2개부터 못 살린다.
+    응답이 길수록 오발행이 겹칠 확률이 오르는데, 파싱 개선으로 밴드 통독에
+    들어가는 텍스트가 늘면서 실측(new-sample-data 89건 재실행) 밴드 통독 실패가
+    6 → 17건으로 늘었고 그중 16건이 `Invalid \\uXXXX escape` 였다. 그래서 살아날
+    때까지 **반복해서** 지운다.
+
+    상한(max_fixes)을 두는 이유: 응답이 escape 문제가 아니라 통째로 잘린 경우
+    끝없이 지워도 안 살아난다. 그때는 None 을 돌려 호출측 재시도·분할에 맡긴다
+    (truncation 대응은 이 함수 몫이 아니다).
+    """
+    cur = text
+    for _ in range(max_fixes):
+        try:
+            return json.loads(cur)
+        except json.JSONDecodeError as exc:
+            # exc.pos 는 깨진 이스케이프의 바로 뒤 문자를 가리킨다(`\u00` 이면 'u').
+            idx = cur.rfind("\\", 0, max(exc.pos, 0) + 1)
+            if idx == -1:
+                break
+            cur = cur[:idx] + cur[idx + 1:]
+    # 위치 기반으로 못 살리면 예전 방식(맨 뒤 역슬래시 하나)으로 폴백
+    idx = text.rfind("\\")
+    if idx == -1:
+        return None
     try:
-        json.loads(text)
-    except json.JSONDecodeError as exc:
-        # exc.pos 는 깨진 이스케이프의 바로 뒤 문자를 가리킨다(`\u00` 이면 'u').
-        repaired = _try(text.rfind("\\", 0, max(exc.pos, 0) + 1))
-        if repaired is not None:
-            return repaired
-    return _try(text.rfind("\\"))
+        return json.loads(text[:idx] + text[idx + 1:])
+    except Exception:
+        return None
 
 
 def image_part(image: Image.Image, box: tuple[int, int] = (896, 2400), quality: int = 85) -> dict:

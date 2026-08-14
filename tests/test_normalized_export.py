@@ -337,14 +337,25 @@ def test_실산출물_집계_중_안정된_값을_고정한다():
     스윕 회수가 비결정이라는 건 `ir.py:29` 에 이미 적혀 있다. 개수를 합격 조건으로
     박으면 코드가 멀쩡해도 다음 실행에서 빨간불이 뜬다. 그래서 흔들리는 값은 개수
     대신 **성질**로 검사한다(아래 test_스윕_라인은_전부_...).
+
+    **2026-08-14 기대값 갱신** — structured 판정 페이지도 레이아웃 검출을 받도록
+    바꾸면서(pipeline._process_pdf) 003 p3 가 세로간격 폴백(_pseudo_regions, 영역 2개)
+    대신 블록 기반 배정(영역 18개)을 타게 됐다. 그 차이가 그대로 나타난다:
+
+        layout_blocks                 224 → 240   (+16 = 003 p3 의 영역 2→18)
+        rules_filled_role_confidence   20 →  19   (블록이 생겨 한 영역의 역할을
+                                                   규칙 폴백이 아니라 VLM 이 정함)
+
+    두 값 다 **같은 코드로 2회 실행(out, out_run2)에서 동일**해 결정론적임을 확인하고
+    못박았다. 나머지 4개는 변하지 않았다.
     """
     totals, skipped = _totals(OUT_JSON)
 
     assert len(skipped) == 1                                # HWP 004 만 제외
-    assert totals["layout_blocks"] == 224
+    assert totals["layout_blocks"] == 240
     assert totals["dropped_empty_text"] == 11
     assert totals["digital_filled_confidence"] == 25
-    assert totals["rules_filled_role_confidence"] == 20
+    assert totals["rules_filled_role_confidence"] == 19
     assert totals["clamped_coordinates"] == 0               # 좌표는 손 안 대고 통과한다
     assert totals["layout_blocks_without_coordinate"] == 0
 
