@@ -690,13 +690,37 @@ def _resolve_sweep_duplicates(
     return remaining
 
 
+def _ocr_contained_in_digital(ocr_bbox: list[int], digital_bbox: list[int]) -> float:
+    """OCR 박스 면적 중 디지털 박스와 겹치는 비율 (OCR 자신의 면적 기준).
+
+    대칭 IoU 는 두 박스 크기가 비슷할 때만 통한다. 실측(2026-08-13, hybrid 89문서):
+    표 한 셀의 라벨+값을 디지털은 "가입대상개인" 하나로 뭉쳐 읽고 OCR 은 "가입대상"
+    "개인" 둘로 나눠 읽으면, 디지털 박스가 OCR 박스 둘 다를 포함하는데도 IoU 는
+    각각 0.48·0.24 로 어느 쪽도 0.5(_iou 기준)를 못 넘어 **둘 다 살아남아 중복**된다
+    (Fix A/B 가 이 셀 내용을 처음으로 이 영역에 제대로 배정하면서 드러났다 — 예전엔
+    아예 다른 영역으로 잘못 갔었다). 포함 비율로 재면 0.69·0.58 로 분명하다.
+
+    실측 165건(크기비 1.0~69.1배) 전부 확인 결과 오탐 없음 — 가장 극단적인 사례도
+    OCR 이 "※" 기호 하나만 읽고 디지털이 그 기호로 시작하는 문장 전체를 읽은
+    진짜 중복이었다(크기비 69배). 그래서 크기비 상한을 따로 두지 않는다.
+    """
+    ix = max(0, min(ocr_bbox[2], digital_bbox[2]) - max(ocr_bbox[0], digital_bbox[0]))
+    iy = max(0, min(ocr_bbox[3], digital_bbox[3]) - max(ocr_bbox[1], digital_bbox[1]))
+    area = max(1, (ocr_bbox[2] - ocr_bbox[0]) * (ocr_bbox[3] - ocr_bbox[1]))
+    return (ix * iy) / area
+
+
 def _merge_digital_ocr(digital: list[Line], ocr: list[Line]) -> list[Line]:
     from .tiling import _iou, sort_reading_order
 
     kept = list(digital)
     for line in ocr:
         overlapped = any(
-            d.bbox and line.bbox and _iou(d.bbox, line.bbox) >= 0.5 for d in digital
+            d.bbox and line.bbox and (
+                _iou(d.bbox, line.bbox) >= 0.5
+                or _ocr_contained_in_digital(line.bbox, d.bbox) >= 0.5
+            )
+            for d in digital
         )
         if not overlapped:
             kept.append(line)
