@@ -522,11 +522,23 @@ _BAND_READ_PROMPT = """첨부 이미지는 광고 화면의 한 구간입니다.
 # 응답이 도중에 끊겼을 때만 나오는 JSON 파서 메시지들. 모델명 오타·서버 다운 같은
 # 다른 실패까지 쪼개 재시도하면 실패 1건이 2건이 될 뿐이라 유형을 좁힌다.
 # 실측(2026-08-14, 89문서): 정상 서버에서 남은 11건이 전부 'Unterminated string' 이었다.
+#
+# **이스케이프 도중에 잘린 경우도 잘림이다**(2026-08-14 추가). 잘린 자리가 하필
+# `\uXXXX` 한가운데면 파서가 'Unterminated string' 이 아니라 'Invalid \uXXXX escape'
+# 를 낸다. 그래서 같은 잘림인데 위 목록에 안 걸려 분할 재시도를 못 타고 그대로
+# 실패했다 — 89건 재실행에서 남은 실패 10건을 응답 원문으로 확인한 결과 **10건 전부**
+# 이 유형이었고, 오류 위치가 전부 응답 끝 1~5자 이내였다.
+#
+# 잘림을 부른 것은 장식 기호의 반복 퇴행이다. 광고의 별·반짝임 줄을 전사하다 같은
+# 이스케이프를 끝없이 되풀이하며 토큰 한도까지 간다 (실측 10건의 꼬리:
+# `★`(★) 7건 · `✨`(✨) 1건 · `⋅`(⋅) 1건 · `️`(이모지 변형자) 1건).
 _TRUNCATION_MARKERS = (
     "unterminated string",
     "expecting property name",
     "expecting value",
     "expecting ',' delimiter",
+    "invalid \\uxxxx escape",
+    "invalid \\escape",
 )
 
 
@@ -582,11 +594,23 @@ def read_band_regions(
         merged_readings: dict[str, tuple[str, float | None]] = {}
         merged_missing: list[dict] = []
         merged_dropped: collections.Counter = collections.Counter()
+        # **조각 하나가 실패해도 나머지는 건진다**(2026-08-14). 예전에는 재귀 호출을
+        # 그대로 둬서 한 조각이 또 잘리면 밴드 전체가 날아갔다 — 쪼갠 의미가 없다.
+        # 잘림을 부르는 것은 보통 장식 기호 반복 퇴행이라 **특정 영역 하나**에서만
+        # 터지는데, 그 하나 때문에 같은 밴드의 멀쩡한 영역들까지 통독 후보를 잃었다.
+        failed = 0
         for chunk in (entries[:half], entries[half:]):
-            r, m, dr = read_band_regions(band, chunk)
+            try:
+                r, m, dr = read_band_regions(band, chunk)
+            except Exception:
+                failed += 1
+                merged_dropped["잘림_조각실패"] += len(chunk)
+                continue
             merged_readings.update(r)
             merged_missing += m
             merged_dropped.update(dr)
+        if failed == 2:
+            raise  # 양쪽 다 실패면 건진 게 없다 — 원래 예외를 올려 호출측이 기록한다
         merged_dropped["잘림_분할재시도"] += 1
         return merged_readings, merged_missing, merged_dropped
 

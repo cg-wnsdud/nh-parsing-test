@@ -92,6 +92,65 @@ def test_잘림이_아닌_실패는_재시도하지_않는다(monkeypatch):
     assert calls["n"] == 1, "잘림이 아니면 한 번만 시도해야 한다"
 
 
+def test_이스케이프_도중에_잘린_것도_잘림으로_본다(monkeypatch):
+    """2026-08-14 실측 — 남은 실패 10건이 전부 이 유형이었다.
+
+    잘린 자리가 하필 `\\uXXXX` 한가운데면 파서가 'Unterminated string' 이 아니라
+    'Invalid \\uXXXX escape' 를 낸다. 같은 잘림인데 유형 목록에 없어서 분할 재시도를
+    못 타고 그대로 실패했다. 응답 원문으로 확인한 꼬리는 장식 기호의 반복 퇴행이었다
+    (★ 7건 · ✨ 1건 · ⋅ 1건 · 이모지 변형자 1건, 오류 위치는 전부 응답 끝 1~5자).
+    """
+    calls: list[int] = []
+
+    def fake(parts, schema_name, schema, max_tokens):
+        rids = [ln.split("region_id=")[1].split(" ")[0]
+                for ln in parts[0]["text"].splitlines() if "region_id=" in ln]
+        calls.append(len(rids))
+        if len(rids) > 3:
+            raise RuntimeError(
+                "VLM 호출 실패(3회): Invalid \\uXXXX escape: line 1 column 2963 (char 2962)"
+            )
+        return _reply(rids)
+
+    monkeypatch.setattr(vd, "chat_json", fake)
+    readings, _, dropped = vd.read_band_regions(Image.new("RGB", (100, 100)), _entries(6))
+
+    assert len(readings) == 6, "이스케이프 잘림도 쪼개서 살려야 한다"
+    assert calls == [6, 3, 3], f"통짜 1회 실패 후 절반씩 2회여야 한다 (실제 {calls})"
+
+
+def test_한_조각이_실패해도_나머지는_건진다(monkeypatch):
+    """장식 기호 반복 퇴행은 보통 **특정 영역 하나**에서 터진다.
+
+    예전에는 재귀 호출을 그대로 둬서 그 하나 때문에 같은 밴드의 멀쩡한 영역들까지
+    통독 후보를 통째로 잃었다.
+    """
+    def fake(parts, schema_name, schema, max_tokens):
+        rids = [ln.split("region_id=")[1].split(" ")[0]
+                for ln in parts[0]["text"].splitlines() if "region_id=" in ln]
+        # p1_r000 이 낀 요청은 몇 개로 쪼개든 항상 잘린다 (별 반복 퇴행 재현)
+        if "p1_r000" in rids or len(rids) > 2:
+            raise RuntimeError("Invalid \\uXXXX escape: line 1 column 900 (char 899)")
+        return _reply(rids)
+
+    monkeypatch.setattr(vd, "chat_json", fake)
+    readings, _, dropped = vd.read_band_regions(Image.new("RGB", (100, 100)), _entries(4))
+
+    assert "p1_r000" not in readings, "못 읽은 영역은 안 담긴다(호출측이 원값 유지)"
+    assert len(readings) >= 2, f"멀쩡한 영역은 살아야 한다 (실제 {sorted(readings)})"
+    assert dropped["잘림_조각실패"] >= 1, "버린 조각이 기록돼야 한다(조용한 실패 금지)"
+
+
+def test_양쪽_다_실패하면_예외를_올린다(monkeypatch):
+    """건진 게 하나도 없으면 성공한 척하지 않는다."""
+    def fake(*a, **k):
+        raise RuntimeError("Invalid \\uXXXX escape: line 1 column 10 (char 9)")
+
+    monkeypatch.setattr(vd, "chat_json", fake)
+    with pytest.raises(RuntimeError, match="Invalid"):
+        vd.read_band_regions(Image.new("RGB", (100, 100)), _entries(4))
+
+
 def test_정상_응답은_경로가_안_바뀐다(monkeypatch):
     """회귀 확인 — 성공하는 호출은 재시도 로직을 안 탄다."""
     calls = {"n": 0}

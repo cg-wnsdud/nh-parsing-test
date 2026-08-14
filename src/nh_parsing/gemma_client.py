@@ -95,6 +95,7 @@ def chat_json(
         },
     }
     last_exc: Exception | None = None
+    last_text: str | None = None
     for attempt in range(retries + 1):
         try:
             resp = requests.post(
@@ -103,6 +104,7 @@ def chat_json(
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             text = _strip_fences(content)
+            last_text = text
             try:
                 parsed = json.loads(text)
             except json.JSONDecodeError:
@@ -120,7 +122,29 @@ def chat_json(
             if attempt < retries:
                 time.sleep(2 * (attempt + 1))
     _record(schema_name, _time.time() - _t0, cached=False)  # 실패도 시간·호출은 썼다
-    raise RuntimeError(f"VLM 호출 실패({retries + 1}회): {last_exc}")
+    raise RuntimeError(
+        f"VLM 호출 실패({retries + 1}회): {last_exc}{_failure_excerpt(last_exc, last_text)}"
+    )
+
+
+def _failure_excerpt(exc: Exception | None, text: str | None, window: int = 60) -> str:
+    """JSON 파싱 실패 시 문제 지점 원문 조각을 메시지에 붙인다.
+
+    **왜 필요한가.** 실패 원인이 잘림인지 오발행 이스케이프인지 다른 것인지 로그만
+    보고는 가를 수 없어서 추측으로 고치게 된다(2026-08-14 실측: 오발행이 여러 개라고
+    보고 반복 제거를 넣었는데 17 → 14 건으로 3건만 줄었다 — 원문이 없어 진짜 원인을
+    확인할 수 없었다). 조용한 실패 금지 원칙의 연장이다.
+
+    원문 전체는 수천 자라 로그를 덮으므로 문제 지점 앞뒤만 잘라 붙인다.
+    """
+    if not isinstance(exc, json.JSONDecodeError) or not text:
+        return ""
+    pos = max(exc.pos, 0)
+    start, end = max(0, pos - window), min(len(text), pos + window)
+    return (
+        f" | 응답 {len(text)}자, 오류 위치 {pos}"
+        f", 앞뒤 원문: ...{text[start:end]!r}..."
+    )
 
 
 def _repair_trailing_escape(text: str, max_fixes: int = 8) -> dict | None:
