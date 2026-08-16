@@ -604,7 +604,7 @@ def read_band_regions(
                 r, m, dr = read_band_regions(band, chunk)
             except Exception:
                 failed += 1
-                merged_dropped["잘림_조각실패"] += len(chunk)
+                merged_dropped["잘림_조각미채택"] += len(chunk)
                 continue
             merged_readings.update(r)
             merged_missing += m
@@ -628,6 +628,12 @@ def read_band_regions(
             continue
         if _looks_malformed(text):
             dropped["형식_파손"] += 1
+            # 무엇이 걸렸는지 안 남기면 "12개 걸렀다"만 보이고 원인을 못 쫓는다
+            # (실측 2026-08-16: 작은 이미지 2건에서 12/12·11/12 가 전부 걸려 통독 후보가
+            #  0 이 됐는데, 표본이 없어 형식 검사가 과한 건지 판독이 진짜 깨진 건지
+            #  가릴 수 없었다). 조용한 실패 금지 — 앞 2건만 표본으로 남긴다.
+            if dropped["형식_파손"] <= 2:
+                dropped[f"형식_파손_표본:{text[:60]}"] += 1
             continue
         try:
             conf = float(item.get("confidence"))

@@ -138,7 +138,7 @@ def test_한_조각이_실패해도_나머지는_건진다(monkeypatch):
 
     assert "p1_r000" not in readings, "못 읽은 영역은 안 담긴다(호출측이 원값 유지)"
     assert len(readings) >= 2, f"멀쩡한 영역은 살아야 한다 (실제 {sorted(readings)})"
-    assert dropped["잘림_조각실패"] >= 1, "버린 조각이 기록돼야 한다(조용한 실패 금지)"
+    assert dropped["잘림_조각미채택"] >= 1, "버린 조각이 기록돼야 한다(조용한 실패 금지)"
 
 
 def test_양쪽_다_실패하면_예외를_올린다(monkeypatch):

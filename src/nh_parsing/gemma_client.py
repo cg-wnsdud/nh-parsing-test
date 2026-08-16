@@ -11,6 +11,7 @@ import base64
 import io
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass
 
@@ -174,9 +175,17 @@ def _repair_trailing_escape(text: str, max_fixes: int = 8) -> dict | None:
     (truncation 대응은 이 함수 몫이 아니다).
     """
     cur = text
-    for _ in range(max_fixes):
+    for n in range(max_fixes):
         try:
-            return json.loads(cur)
+            parsed = json.loads(cur)
+            if n > 1:
+                # 여러 개를 지워야 살아났다 = 정상 이스케이프까지 갉아먹었을 수 있다.
+                # 조용히 넘기면 텍스트가 망가진 채 하류로 흘러가므로 소리를 낸다.
+                print(
+                    f"[VLM] 역슬래시 {n}개를 지워야 JSON 이 살아났다 — 텍스트 손상 가능",
+                    file=sys.stderr,
+                )
+            return parsed
         except json.JSONDecodeError as exc:
             # exc.pos 는 깨진 이스케이프의 바로 뒤 문자를 가리킨다(`\u00` 이면 'u').
             idx = cur.rfind("\\", 0, max(exc.pos, 0) + 1)
