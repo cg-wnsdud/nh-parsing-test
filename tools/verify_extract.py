@@ -4,6 +4,7 @@
 수치 지표만 내지 않고, 어떤 값이 어디서 잡혔는지/안 잡혔는지 목록으로 보여준다.
 매칭은 정규화 후 부분일치 — gold 값이 추출된 값들 중 어딘가에 담겼으면 회수된 것으로 본다.
 """
+import argparse
 import json
 import re
 import sys
@@ -61,14 +62,34 @@ def flatten_values(res: dict) -> list[tuple[str, str]]:
     return out
 
 
+# 런타임 스키마가 있는 상품군만 채점한다. 예전에는 `!= "예금성"` 한 줄로 걸러서
+# **대출성 골드가 있는데도 통째로 제외**됐다(gold/NH농협은행-2026_004-대출성.yaml).
+# 상품군이 늘면 여기만 고친다 — schemas/<상품군>.json 이 있는 것과 일치시켜야 한다.
+SUPPORTED_GROUPS = {"예금성", "대출성"}
+
+
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ext-dir", default="out/extracted",
+                    help="추출 결과 디렉터리 (프로토타입은 out_new/extracted)")
+    args = ap.parse_args()
+
     gold_dir = ROOT / "gold"
-    ext_dir = ROOT / "out" / "extracted"
-    total_hit = total = 0
+    ext_dir = ROOT / args.ext_dir
+    # 상품군별로 따로 집계한다. 합쳐 버리면 '예금성 44 + 대출성 7' 이 한 숫자가 돼
+    # 어느 쪽이 떨어졌는지 알 수 없다.
+    tally: dict[str, list[int]] = {}
 
     for gpath in sorted(gold_dir.glob("*.yaml")):
         gold = yaml.safe_load(gpath.read_text(encoding="utf-8"))
-        if gold.get("product_group") != "예금성":
+        pg = gold.get("product_group")
+        if pg not in SUPPORTED_GROUPS:
+            print(f"— 스키마 없는 상품군이라 건너뜀: {gpath.stem} ({pg})")
+            continue
+        # 규정 문서 골드(rag-data)는 광고물이 아니라 STAGE_3 대상이 아니다 —
+        # gold/(2023년)예금성상품 광고시 준수사항 이 product_group=예금성 이라 걸린다.
+        if not any(p.get("fields") for p in gold.get("pages", [])):
+            print(f"— 필드 골드가 없어 건너뜀(광고물 아님): {gpath.stem}")
             continue
         epath = ext_dir / (gpath.stem + ".json")
         if not epath.exists():
@@ -83,7 +104,8 @@ def main() -> None:
             for f in page.get("fields", []) or []:
                 gold_fields.append((f.get("key"), str(f.get("value"))))
 
-        print(f"\n{'='*78}\n■ {gpath.stem}  (ad_type={gold.get('ad_type')} / 추출={res.get('ad_type')})")
+        print(f"\n{'='*78}\n■ {gpath.stem}  [{pg}]  "
+              f"(ad_type={gold.get('ad_type')} / 추출={res.get('ad_type')})")
         print(f"  gold 기재 값 {len(gold_fields)}개 대조")
         hit = partial = 0
         for gkey, gval in gold_fields:
@@ -102,8 +124,9 @@ def main() -> None:
                 print(f"   △ {gkey}: {gval[:52]}   ← {near[0]} (수치 일치, 표기 다름)")
             else:
                 print(f"   X {gkey}: {gval[:52]}   ← 어디에도 없음")
-        total_hit += hit + partial
-        total += len(gold_fields)
+        t = tally.setdefault(pg, [0, 0])
+        t[0] += hit + partial
+        t[1] += len(gold_fields)
         c = res.get("coverage", {})
         print(f"  → 회수 {hit + partial}/{len(gold_fields)} (완전일치 {hit}, 표기차이 {partial}) | "
               f"근거커버리지 {c.get('region_coverage')} | "
@@ -114,7 +137,15 @@ def main() -> None:
             for u in gap:
                 print(f"     · {u['text'][:60]} :: {u.get('reason','')[:60]}")
 
-    print(f"\n{'='*78}\n총 회수: {total_hit}/{total}")
+    # 상품군별로 나눠 찍는다. VLM 층 지표라 실행마다 흔들리므로 단일 수치를 '성능'으로
+    # 주장하지 말 것 — 반복 관측 범위로 제시한다.
+    print(f"\n{'='*78}")
+    if not tally:
+        print("채점 대상 없음 — --ext-dir 경로에 추출 결과가 있는지 확인하라")
+        return
+    for pg in sorted(tally):
+        hit, tot = tally[pg]
+        print(f"총 회수 [{pg}]: {hit}/{tot}")
 
 
 if __name__ == "__main__":

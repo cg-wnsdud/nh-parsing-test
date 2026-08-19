@@ -1,0 +1,506 @@
+{
+  "schema_id": "대출성",
+  "version": "v1",
+  "includes": ["_common"],
+  "derived_from": "NH 준법감시부 체크리스트(LOAN-*) 36항목 + (2025년)대출성 상품 광고시 준수사항_은행연합회 + 규칙리스트 순수 대출 규칙 + 실데이터 004 파싱 결과",
+  "note": "런타임 추출 스키마. 근거 조문은 근거대장에 있고 여기엔 LLM 이 읽을 지시문만 둔다. 예금성과 대칭이지만 금리 구조가 다르다 — 예금성은 기본금리에 우대를 더하고, 대출성은 기준금리에 가산을 더한 뒤 우대를 뺀다.",
+  "applies_to": {
+    "product_group": "대출성"
+  },
+  "scope_note": "준수사항 적용제외 상품으로 예적금담보대출 등이 명시돼 있다. 해당 여부는 loan_subtype 으로 표시만 하고 이 스키마가 판정하지는 않는다.",
+  "subtypes": {
+    "field_key": "loan_subtypes",
+    "values": ["신용대출", "담보대출", "전세자금대출", "한도대출", "예적금담보대출", "기타"],
+    "multi": true,
+    "basis": "derived",
+    "status": "확인필요",
+    "why": "NH 체크리스트와 준수사항에는 대출 세부유형 분류축이 없다. 이 목록은 실데이터 광고명과 004 본문(건별대출·한도대출)에서 관측한 것을 모은 잠정 분류이므로, 연구소·준법감시부 확인 후 확정해야 한다."
+  },
+  "call_groups": [
+    {
+      "group_id": "L1_상품기본",
+      "title": "대출 상품 기본조건",
+      "instruction": "광고에 적힌 대출 자체의 기본 조건을 뽑는다. 금리는 이 그룹에서 다루지 않는다(L2 담당).",
+      "fields": [
+        {
+          "field_key": "loan_subtypes",
+          "label": "대출 세부유형",
+          "type": "list",
+          "item_type": "string",
+          "kind": "enum",
+          "enum": ["신용대출", "담보대출", "전세자금대출", "한도대출", "예적금담보대출", "기타", "판단불가"],
+          "catalog_ref": "loan/subtypes",
+          "checklist_ref": [],
+          "prompt": "이 광고가 다루는 대출의 세부유형을 배열로 담는다. 담보 없이 신용으로 빌려주면 '신용대출', 부동산 등 담보를 잡으면 '담보대출', 임차보증금 목적이면 '전세자금대출', 한도 안에서 자유롭게 빌리고 갚는 방식(마이너스통장류)이면 '한도대출', 예금·적금을 담보로 하면 '예적금담보대출'. 한 광고가 건별과 한도 방식을 함께 안내하면 둘 다 담는다. 근거가 부족하면 ['판단불가'].",
+          "obligation": "분류",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "credit_level_requirement",
+          "label": "갖춰야 할 신용수준(자격요건)",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "loan/credit_level_requirement",
+          "checklist_ref": ["LOAN-INC-05"],
+          "prompt": "대출을 받기 위해 갖춰야 하는 신용수준이나 자격요건. 직업·재직기간·소득·신용평점 기준 등 소비자가 자기가 대상인지 판단할 수 있는 기준을 담는다. 주의: 내부 심사에 따라 대출 가능 여부가 달라진다는 식의 표기는 규정이 자격요건 표시로 인정하지 않는다고 명시했다 — 그런 문구만 있으면 그 문구를 담되 note 에 '심사 재량 표기만 있음' 이라고 적는다. 없으면 not_found.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "loan_limit",
+          "label": "대출한도",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/loan_limit",
+          "checklist_ref": ["LOAN-INC-04"],
+          "prompt": "빌릴 수 있는 금액의 한도. 최대 금액과 그 조건을 함께 담는다. 금액 숫자와 단위를 바꾸지 않는다 — 한글 단위 표기와 콤마 표기가 섞여 있어도 적힌 그대로 옮긴다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "loan_period",
+          "label": "대출기간",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/loan_period",
+          "checklist_ref": ["LOAN-INC-04"],
+          "prompt": "대출 기간과 기한연장 조건. 숫자와 단위를 바꾸지 않는다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "loan_restriction",
+          "label": "대출 제한조건",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "loan/loan_restriction",
+          "checklist_ref": ["LOAN-PRO-11"],
+          "prompt": "대출 대상·자격·담보제공 등에 붙는 제한조건. 신용관리대상자 제한, 신용평가 결과에 따른 제한, 정책·시장환경 변화에 따른 조건 변경 가능 안내, 보증기관 보증한도 이내라는 제한 등이 해당한다. 관련 문장을 그대로 담는다. 여러 문장이면 이어 붙인다. 없으면 not_found.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "multi_loan_limit_notice",
+          "label": "복수대출·총한도 제한 안내",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "loan/multi_loan_limit_notice",
+          "checklist_ref": ["LOAN-PRO-10"],
+          "prompt": "한 대출을 받으면 다른 대출이 제한된다는 사실, 또는 동일인의 총 대출한도가 금융기관별로 제한돼 있다는 사실을 알리는 안내. 여러 보증기관 중 하나의 보증서로만 대출이 가능하다는 취지의 문구도 여기 담는다. 없으면 not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger", "why": "복수대출 제한이 실제로 있는 상품에만 표시 대상이 생김"}]
+          }
+        },
+        {
+          "field_key": "required_documents",
+          "label": "준비서류",
+          "type": "list",
+          "item_type": "string",
+          "kind": "collection",
+          "catalog_ref": "loan/required_documents",
+          "checklist_ref": [],
+          "prompt": "대출 신청에 필요한 서류를 종류별로 배열에 담는다. 체크리스트의 의무표시 항목은 아니지만 대출 광고에 흔히 실리는 정보이므로 유실을 막기 위해 수집한다. 없으면 빈 배열.",
+          "obligation": "수집",
+          "applicability": {"conditions": []}
+        }
+      ]
+    },
+    {
+      "group_id": "L2_금리수치",
+      "title": "대출금리 수치와 산출구조",
+      "instruction": "대출금리를 구성요소별로 분리해 뽑는다. 숫자와 단위를 절대 바꾸지 말고 광고에 적힌 그대로 옮긴다 — 퍼센트와 퍼센트포인트는 뜻이 다르므로 반드시 구분한다. 구성요소를 각각 분리해 담는 이유는, 기준금리와 가산금리를 더하고 우대금리를 뺀 값이 표기된 금리 범위와 맞는지 이후 단계가 검산할 수 있게 하려는 것이다. **광고에 적힌 수치들이 서로 안 맞아 보여도 절대 고치지 마라** — 계산이 맞게 값을 조정하면 실제 심의 지적사항이 사라진다. 안 맞는다는 사실은 note 에 적는다. OCR 정본과 VLM 후보가 갈리면 어느 쪽을 택했는지 reading_choice 에 밝히고, 확신할 수 없으면 '양쪽보존' 을 택한다.",
+      "fields": [
+        {
+          "field_key": "loan_rate_range",
+          "label": "이자율 범위·산출기준",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/loan_rate_range",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "적용 이자율의 범위와 그 산출기준을 함께 담는다. 범위는 최저에서 최고까지, 산출기준은 기준일자와 어떤 조건을 가정한 값인지를 담는다. 주의: 금리가 변동한다거나 변동 가능하다는 표기만으로는 규정이 요구하는 산출기준으로 인정되지 않는다 — 그런 표기만 있으면 그것을 담되 note 에 '변동 표기만 있고 산출기준 없음' 이라고 적는다.",
+          "derived": true,
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "min_rate",
+          "label": "최저금리",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/min_max_rate",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "적용 가능한 가장 낮은 금리. '최저'·'최소' 가 붙은 퍼센트 값이다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "max_rate",
+          "label": "최고금리",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/min_max_rate",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "적용 가능한 가장 높은 금리. 최저금리만 적혀 있고 최고금리 표기가 전혀 없으면 빈 문자열 + not_found 로 둔다 — 준수사항이 최저금리 표시 시 최고금리 병기를 요구하고, 예금성과 달리 광고면적에 관계없이 적용된다고 명시하므로 이 누락 자체가 심의 대상이다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {"rule": "trigger_any", "fields": ["min_rate"], "basis": "ledger", "why": "최저금리를 표시한 경우 최고금리 병기 의무"}
+            ]
+          }
+        },
+        {
+          "field_key": "reference_rate",
+          "label": "기준금리",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/rate_components",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "대출금리의 기초가 되는 기준금리 값. 은행 자체 기준금리든 외부 지표금리든 광고에 적힌 값을 담는다. 어떤 지표인지 밝혀져 있으면 함께 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger", "why": "금리를 구성요소로 분해해 표기한 광고에만 대상이 있음"}]
+          }
+        },
+        {
+          "field_key": "reference_rate_cycle",
+          "label": "기준금리 변동주기",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "loan/rate_components",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "기준금리가 얼마나 자주 바뀌는지에 관한 표기. 변동주기나 만기별 변동 안내, 어디서 확인할 수 있는지에 관한 안내를 함께 담는다.",
+          "obligation": "권장",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "spread_rate",
+          "label": "가산금리",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/rate_components",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "기준금리에 더해지는 가산금리 값. 신용등급별로 범위가 제시되면 그 범위를 그대로 담는다. 조건별 가산과 개인별 가산이 나뉘어 있으면 둘 다 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        },
+        {
+          "field_key": "preferential_rate_total",
+          "label": "우대금리 총 폭",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/preferential_rate",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "우대금리로 깎을 수 있는 최대 폭. 단위가 퍼센트포인트인 값이다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "trigger_any", "fields": ["preferential_rate_conditions"], "basis": "ledger"}]
+          },
+          "consistency": {
+            "relation": "sum_of",
+            "operands": ["preferential_rate_conditions"],
+            "note": "조건별 우대폭의 합이 이 값과 같아야 한다. 나열한 우대조건별 합과 언급한 우대금리가 다른 것이 실제 심의 지적사례다. 검산은 코드가 하고 LLM 은 값을 맞추려 고치지 않는다."
+          }
+        },
+        {
+          "field_key": "preferential_rate_conditions",
+          "label": "우대금리 조건별 내역",
+          "type": "list",
+          "item_type": "string",
+          "kind": "collection",
+          "catalog_ref": "loan/preferential_rate",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "우대금리를 받는 조건을 항목별로 하나씩 분리해 배열로 담는다. 각 항목은 '우대폭 : 조건' 형태로 광고 표기를 유지한다. 광고에 구분돼 있으면 구분된 대로, 뭉쳐 있으면 뭉친 채로 담는다 — 우리가 대신 쪼개거나 합치지 않는다. 조건별 우대폭이 범위로 제시되면 범위를 그대로 담는다. 없으면 빈 배열.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "rate_calc_formula",
+          "label": "금리 산출식",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/rate_calc_formula",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "대출금리가 어떻게 계산되는지 보여주는 산식이나 그 서술을 그대로 담는다. 구성요소를 더하고 빼는 형태로 적혀 있으면 각 항의 수치까지 포함해 그대로 옮긴다. **산식의 계산 결과가 표기된 금리와 맞지 않아도 절대 고치지 마라** — 산출기준 계산 오류는 실제 심의 지적유형이므로, 맞게 고치면 지적 대상이 사라진다. 안 맞아 보이면 note 에 '표기된 결과와 계산이 어긋남' 이라고 적고 값은 원문 그대로 둔다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger", "why": "산식을 제시한 광고에만 대상이 있음"}]
+          },
+          "consistency": {
+            "relation": "formula",
+            "operands": ["reference_rate", "spread_rate", "preferential_rate_total", "min_rate", "max_rate"],
+            "note": "기준금리 + 가산금리 = 최고금리, 여기서 우대금리를 빼면 최저금리라는 관계가 성립해야 한다. 실측(004)에서 이 관계가 깨진 광고가 확인됐고 그것이 심의 지적사항이었다."
+          }
+        },
+        {
+          "field_key": "rate_fixed_or_variable",
+          "label": "고정·변동금리 여부",
+          "type": "string",
+          "kind": "enum",
+          "enum": ["고정금리", "변동금리", "둘다안내", "표기없음"],
+          "catalog_ref": "loan/rate_fixed_or_variable",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "고정금리인지 변동금리인지 밝힌 표기를 고른다. 준수사항이 고정·변동금리 여부를 명확히 표기하도록 요구한다. 둘 중 어느 표기도 없으면 '표기없음' — 추측하지 마라.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "rate_reference_date",
+          "label": "금리 기준일자",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/rate_reference_date",
+          "checklist_ref": ["LOAN-PRO-01"],
+          "prompt": "제시된 금리가 어느 시점 기준인지 밝힌 날짜 표기를 담는다. 광고 안에 기준일자가 여러 번, 서로 다른 날짜로 나오면 **전부 담고** note 에 어디의 날짜인지 구분해 적는다 — 대출금리 기준일과 우대금리 기준일이 어긋난 것이 실제 심의 지적사례이므로 하나로 합치면 그 불일치가 사라진다. 날짜 숫자를 한 글자도 바꾸지 않는다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "overdue_rate",
+          "label": "연체이자율",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/overdue_rate",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "연체 시 적용되는 이자율. 대출이자율에 일정 폭을 더하는 형태로 적혀 있으면 그 형태를 그대로 담고, 상한 금리가 함께 적혀 있으면 함께 담는다. 퍼센트와 퍼센트포인트를 구분한다. 체크리스트가 연체이자율을 이자율 표시의무에 포함하므로 없으면 not_found.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "interest_charge_timing",
+          "label": "이자 부과시기",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "loan/interest_charge_timing",
+          "checklist_ref": ["LOAN-INC-07"],
+          "prompt": "이자를 언제 부과하는지에 관한 표기. 선취인지 후취인지, 어떤 주기로 납부하는지를 담는다. 선취·후취 표기 누락이 실제 심의 지적사례이므로, 주기만 적혀 있고 선취·후취 표기가 없으면 있는 대로 담고 note 에 '선취·후취 표기 없음' 이라고 적는다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "platform_rate_freshness_notice",
+          "label": "플랫폼 금리정보 시점 안내문구",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "loan/platform_rate_freshness",
+          "checklist_ref": [],
+          "prompt": "대출비교플랫폼에 실리는 광고라면, 금리정보가 광고게시 시점 기준으로 산정됐고 최신 정보는 해당 금융회사 홈페이지나 영업점에서 확인할 수 있다는 취지의 안내문구를 담는다. 준수사항이 이 문구를 유의사항이나 금리정보에 인접해 표기하도록 요구한다. 플랫폼 광고가 아니거나 문구가 없으면 not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger", "why": "대출비교플랫폼 광고에만 부과되는 의무"}]
+          }
+        },
+        {
+          "field_key": "rate_mentions",
+          "label": "금리 표기 전수",
+          "type": "list",
+          "item_type": "string",
+          "kind": "collection",
+          "catalog_ref": "loan/min_max_rate",
+          "checklist_ref": [],
+          "prompt": "광고 안에서 금리·이자율·요율이 표기된 곳을 하나도 빠뜨리지 않고 전부 배열에 담는다. 각 항목은 '표기 그대로 (region_id)' 형태로 쓴다. 수식어와 단위를 절대 바꾸지 말고 그대로 옮기고, 괄호로 묶인 부속조건(기준일·가정조건·변동주기)도 함께 담는다. 같은 금리가 큰 글씨와 상세표에 각각 적혀 있으면 둘 다 별도 항목으로 담는다. 표기가 서로 어긋나 보여도 고치지 말고 적힌 대로 담는다.",
+          "obligation": "수집",
+          "applicability": {"conditions": []}
+        }
+      ]
+    },
+    {
+      "group_id": "L3_상환과비용",
+      "title": "상환방법·중도상환·부대비용",
+      "instruction": "돈을 어떻게 갚고 무슨 비용이 드는지를 뽑는다. 금액·요율·산식의 숫자를 절대 바꾸지 않는다. 준수사항이 부대비용·중도상환수수료·고정변동 여부를 명확히 표기하도록 요구하는 영역이다.",
+      "fields": [
+        {
+          "field_key": "repayment_method",
+          "label": "원리금 상환방법",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "loan/repayment_method",
+          "checklist_ref": ["LOAN-INC-08"],
+          "prompt": "원금과 이자를 갚는 방식. 만기에 원금을 한 번에 갚는지, 매월 나눠 갚는지, 한도 안에서 자유롭게 쓰고 갚는지를 담는다. 대출 방식이 여러 개면 방식별로 이어 붙여 담는다. 자동이체 처리 안내가 함께 있으면 포함한다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "early_repayment_condition",
+          "label": "중도상환 조건",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "loan/early_repayment",
+          "checklist_ref": ["LOAN-INC-09"],
+          "prompt": "중도에 갚을 때의 조건. 언제부터 면제되는지, 어떤 경우에 면제가 안 되는지를 담는다. 수수료의 금액이나 산식은 early_repayment_fee 필드가 담으므로 여기는 조건 서술만 담는다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "early_repayment_fee",
+          "label": "중도상환해약금(수수료)",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/early_repayment",
+          "checklist_ref": ["LOAN-INC-10"],
+          "prompt": "중도상환 시 부과되는 해약금·수수료. 산식이 제시돼 있으면 산식을 그대로 담고, 적용요율이 구분별로 표에 있으면 구분과 요율을 함께 담는다. 면제 조건이 붙어 있으면 포함한다. 요율 숫자를 절대 바꾸지 않는다. 누락이 실제 심의 지적사례이므로 없으면 not_found.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "incidental_costs",
+          "label": "부대비용 종류별 내역",
+          "type": "list",
+          "item_type": "string",
+          "kind": "collection",
+          "catalog_ref": "loan/incidental_costs",
+          "checklist_ref": ["LOAN-INC-10"],
+          "prompt": "대출에 따라 발생하는 부대비용을 종류별로 하나씩 배열에 담는다. 규정이 든 종류는 인지세, 보증료와 보증료율, 담보취득비용, 국민주택채권 매입비용, 주소이전 및 소유권이전 비용, 법무사 부대비용 등이다. 각 항목은 '비용명 : 금액이나 요율 (부담주체·시점)' 형태로 광고 표기를 유지한다. 구간별로 금액이 다른 비용은 구간을 모두 담는다. 요율이 '개인별 상이' 처럼 구체 수치 없이 적혀 있으면 그 표기 그대로 담는다 — 구체적으로 기재하지 않은 것이 실제 심의 지적사례이므로 우리가 채워 넣으면 안 된다. 없으면 빈 배열.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "guarantee_fee_rate",
+          "label": "보증료·보증료율",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/incidental_costs",
+          "checklist_ref": ["LOAN-INC-10"],
+          "prompt": "보증기관 보증에 따른 보증료나 보증료율. 산식이나 요율 범위가 있으면 그대로 담고, 부담주체와 납부시점이 적혀 있으면 함께 담는다. 보증 없는 대출이면 not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger", "why": "보증기관 보증이 붙는 대출에만 대상이 있음"}]
+          }
+        },
+        {
+          "field_key": "stamp_tax",
+          "label": "수입인지세",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "loan/incidental_costs",
+          "checklist_ref": ["LOAN-INC-10"],
+          "prompt": "대출금액 구간별로 부과되는 수입인지세. 구간과 금액, 고객 부담 비율이나 금액을 모두 담는다. 구간이 여러 개면 전부 담는다 — 하나로 요약하면 구간별 표기 여부를 판정할 수 없다. 금액 숫자를 바꾸지 않는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        }
+      ]
+    },
+    {
+      "group_id": "L4_경고고지",
+      "title": "대출 전용 경고·불이익 고지",
+      "instruction": "대출성 상품에만 붙는 경고 문구를 뽑는다. 세 항목이 별도 체크리스트 항목이므로 한 문장에 함께 적혀 있어도 각각의 필드에 해당 부분을 담는다(문장 전체를 담아도 된다). 있으면 원문 그대로, 없으면 not_found. 생성 금지.",
+      "fields": [
+        {
+          "field_key": "credit_score_warning",
+          "label": "개인신용평점 하락 경고",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "loan/credit_score_warning",
+          "checklist_ref": ["LOAN-INC-16"],
+          "prompt": "상환능력에 비해 대출금액이 과도할 경우 개인신용평점이 하락할 수 있다는 사실을 알리는 문구. 해당 부분을 그대로 담는다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "credit_disadvantage_warning",
+          "label": "신용평점 하락에 따른 불이익 경고",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "loan/credit_disadvantage_warning",
+          "checklist_ref": ["LOAN-INC-17"],
+          "prompt": "개인신용평점 하락으로 금융거래와 관련된 불이익이 발생할 수 있다는 사실을 알리는 문구. 앞 항목과 한 문장에 이어져 있는 경우가 많은데, 그럴 때도 이 부분에 해당하는 서술이 실제로 있는지 확인하고 담는다 — 평점 하락만 적고 불이익 언급이 없으면 not_found 로 둔다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "acceleration_warning",
+          "label": "기한이익 상실 경고",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "loan/acceleration_warning",
+          "checklist_ref": ["LOAN-INC-18"],
+          "prompt": "일정 기간 납부해야 할 원리금이 연체되면 계약만료 기한이 오기 전에 모든 원리금을 갚아야 할 의무가 생길 수 있다는 사실을 알리는 문구. 해당 부분을 그대로 담는다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "unavailable_days_notice",
+          "label": "대출 심사·실행 불가일 안내",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "loan/unavailable_days_notice",
+          "checklist_ref": [],
+          "prompt": "대출 심사나 실행이 불가한 날이 있다는 안내(공휴일 등). 준수사항이 대출실행 관련 불리한 정보도 정확히 표시하도록 요구하며 이 안내를 예로 든다. 신속성을 강조한 광고인데 이 안내가 없으면 not_found 로 두고, 그 사실 자체는 obs_speed_exaggeration 이 관측한다.",
+          "obligation": "권장",
+          "applicability": {"conditions": []}
+        }
+      ]
+    },
+    {
+      "group_id": "L5_대출성표현관측",
+      "title": "대출성 전용 표현 관측",
+      "instruction": "값을 뽑는 그룹이 아니다. 대출성 상품 광고에만 해당하는 금지·주의 표현을 의심 후보로 수집한다. 판정하지 말고 원문 그대로 인용해 근거와 함께 모은다. 해당 문구가 없으면 빈 배열.",
+      "observation_fields": [
+        {
+          "field_key": "obs_speed_exaggeration",
+          "label": "대출실행 신속·간편성 과장",
+          "kind": "verbatim",
+          "catalog_ref": "loan/prohibit_speed_exaggeration",
+          "checklist_ref": ["LOAN-PRO-07"],
+          "prompt": "대출 심사나 실행이 매우 빠르거나 간편하다고 강조한 표현. 준수사항이 심사시간을 초 단위로 내세우는 표현과 바로 입금된다는 취지의 표현을 지양 대상으로 명시했다. 즉시성·신속성·간편성을 앞세운 문구, 짧은 시간 단위를 크게 내세운 문구가 후보다. 이 항목은 예금성에는 없고 대출성에만 있다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_daily_interest_understated",
+          "label": "대출이자 일단위 표시",
+          "kind": "verbatim",
+          "catalog_ref": "loan/prohibit_daily_interest",
+          "checklist_ref": ["LOAN-PRO-03"],
+          "prompt": "대출이자를 하루 단위 금액으로 표시해 부담이 작아 보이게 한 표현. 규정이 이를 명시적으로 금지한다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_min_rate_only_emphasis",
+          "label": "최저금리만 강조 의심",
+          "kind": "verbatim",
+          "catalog_ref": "loan/min_max_rate",
+          "checklist_ref": ["LOAN-FMT-01"],
+          "prompt": "최저금리를 크게 내세우면서 최고금리는 함께 보이지 않는 것으로 의심되는 대목. 준수사항은 최저금리에 인접해 최고금리를 표시하고 글자 크기·굵기·색상이 균형을 갖추도록 요구하며, 예금성과 달리 광고면적에 관계없이 적용된다고 못박았다. 텍스트만으로는 크기·색을 알 수 없으므로 최고금리가 아예 없거나 다른 영역으로 멀리 떨어져 있는 경우에만 담고 why 에 근거를 적는다. 대출한도와 기간만 표시한 광고는 이 의무가 적용되지 않으므로 담지 않는다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_rate_basis_vague",
+          "label": "이자율 산출기준 불충분 의심",
+          "kind": "verbatim",
+          "catalog_ref": "loan/loan_rate_range",
+          "checklist_ref": ["LOAN-INC-06"],
+          "prompt": "이자율의 범위나 산출기준을 제시하지 않고 금리가 변동한다는 취지의 표기만 둔 대목. 규정이 그런 표기는 산출기준에 해당하지 않는다고 명시했다. 금리 수치만 크게 있고 어떤 조건에서 나온 값인지 밝히지 않은 대목도 후보다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_credit_level_vague",
+          "label": "신용수준 요건 불충분 의심",
+          "kind": "verbatim",
+          "catalog_ref": "loan/credit_level_requirement",
+          "checklist_ref": ["LOAN-INC-05"],
+          "prompt": "갖춰야 할 신용수준을 제시하지 않고 내부 심사에 따라 달라진다는 취지의 표기만 둔 대목. 규정이 그런 표기는 대출 가능 여부를 판단하는 기준으로 부적합하다고 명시했다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_loan_restriction_omitted",
+          "label": "제한조건 미표기 의심",
+          "kind": "verbatim",
+          "catalog_ref": "loan/loan_restriction",
+          "checklist_ref": ["LOAN-PRO-10", "LOAN-PRO-11"],
+          "prompt": "대출 대상·자격·담보제공 등 제한이 따를 수 있는데 그 제한조건을 밝히지 않은 것으로 보이는 대목, 또는 여러 대출을 동시에 받을 수 있는 것처럼 읽히는 대목. 한도나 자격을 내세운 문구를 인용하고 why 에 어떤 제한조건이 안 보이는지 적는다. 제한조건이 광고 다른 곳에 있으면 담지 않는다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        }
+      ]
+    }
+  ]
+}

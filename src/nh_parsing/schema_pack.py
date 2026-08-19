@@ -42,17 +42,40 @@ def _load(path: Path) -> dict:
 
 
 def load_pack(product_group: str, ad_type: str | None = None) -> dict:
-    """상품군 스키마에 조건이 맞는 오버레이를 합쳐 반환한다.
+    """상품군 스키마에 공통부(includes)와 조건이 맞는 오버레이를 합쳐 반환한다.
 
-    반환: {schema_id, version, call_groups:[...], overlays_applied:[...]}
+    호출그룹 순서는 **공통부 → 상품군 → 오버레이** 다. 공통부가 앞인 이유는 은행 명칭·
+    상품명처럼 가장 기본적인 식별 정보가 거기 있고, extract 의 `_reclassify_already_handled`
+    가 먼저 뽑힌 값을 우선하기 때문이다.
+
+    반환: {schema_id, version, call_groups:[...], includes_applied:[...], overlays_applied:[...]}
     """
     base_path = SCHEMA_DIR / f"{product_group}.json"
     if not base_path.exists():
+        have = sorted(
+            p.stem for p in SCHEMA_DIR.glob("*.json") if not p.stem.startswith("_")
+        )
         raise FileNotFoundError(
-            f"상품군 스키마 없음: {base_path.name} (PoC 대상은 '예금성')"
+            f"상품군 스키마 없음: {base_path.name} (있는 것: {', '.join(have)})"
         )
     base = _load(base_path)
-    groups = list(base.get("call_groups", []))
+
+    # 공통부. 예금성·대출성이 같은 문구를 두 번 유지하지 않으려고 갈라 둔 것이므로
+    # 파일이 없으면 조용히 넘기지 않고 터뜨린다 — 필드 절반이 사라진 채 추출이 도는 것보다
+    # 낫다(실측: includes 미처리 상태에서 예금성이 62필드 대신 31필드로 로드됐다).
+    groups: list[dict] = []
+    includes: list[str] = []
+    for inc in base.get("includes", []):
+        inc_path = SCHEMA_DIR / f"{inc}.json"
+        if not inc_path.exists():
+            raise FileNotFoundError(
+                f"{base_path.name} 이 includes 로 가리킨 {inc_path.name} 이 없다"
+            )
+        shared = _load(inc_path)
+        groups.extend(shared.get("call_groups", []))
+        includes.append(shared.get("schema_id", inc))
+
+    groups.extend(base.get("call_groups", []))
     applied: list[str] = []
 
     for path in sorted(SCHEMA_DIR.glob("_overlay_*.json")):
@@ -67,11 +90,19 @@ def load_pack(product_group: str, ad_type: str | None = None) -> dict:
         groups.extend(ov.get("call_groups", []))
         applied.append(ov.get("schema_id", path.stem))
 
+    # 분류축(세부유형)을 담는 필드가 무엇이고 어떤 값이 유효한지는 스키마가 선언한다.
+    # applicability 가 이걸 읽어 **선언에 없는 값이 조건 평가를 조용히 통과하는 것**을 막는다
+    # (구 용어 '입출금(통장·MMDA)' 가 신 용어 목록에 없으면 subtype_not_in 이 그냥 통과해
+    #  없던 '미표시' 지적이 생긴다 — 실측으로 확인한 실패 경로).
+    subtypes = base.get("subtypes") or {}
     return {
         "schema_id": base.get("schema_id", product_group),
         "version": base.get("version", "v1"),
         "call_groups": groups,
+        "includes_applied": includes,
         "overlays_applied": applied,
+        "subtype_field": subtypes.get("field_key"),
+        "subtype_values": list(subtypes.get("values") or []),
     }
 
 
@@ -232,9 +263,20 @@ def check_coverage(product_group: str = "예금성") -> dict:
             if ref:
                 refs.add(ref)
 
-    sections = {"예금성": ["common", "deposit", "event_overlay"]}.get(
-        product_group, ["common", "event_overlay"]
-    )
+    # 상품군 → 근거대장 섹션 이름. 예전에는 모르는 상품군이면 조용히 ["common",
+    # "event_overlay"] 로 넘어갔는데, 그러면 **대출성을 넣어도 예금성 공통부만 재고**
+    # 그럴듯한 숫자를 돌려준다(실측: 커버 7/22 로 보고됐다). 커버리지 검사가 거짓
+    # 안심을 주면 검사가 없는 것보다 나쁘므로 모르는 상품군은 터뜨린다.
+    CATALOG_SECTIONS = {
+        "예금성": ["common", "deposit", "event_overlay"],
+    }
+    if product_group not in CATALOG_SECTIONS:
+        raise KeyError(
+            f"근거대장에 '{product_group}' 섹션이 없다 — "
+            f"{CATALOG_PATH.name} 에 항목을 넣고 CATALOG_SECTIONS 에 등록해야 한다. "
+            f"현재 등록된 상품군: {', '.join(CATALOG_SECTIONS)}"
+        )
+    sections = CATALOG_SECTIONS[product_group]
     missing, excluded = [], []
     total = 0
     for sec in sections:

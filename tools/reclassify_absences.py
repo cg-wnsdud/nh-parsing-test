@@ -61,7 +61,10 @@ def main() -> None:
         result["coverage"] = compute_coverage(view, result)
 
         c = result["coverage"]
-        print(f"▶ {path.stem}  (유형 {result['review_gaps']['product_subtype']})")
+        gaps = result["review_gaps"]
+        subs = gaps.get("product_subtypes") or []
+        mark = " ?" if gaps.get("subtype_unknown") else ""
+        print(f"▶ {path.stem}  (유형 {'+'.join(subs) or '미정'}{mark})")
         print(f"   not_found {c['fields_not_found']} → 미표시 {c['absence_missing']}"
               f"+이벤트 {c['absence_missing_in_events']} / 해당없음 {c['absence_not_applicable']}"
               f" / 판정제외 {c['absence_out_of_scope']} / 확인필요 {c['absence_needs_check']}")

@@ -79,13 +79,16 @@ def _eval_condition(cond: dict, ctx: dict) -> tuple[bool, str]:
     한 번만 두고 실행결과에는 field_key 와 코드만 남기는 규약.
     """
     rule = cond.get("rule")
-    subtype = ctx.get("product_subtype")
+    subtypes = ctx.get("product_subtypes") or []
 
     if rule in ("subtype_in", "subtype_not_in"):
         values = cond.get("values") or []
-        if not subtype or subtype == _UNKNOWN_SUBTYPE:
+        if not subtypes or ctx.get("subtype_unknown"):
             return False, "subtype_unknown"
-        inside = subtype in values
+        # 한 광고가 두 유형을 함께 다루는 사례가 실재한다(거치식·적립식 통합 등).
+        # 그럴 때는 **조건에 맞는 유형이 하나라도 있으면 대상**으로 본다 — 적립식이 섞여
+        # 있으면 만기 개념이 성립하므로 만기 관련 항목을 해당없음으로 빼면 안 된다.
+        inside = any(s in values for s in subtypes)
         ok = inside if rule == "subtype_in" else not inside
         return ok, rule
 
@@ -131,13 +134,50 @@ def classify_absence(field_key: str, spec: dict, ctx: dict) -> dict:
     return {"kind": ABSENT_MISSING, "obligation": obligation, "rule": "applicable"}
 
 
-def _context(result: dict, extra_filled: set[str] | None = None) -> dict:
-    subtype = result["fields"].get("product_subtype", {}).get("value") or None
+def _read_subtypes(result: dict, pack: dict) -> tuple[list[str], bool]:
+    """세부유형을 리스트로 읽고, 스키마가 선언한 값인지 검증한다.
+
+    반환: (유형 목록, 못 믿을 값이 섞였는가)
+
+    **검증이 이 함수의 존재 이유다.** 조건 문법은 `subtype_not_in` 처럼 부정형을 쓰는데,
+    스키마가 모르는 문자열이 들어오면 "목록에 없음" 이 참이 되어 조건이 그냥 통과하고
+    필드가 '필수·전 광고' 로 평가된다 → **없던 미표시 지적이 생긴다.** 세부유형 용어를
+    바꿨을 때(구 '입출금(통장·MMDA)' → 신 '입출식') 실제로 이 경로가 열렸다.
+    """
+    key = pack.get("subtype_field") or "product_subtype"
+    raw = result["fields"].get(key, {}).get("value")
+
+    if isinstance(raw, str):
+        vals = [raw] if raw else []
+    elif isinstance(raw, list):
+        vals = [v for v in raw if isinstance(v, str) and v]
+    else:
+        vals = []
+
+    if not vals:
+        return [], True
+    if any(v == _UNKNOWN_SUBTYPE for v in vals):
+        return [], True
+
+    declared = pack.get("subtype_values") or []
+    if declared:
+        stray = [v for v in vals if v not in declared]
+        if stray:
+            # 조용히 넘기면 허위 지적이 된다. 유형을 모르는 것으로 취급해 '확인필요' 로 보낸다.
+            return vals, True
+    return vals, False
+
+
+def _context(
+    result: dict, pack: dict, extra_filled: set[str] | None = None
+) -> dict:
+    subtypes, unknown = _read_subtypes(result, pack)
     filled = {k for k, v in result["fields"].items() if _is_filled(v)}
     if extra_filled:
         filled |= extra_filled
     return {
-        "product_subtype": subtype if isinstance(subtype, str) else None,
+        "product_subtypes": subtypes,
+        "subtype_unknown": unknown,
         "ad_type": result.get("ad_type"),
         "filled_keys": filled,
     }
@@ -150,7 +190,7 @@ def classify_absences(result: dict, pack: dict) -> dict:
     다른 이벤트에 없는 것은 별개 지적이기 때문이다.
     """
     specs = _field_specs(pack)
-    ctx = _context(result)
+    ctx = _context(result, pack)
 
     missing: list[dict] = []
     not_applicable: list[str] = []
@@ -185,7 +225,7 @@ def classify_absences(result: dict, pack: dict) -> dict:
         if not isinstance(event, dict):
             continue
         ev_filled = {k for k, v in event.items() if _is_filled(v)}
-        ev_ctx = _context(result, extra_filled=ev_filled)
+        ev_ctx = _context(result, pack, extra_filled=ev_filled)
         for key, val in event.items():
             if not isinstance(val, dict) or val.get("status") != "not_found":
                 continue
@@ -202,7 +242,8 @@ def classify_absences(result: dict, pack: dict) -> dict:
         "해당없음": sorted(not_applicable),
         "판정제외": sorted(out_of_scope),
         "확인필요": sorted(needs_check),
-        "product_subtype": ctx["product_subtype"],
+        "product_subtypes": ctx["product_subtypes"],
+        "subtype_unknown": ctx["subtype_unknown"],
     }
 
 

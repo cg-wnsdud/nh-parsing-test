@@ -23,9 +23,13 @@ def pack():
     return load_pack("예금성", "이벤트페이지")
 
 
-def _result(subtype: str, not_found: list[str], found: list[str] | None = None) -> dict:
+def _result(subtype, not_found: list[str], found: list[str] | None = None) -> dict:
+    """subtype 은 문자열 하나 또는 목록. 스키마 v2 부터 세부유형은 배열이다."""
     fields: dict = {
-        "product_subtype": {"value": subtype, "status": "found", "evidence": []},
+        "deposit_subtypes": {
+            "value": [subtype] if isinstance(subtype, str) else list(subtype),
+            "status": "found", "evidence": [],
+        },
     }
     for k in found or []:
         fields[k] = {"value": "값", "status": "found", "evidence": []}
@@ -37,9 +41,9 @@ def _result(subtype: str, not_found: list[str], found: list[str] | None = None) 
 # ───────────────────────── 상품유형 조건 ─────────────────────────
 
 
-def test_적금_중도해지이율_미표시는_지적사항(pack):
-    """002 실측 — 적금에 중도해지이율이 없으면 파싱 실패가 아니라 광고의 결함이다."""
-    result = _result("적금", ["early_termination_rate", "post_maturity_rate"])
+def test_적립식_중도해지이율_미표시는_지적사항(pack):
+    """002 실측 — 적립식에 중도해지이율이 없으면 파싱 실패가 아니라 광고의 결함이다."""
+    result = _result("적립식", ["early_termination_rate", "post_maturity_rate"])
     gaps = classify_absences(result, pack)
 
     flagged = {m["field_key"] for m in gaps["미표시"]}
@@ -52,7 +56,7 @@ def test_수시입출식은_만기항목이_해당없음(pack):
     """001·003 실측 — 만기가 없는 통장에 만기후이율을 요구하면 오탐이다."""
     keys = ["early_termination_rate", "post_maturity_rate",
             "maturity_interest_example", "contract_period"]
-    result = _result("입출금(통장·MMDA)", keys)
+    result = _result("입출식", keys)
     gaps = classify_absences(result, pack)
 
     assert gaps["미표시"] == []
@@ -60,14 +64,47 @@ def test_수시입출식은_만기항목이_해당없음(pack):
     assert result["fields"]["contract_period"]["absence"]["rule"] == "subtype_not_in"
 
 
-def test_적금전용_항목은_다른_유형에서_해당없음(pack):
-    result = _result("입출금(통장·MMDA)", ["installment_type", "deposit_kind"])
+def test_적립식전용_항목은_다른_유형에서_해당없음(pack):
+    result = _result("입출식", ["installment_type"])
     gaps = classify_absences(result, pack)
     assert gaps["미표시"] == []
 
-    result = _result("적금", ["installment_type", "deposit_kind"])
+    result = _result("적립식", ["installment_type"])
     gaps = classify_absences(result, pack)
-    assert len(gaps["미표시"]) == 2, "적금이면 적립방법·예금종류는 표시 의무다"
+    assert len(gaps["미표시"]) == 1, "적립식이면 적립방법은 표시 의무다"
+
+
+# ─────────────── 세부유형이 배열이 된 뒤 생긴 두 가지 함정 ───────────────
+
+
+def test_복수유형_광고는_한쪽만_맞아도_대상이다(pack):
+    """'거치식·적립식 통합' 광고가 실재한다(실데이터 3건).
+
+    적립식이 섞여 있으면 만기 개념이 성립하므로, 만기 관련 항목을 '해당없음'으로
+    빼면 진짜 지적사항이 조용히 사라진다.
+    """
+    keys = ["early_termination_rate", "post_maturity_rate", "contract_period"]
+    result = _result(["거치식", "적립식"], keys)
+    gaps = classify_absences(result, pack)
+
+    assert gaps["해당없음"] == [], "한쪽 유형에 성립하면 해당없음이 아니다"
+    assert {m["field_key"] for m in gaps["미표시"]} == set(keys)
+
+
+def test_스키마가_모르는_유형값은_확인필요로_간다(pack):
+    """세부유형 용어를 바꿨을 때 실제로 열렸던 조용한 실패 경로의 회귀 테스트.
+
+    구 용어 '입출금(통장·MMDA)' 는 신 스키마 enum 에 없다. 검증이 없으면
+    `subtype_not_in: ["입출식"]` 이 "목록에 없음 = 참" 으로 그냥 통과해서
+    필드가 '필수·전 광고' 로 평가되고 **없던 미표시 지적이 생긴다.**
+    """
+    keys = ["early_termination_rate", "contract_period"]
+    result = _result("입출금(통장·MMDA)", keys)
+    gaps = classify_absences(result, pack)
+
+    assert gaps["미표시"] == [], "모르는 유형값으로 허위 지적을 만들면 안 된다"
+    assert set(gaps["확인필요"]) == set(keys)
+    assert gaps["subtype_unknown"] is True
 
 
 def test_유형을_못정하면_해당없음이_아니라_확인필요(pack):

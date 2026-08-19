@@ -1,0 +1,410 @@
+{
+  "schema_id": "_common",
+  "version": "v2",
+  "note": "예금성·대출성이 함께 쓰는 공통 필드. 상품군 스키마가 includes 로 끌어온다. 근거 조문은 근거대장에 있고 여기엔 LLM 이 읽을 지시문만 둔다.",
+  "purpose": "이 계층은 심의 판정을 하지 않는다. ①OCR 정본과 VLM 후보가 갈릴 때 어느 쪽을 최종 텍스트로 채택했는지 근거와 함께 남기고, ②광고의 모든 텍스트가 어딘가에 실려 다음 단계로 넘어가게 하는 것이 목적이다.",
+  "field_kinds": {
+    "numeric": "수치를 담는 필드. OCR 은 소수점·단위를 잃고 VLM 은 숫자를 바꿔 쓰는 실측이 있어 실패 방식이 다르다 → 교차검증이 성립한다. 숫자를 절대 창작하지 않는다.",
+    "template": "규정이 요구하는 정형 문구. 광고에 있으면 원문 그대로, 없으면 빈 문자열 + not_found. 없는 문구를 만들어 채우면 심의 결과가 뒤집힌다.",
+    "verbatim": "광고가 스스로 쓴 표현. 정본이 곧 원문이다. 다듬거나 합치면 심의 대상 자체가 사라진다(표기 불일치가 심의 대상이다).",
+    "enum": "분류값. 광고 문구를 근거로 코드가 쓸 값을 고른다. 근거가 부족하면 '판단불가'.",
+    "collection": "전수 수집 배열. 같은 값이라도 표기가 다르면 합치지 않고 각각 담는다."
+  },
+  "reading_choice_enum": ["동일", "정본채택", "후보채택", "양쪽보존", "해당없음"],
+  "call_groups": [
+    {
+      "group_id": "C1_주체와상품",
+      "title": "광고 주체·상품 식별",
+      "instruction": "광고가 누구의 어떤 상품에 관한 것인지 식별하는 정보를 뽑는다. 금리·조건은 다른 그룹이 담당한다.",
+      "fields": [
+        {
+          "field_key": "advertiser_bank_name",
+          "label": "은행 명칭",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/advertiser_bank_name",
+          "checklist_ref": ["DEP-INC-01", "LOAN-INC-01"],
+          "prompt": "광고 주체인 은행의 명칭 표기. 광고 어디든 한 번이라도 표기돼 있으면 담는다. 로고 안의 글자도 판독됐다면 포함한다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "product_name",
+          "label": "상품명",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_refs": ["common/seller_name_product_content", "deposit/product_name"],
+          "checklist_ref": ["DEP-INC-04", "LOAN-INC-04"],
+          "prompt": "광고 대상 금융상품의 정식 명칭만 담는다. 은행 명칭은 별도 필드가 있으므로 앞에 붙여 쓰지 않는다 — 단 상품명 자체에 브랜드 약칭이 포함돼 있으면 그대로 둔다. 은행 명칭만 있고 상품명이 없으면 not_found. 이벤트 명칭은 상품명이 아니다. 한 광고에 여러 상품이 나오면 광고의 주 대상 하나만 담고 나머지는 unmapped 로 올린다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "review_stamp",
+          "label": "준법감시인 심의필",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/review_stamp",
+          "checklist_ref": ["DEP-INC-02", "LOAN-INC-02"],
+          "prompt": "준법감시인 심의필 표기 전체를 담는다 — 심의주체·심의필번호·유효기간이 모두 들어가야 한다. 번호나 기간 중 일부만 있으면 있는 대로 담는다(무엇이 빠졌는지는 이후 단계가 판단한다). 번호와 날짜는 한 글자도 바꾸지 않는다. 자릿수가 가려진 견본 표기(0 이나 O 가 이어진 형태)도 그대로 옮긴다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "compliance_procedure_declaration",
+          "label": "내부통제·심의절차 준수 자율선언문",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/compliance_pre_review",
+          "checklist_ref": [],
+          "prompt": "광고 자체가 법령·내부통제기준에 따른 광고 절차를 준수했다고 밝히는 문장형 선언이 있으면 그대로 담는다. 심의필 번호와는 다른 것이다 — 번호가 아니라 절차를 준수했다는 문장이다. 없다고 사전심의를 안 받은 것은 아니므로, 없으면 그냥 not_found.",
+          "obligation": "절차",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "contact_info",
+          "label": "문의처",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "common/seller_name_product_content",
+          "checklist_ref": [],
+          "prompt": "상품 가입·상담 문의처(전화번호·센터명·영업점 안내 등). 전화번호의 숫자를 바꾸지 않는다. 수신거부 전화번호는 이 필드가 아니라 전자적전송매체 그룹에 담는다.",
+          "obligation": "수집",
+          "obligation_why": "체크리스트·조문에 문의처 표시 의무 항목이 없다. 판정 등급을 주면 근거 없는 '미표시' 가 생기므로 수집으로 둔다.",
+          "applicability": {"conditions": []}
+        }
+      ]
+    },
+    {
+      "group_id": "C2_의무고지문구",
+      "title": "법령·심의기준이 요구하는 정형 문구",
+      "instruction": "규정이 반드시 광고에 넣으라고 한 문구들의 실제 표기를 뽑는다. 있으면 원문 그대로, 없으면 빈 문자열 + not_found 로 둔다. 없는 문구를 만들어 채우면 심의 결과가 뒤집히므로 절대 생성하지 않는다. 문구가 여러 줄로 쪼개져 있으면 이어 붙여 한 값으로 담는다.",
+      "fields": [
+        {
+          "field_key": "read_terms_notice",
+          "label": "설명서·약관 필독 권유",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/read_terms_notice",
+          "checklist_ref": ["DEP-INC-03", "LOAN-INC-03"],
+          "prompt": "계약 체결 전에 상품설명서와 약관을 읽어보라고 권유하는 문구. 해당 문장을 그대로 담는다. 특약·상품설명서를 읽어보라는 유사 문구도 포함한다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "right_to_explanation",
+          "label": "설명받을 권리 안내",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/right_to_explanation",
+          "checklist_ref": ["DEP-INC-12", "LOAN-INC-11"],
+          "prompt": "금융소비자보호법 제19조제1항에 따라 설명을 받을 권리가 있다는 안내 문구. 해당 문장을 그대로 담는다. 조문 번호를 인용한 형태든 안 한 형태든 둘 다 담는다.",
+          "obligation": "필수",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "fee_and_cost",
+          "label": "수수료·부대비용",
+          "type": "string",
+          "kind": "numeric",
+          "catalog_ref": "common/fee_and_cost",
+          "checklist_ref": ["DEP-INC-11", "LOAN-INC-10"],
+          "prompt": "상품 이용에 따라 발생할 수 있는 수수료·부대비용 표기. 금액·요율·산식이 있으면 숫자를 한 글자도 바꾸지 않고 담는다. 발생하지 않는다거나 면제된다는 표기도 담는다. 대출성 광고에서 부대비용이 여러 종류로 나열되면 이 필드에는 요약을 담고 종류별 내역은 대출성 스키마의 부대비용 필드에 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [
+              {"rule": "conditional", "basis": "ledger", "why": "수수료·비용이 발생하지 않는 상품에는 표시 대상이 없음"}
+            ]
+          }
+        },
+        {
+          "field_key": "stats_source",
+          "label": "통계·도표 출처",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "common/stats_source",
+          "checklist_ref": ["DEP-INC-14", "LOAN-INC-13"],
+          "prompt": "광고에 통계수치나 도표·그래프를 인용했다면 그 출처와 기준일자 표기. 인용 자체가 없으면 not_found — 그 경우 이 항목은 애초에 대상이 아니다. 주의: 금리에 붙은 기준일자 표기는 이 항목이 아니다(금리 그룹 담당).",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        },
+        {
+          "field_key": "award_cert_info",
+          "label": "수상·인증·특허 표기",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "common/award_cert_timeinfo",
+          "checklist_ref": ["DEP-INC-13", "LOAN-INC-12"],
+          "prompt": "수상·선정·인증·특허를 내세운 표기가 있으면 그 내용과 시기를 함께 담는다. 시기가 빠져 있어도 있는 대로 담는다(누락 판단은 이후 단계).",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        },
+        {
+          "field_key": "affiliated_service_condition",
+          "label": "연계·제휴서비스 조건",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "common/affiliated_service_condition",
+          "checklist_ref": ["DEP-INC-15", "LOAN-INC-14"],
+          "prompt": "연계·제휴 서비스나 부수 혜택을 광고했다면, 그 서비스를 받기 위해 충족해야 하는 조건. 다른 회사 플랫폼을 통해 판매·제휴한다는 고지(그 회사가 상품 내용에 관여하지 않는다는 취지의 문구 등)도 여기에 담는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        },
+        {
+          "field_key": "endorsement_disclosure",
+          "label": "추천·보증 경제적 이해관계 공개",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/endorsement_interest_disclosure",
+          "checklist_ref": ["DEP-INC-16", "LOAN-INC-15"],
+          "prompt": "후기·체험담·유명인·인플루언서를 활용한 광고라면, 광고주와의 경제적 이해관계를 알리는 표기를 그대로 담는다. 규정이 인정하는 표기는 경제적 대가를 받았다는 명시, 금전적 지원·대가성 광고·상품 협찬 류의 표현, 그리고 광고·협찬을 뜻하는 해시태그다. 규정이 인정하지 않는다고 열거한 표현(체험 후기·체험단·정보성 글·선물·감사 인사, 브랜드명이나 상품명만 붙인 해시태그, 협업관계를 기호로만 나타낸 것, 외국어 약어)도 발견되면 **그 표기 그대로 담고** note 에 어떤 표현이었는지 적는다 — 인정 여부 판정은 이후 단계가 한다. 추천·보증 형식이 아니면 not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        },
+        {
+          "field_key": "ai_generated_notice",
+          "label": "생성형 AI 활용 고지",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/ai_generated_notice",
+          "checklist_ref": [],
+          "prompt": "광고를 생성형 AI 로 생성·편집했다는 고지 문구가 있으면 그대로 담는다. 없으면 not_found — AI 로 만들었는지 여부 자체를 광고물만 보고 판단하지 말 것(추측 금지).",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        }
+      ]
+    },
+    {
+      "group_id": "C3_매체별고지",
+      "title": "전자적전송매체·공동광고 고지",
+      "instruction": "매체 성격에 따라 붙는 고지를 뽑는다. 해당 매체가 아니면 전부 not_found 로 두고 억지로 채우지 않는다. 매체 판정은 하지 않는다 — 문구가 있는지만 본다.",
+      "fields": [
+        {
+          "field_key": "etm_ad_marker",
+          "label": "제목 '(광고)' 표시",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/etm_ad_marker",
+          "checklist_ref": ["DEP-ETM-01", "LOAN-ETM-01"],
+          "prompt": "문자·알림톡 등 전자적 전송매체 광고의 제목 시작 부분에 붙는 '(광고)' 표기. 발견된 형태를 그대로 담는다(괄호·빈칸·부호가 규정과 달라도 고치지 말고 그대로). 제목 개념이 없는 매체면 not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger", "why": "전자적 전송매체 광고에만 부과되는 의무"}]
+          }
+        },
+        {
+          "field_key": "etm_sender_info",
+          "label": "전송자 명칭·연락처",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "common/etm_sender_info",
+          "checklist_ref": ["DEP-ETM-02", "LOAN-ETM-02"],
+          "prompt": "전송자의 명칭과 연락처 표기. 전자적 전송매체 광고가 아니면 not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        },
+        {
+          "field_key": "etm_optout",
+          "label": "수신거부·수신동의 철회 안내",
+          "type": "string",
+          "kind": "verbatim",
+          "catalog_ref": "common/etm_optout",
+          "checklist_ref": ["DEP-ETM-03", "LOAN-ETM-03"],
+          "prompt": "수신 거부나 수신동의 철회 의사를 전달할 수 있는 방법 표기. 무료전화번호 형태든 앱 내 경로 안내 형태든 적힌 그대로 담는다 — 그 방법이 해당 매체에 맞는지는 이후 단계가 판단한다. 전화번호 숫자를 바꾸지 않는다.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        },
+        {
+          "field_key": "joint_ad_insured_status",
+          "label": "자회사 부보금융기관 여부",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/joint_ad_insured_status",
+          "checklist_ref": ["DEP-JNT-01", "LOAN-JNT-01"],
+          "prompt": "금융지주회사 계열 공동광고에서 자회사 등이 예금자보호법상 부보금융기관인지 여부를 밝힌 문구. 공동광고가 아니면 not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        },
+        {
+          "field_key": "joint_ad_no_guarantee",
+          "label": "다른 자회사 채무 미보증 사실",
+          "type": "string",
+          "kind": "template",
+          "catalog_ref": "common/joint_ad_no_guarantee",
+          "checklist_ref": ["DEP-JNT-02", "LOAN-JNT-02"],
+          "prompt": "금융지주회사나 자회사가 다른 자회사의 채무를 보증하지 않는다는 사실을 밝힌 문구. 공동광고가 아니면 not_found.",
+          "obligation": "필수",
+          "applicability": {
+            "conditions": [{"rule": "conditional", "basis": "ledger"}]
+          }
+        }
+      ]
+    },
+    {
+      "group_id": "C4_전수수집",
+      "title": "빠짐없이 넘기기 위한 전수 수집",
+      "instruction": "이 그룹은 값을 '고르는' 그룹이 아니라 '하나도 빠뜨리지 않는' 그룹이다. 다른 필드에 이미 담은 것과 겹쳐도 괜찮다 — 여기서 빠지는 것이 문제다. 표기가 서로 어긋나거나 잘못 쓰인 것처럼 보여도 고치지 말고 적힌 대로 담는다(그 불일치 자체가 심의 대상이다).",
+      "fields": [
+        {
+          "field_key": "figure_mentions",
+          "label": "수치 표기 전수",
+          "type": "list",
+          "item_type": "string",
+          "kind": "collection",
+          "catalog_ref": "common/figure_mentions",
+          "checklist_ref": [],
+          "prompt": "광고 안에서 수치가 표기된 곳을 하나도 빠뜨리지 않고 전부 배열에 담는다. 금리·기간·금액·한도·요율·인원·확률·날짜가 모두 대상이다. 각 항목은 '표기 그대로 (region_id)' 형태로 쓴다. 수식어와 단위를 절대 바꾸지 말고 그대로 옮긴다 — 퍼센트와 퍼센트포인트는 뜻이 다르므로 구분하고, 앞에 붙은 수식어도 그대로 둔다. 같은 수치가 큰 글씨와 상세표에 각각 적혀 있으면 둘 다 별도 항목으로 담는다 — 같은 값이라고 합치지 마라. 목업 화면이나 견본 이미지 안의 숫자는 항목 끝에 '(장식)' 을 덧붙여 구분한다.",
+          "obligation": "수집",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "other_notices",
+          "label": "그 외 유의사항 문구",
+          "type": "list",
+          "item_type": "string",
+          "kind": "collection",
+          "catalog_ref": "common/other_notices",
+          "checklist_ref": [],
+          "prompt": "다른 어떤 필드에도 해당하지 않는 유의사항·안내 문구를 문장 단위로 배열에 담는다. 유의사항 영역의 문장이 어느 필드에도 배정되지 않고 사라지는 것을 막는 안전망이다. 이미 다른 필드에 담은 문장은 중복해 넣지 않되, 담았는지 확실하지 않으면 넣는 쪽을 택한다.",
+          "obligation": "수집",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "non_ad_text",
+          "label": "광고 내용이 아닌 텍스트",
+          "type": "list",
+          "item_type": "string",
+          "kind": "collection",
+          "catalog_ref": "common/non_ad_text",
+          "checklist_ref": [],
+          "prompt": "판독은 됐지만 광고가 소비자에게 전하려는 내용이 아닌 텍스트를 배열에 담는다. 인쇄·제작용 라벨(표지·내지·시안 등), 페이지 번호, 워터마크, 파일명, 제작부서 표기가 해당한다. 각 항목은 '표기 그대로 (region_id)' 형태로 쓴다. 지우지 않고 여기 모으는 이유는, 이 텍스트가 심의 대상 문구로 잘못 올라가는 것도 막고 동시에 유실되지도 않게 하기 위함이다. 판단이 애매하면 여기 넣지 말고 other_notices 로 보낸다.",
+          "obligation": "수집",
+          "applicability": {"conditions": []}
+        }
+      ]
+    },
+    {
+      "group_id": "C5_공통표현관측",
+      "title": "금지·주의 표현 관측 (공통)",
+      "instruction": "값을 뽑는 그룹이 아니다. 규정이 금지하거나 주의를 요구하는 표현이 광고에 있는지 '의심 후보'로 수집한다. 최종 위반 판정은 이후 심의 단계가 하므로 단정하지 말고, 해당될 수 있는 문구를 원문 그대로 인용해 근거와 함께 모은다. 해당 문구가 없으면 빈 배열로 두고 억지로 만들지 않는다. quote 는 광고에 적힌 문자열 그대로여야 한다 — 요약하거나 다듬으면 안 된다.",
+      "observation_fields": [
+        {
+          "field_key": "obs_definitive_expression",
+          "label": "단정적·확정적 표현",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_definitive",
+          "checklist_ref": ["DEP-PRO-01", "LOAN-PRO-01"],
+          "prompt": "확정되지 않은 사항을 확정적으로 말하는 표현. 금리·혜택·비용이 조건에 따라 달라지는데 단정적으로 적었는지를 본다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_variability_omitted",
+          "label": "변동 가능성 표기 누락 의심",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_definitive",
+          "checklist_ref": ["DEP-PRO-01", "LOAN-PRO-01"],
+          "prompt": "거래조건이 바뀔 수 있는데 그 가능성을 알리는 표기 없이 값만 제시한 것으로 보이는 대목. 값을 제시한 문구를 인용하고, why 에 어떤 변동 가능성 표기가 안 보이는지 적는다. 변동 가능성 안내가 광고 다른 곳에 있으면 이 항목에 담지 않는다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_superlative",
+          "label": "근거 없는 최상급 표현",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_superlative",
+          "checklist_ref": ["DEP-PRO-05", "LOAN-PRO-05"],
+          "prompt": "규정이 열거한 최상급 표현(최고·최상·최저·최초·최대·1위·제일·유일)이 다른 상품이나 다른 기관과 비교해 우위를 주장하는 맥락으로 쓰인 경우. 주의: 금리 수치에 붙은 '최고'·'최대'·'최저' 는 상품 조건을 나타내는 정상 표기이므로 여기에 넣지 않는다 — 그건 금리 필드가 담는다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_condition_generalization",
+          "label": "거래조건 일반화 오인",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_condition_generalization",
+          "checklist_ref": ["DEP-PRO-04", "LOAN-PRO-04"],
+          "prompt": "사람마다 달라지는 조건을 누구나 받을 수 있는 것처럼 읽히게 한 표현. 조건 충족이 필요한 혜택을 조건 없이 제시했는지를 본다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_comparison",
+          "label": "근거 없는 비교우위",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_comparison",
+          "checklist_ref": ["DEP-PRO-02", "DEP-PRO-08", "LOAN-PRO-02", "LOAN-PRO-08"],
+          "prompt": "다른 상품이나 다른 금융기관보다 유리하다고 하면서 비교대상이나 기준을 밝히지 않은 표현.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_exaggerate_or_conceal",
+          "label": "과장·은폐·축소 의심",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_false_exaggerate_deceive",
+          "checklist_ref": ["DEP-PRO-07", "LOAN-PRO-07"],
+          "prompt": "혜택을 부풀리거나 불리한 사실을 감추거나 작게 다룬 것으로 의심되는 표현.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_burden_understated",
+          "label": "경제적 부담 축소 오인",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_burden_understated",
+          "checklist_ref": ["DEP-PRO-03", "LOAN-PRO-03"],
+          "prompt": "부담을 작아 보이게 하거나 이익을 크게 인지하게 만드는 표현.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_seller_identity_obscured",
+          "label": "판매업자 인지 방해",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_seller_identity_obscured",
+          "checklist_ref": ["DEP-PRO-06", "LOAN-PRO-06"],
+          "prompt": "광고매체나 판매대리·중개업자의 상호를 부각시켜, 실제로 상품을 판매하는 은행이 누구인지 알아보기 어렵게 만든 것으로 보이는 대목. 제휴 플랫폼 이름이 은행 이름보다 앞이나 크게 나온 경우가 후보다. 플랫폼이 상품에 관여하지 않는다는 고지가 함께 있으면 why 에 그 사실을 적는다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_benefit_source_confusion",
+          "label": "혜택 제공주체 혼동 의심",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_benefit_source_confusion",
+          "checklist_ref": ["DEP-PRO-09", "LOAN-PRO-09"],
+          "prompt": "제휴사가 주는 혜택(포인트·충전금·쿠폰 등)과 은행이 주는 이자·금리가 한데 섞여 제시돼, 어느 쪽이 무엇을 주는지 헷갈리게 읽히는 대목. 특히 제휴사 혜택이 금리처럼 더해지는 형태로 적힌 경우가 후보다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        },
+        {
+          "field_key": "obs_darkpattern",
+          "label": "다크패턴 의심",
+          "kind": "verbatim",
+          "catalog_ref": "common/prohibit_darkpattern",
+          "checklist_ref": [],
+          "prompt": "소비자를 몰아세우거나 판단을 흐리게 만드는 표현·구성. 규정이 든 네 유형은 ①명확한 근거 없이 거짓 광고를 하거나 사실을 축소·은폐·조작해 주의나 흥미를 일으키는 것, ②중요정보를 숨기거나 작게 다뤄 비교를 어렵게 하는 것, ③가입 과정에서 관계없는 부수상품을 끼워 안내하는 것, ④첫 화면에 유리한 숫자만 보여주고 비용이나 조건을 뒤에서 차츰 공개하는 것이다. 정적 이미지만으로는 화면 흐름을 알 수 없으므로 문구에서 드러나는 경우에만 담고, 확신이 없으면 why 에 '문구만으로는 불확실'이라고 적는다.",
+          "obligation": "관측",
+          "applicability": {"conditions": []}
+        }
+      ]
+    }
+  ]
+}
