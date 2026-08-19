@@ -325,3 +325,41 @@ def test_값이_있는_이벤트는_남긴다():
     prune_empty_events(result)
     assert len(result["events"]) == 1
     assert "events_pruned" not in result
+
+
+def test_인용문이_빈_관측은_하류로_넘기지_않는다():
+    """2026-08-19 v2 실측 — 관측항목 49건 중 41건이 빈 quote 였다.
+
+    관측할 게 없으면 빈 배열을 내야 하는데, strict 스키마가 항목의 '모양'만 강제하고
+    '만들지 마라'는 강제하지 못해 {quote:"", evidence:[], why:""} 한 칸이 채워져 온다.
+    관측은 하류가 그대로 신뢰하는 '의심 후보'라 유령을 넘기면 없는 위반이 생긴다.
+    """
+    from nh_parsing.extract import prune_empty_observations
+
+    result = {"observations": {
+        "obs_superlative": [
+            {"quote": "업계 유일", "evidence": ["p1_r003"], "why": "최상급"},
+            {"quote": "", "evidence": [], "why": ""},
+        ],
+        "obs_definitive_expression": [{"quote": "   ", "evidence": [], "why": ""}],
+        "obs_comparison": [],
+    }}
+    prune_empty_observations(result)
+
+    assert len(result["observations"]["obs_superlative"]) == 1
+    assert result["observations"]["obs_definitive_expression"] == []
+    assert result["observations_pruned"]["total"] == 2
+    assert result["observations_pruned"]["dropped_per_field"] == {
+        "obs_superlative": 1, "obs_definitive_expression": 1,
+    }
+
+
+def test_인용문이_있는_관측만_있으면_기록을_남기지_않는다():
+    from nh_parsing.extract import prune_empty_observations
+
+    result = {"observations": {
+        "obs_superlative": [{"quote": "최초", "evidence": ["p1_r001"], "why": "최상급"}],
+    }}
+    prune_empty_observations(result)
+    assert len(result["observations"]["obs_superlative"]) == 1
+    assert "observations_pruned" not in result

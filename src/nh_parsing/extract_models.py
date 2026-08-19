@@ -150,6 +150,21 @@ class EventsPruned(BaseModel):
     array_length: int
 
 
+class ObservationsPruned(BaseModel):
+    """인용문이 빈 관측 항목 제거 기록 — prune_empty_observations.
+
+    실측(2026-08-19, v2 스키마 5문서): 관측항목 49건 중 41건이 빈 quote 였다.
+    관측할 게 없으면 빈 배열을 내야 하는데 `{quote:"", evidence:[], why:""}` 한 칸을
+    채워 보낸다. 그대로 두면 하류 심의가 없는 금지표현 관측을 그만큼 받는다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    dropped_per_field: dict[str, int]
+    total: int
+    reason: str
+
+
 class ExtractResult(BaseModel):
     """extract_document() 의 최종 반환 계약 — out/extracted/*.json 이 이 모양이어야 한다.
 
@@ -179,6 +194,7 @@ class ExtractResult(BaseModel):
 
     event_count_reported: int | None = None
     events_pruned: EventsPruned | None = None
+    observations_pruned: ObservationsPruned | None = None
     review_gaps: dict[str, Any] = Field(default_factory=dict)
     input_gap: list[dict[str, Any]] = Field(default_factory=list)
     evidence_unbacked: list[str] = Field(default_factory=list)

@@ -19,6 +19,10 @@ from nh_parsing.applicability import check_schema_metadata  # noqa: E402
 from nh_parsing.extract import extract_document  # noqa: E402
 from nh_parsing.schema_pack import check_coverage, load_pack  # noqa: E402
 
+# 런타임 스키마(schemas/<상품군>.json)가 있는 상품군만 추출한다. 예전에는 `!= "예금성"`
+# 한 줄이라 **대출성 문서가 추출 자체를 못 받았다** — verify_extract.py 의 같은 결함과 쌍이다.
+SUPPORTED_GROUPS = {"예금성", "대출성"}
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -34,14 +38,21 @@ def main() -> None:
     parse_dir = ROOT / args.parse_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 근거대장 커버리지는 대장 섹션이 있는 상품군만 잴 수 있다(현재 예금성뿐).
     cov = check_coverage("예금성")
     print(f"[스키마] 근거대장 텍스트항목 {cov['catalog_text_items']}개 중 {cov['covered']}개 반영, "
           f"미반영 {len(cov['missing'])}건 / 스키마 필드 {cov['schema_field_count']}개")
-    print(f"[스키마] 호출그룹: {', '.join(cov['call_groups'])}")
-    meta_problems = check_schema_metadata(load_pack("예금성", "이벤트페이지"))
-    if meta_problems:
-        # 의무등급·적용조건이 빠진 필드는 '필수·전 광고'로 평가돼 없던 미표시를 만든다
-        print(f"[스키마] !! 부재 판정 메타 누락 {len(meta_problems)}건: {meta_problems[:5]}")
+    # 부재 판정 메타는 상품군마다 따로 봐야 한다 — 의무등급·적용조건이 빠진 필드는
+    # '필수·전 광고'로 평가돼 없던 미표시를 만든다.
+    for _pg in sorted(SUPPORTED_GROUPS):
+        pack = load_pack(_pg, "이벤트페이지")
+        n = sum(len(g.get("fields", [])) + len(g.get("observation_fields", []))
+                for g in pack["call_groups"])
+        print(f"[스키마] {_pg}: 호출그룹 {len(pack['call_groups'])}개 · 필드 {n}개 "
+              f"({', '.join(g['group_id'] for g in pack['call_groups'])})")
+        meta_problems = check_schema_metadata(pack)
+        if meta_problems:
+            print(f"[스키마] !! {_pg} 부재 판정 메타 누락 {len(meta_problems)}건: {meta_problems[:5]}")
     print()
 
     summary = []
@@ -50,8 +61,8 @@ def main() -> None:
             continue
         view = json.loads(path.read_text(encoding="utf-8"))
         pg = view.get("product_group")
-        if pg != "예금성":
-            print(f"— 건너뜀: {path.name} (product_group={pg}, PoC 대상 아님)")
+        if pg not in SUPPORTED_GROUPS:
+            print(f"— 건너뜀: {path.name} (product_group={pg}, 런타임 스키마 없음)")
             continue
 
         print(f"▶ {path.name}  ({view.get('ad_type')})")

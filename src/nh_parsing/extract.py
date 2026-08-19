@@ -145,8 +145,24 @@ def _prompt(group: dict, doc_text: str) -> str:
 
 
 def _max_tokens(group: dict) -> int:
-    n = len(group.get("fields", []) or group.get("observation_fields", []))
-    return min(8000, 400 * n + 1500)
+    """이 호출그룹의 응답 상한.
+
+    필드 수로만 재면 **전수수집 그룹이 큰 문서에서 잘린다.** 배열 필드의 길이는 필드
+    개수가 아니라 **문서 크기**에 비례하기 때문이다 — 실측(2026-08-19,
+    `5. 예금성상품(입출식)` 197영역): C4_전수수집은 필드가 3개뿐이라 상한이
+    400*3+1500=2700 토큰이었는데 응답이 3835자에서 문자열 중간에 끊겨 3회 재시도까지
+    전부 실패했고, 그 그룹의 세 필드가 결과에 키조차 없이 사라졌다.
+    하필 유실을 막는 안전망 그룹이라 조용한 유실 방지가 통째로 무력화된다.
+
+    그래서 배열(list/collection) 필드에는 별도 여유를 준다.
+    """
+    fields = group.get("fields", []) or group.get("observation_fields", [])
+    n = len(fields)
+    n_list = sum(
+        1 for f in fields
+        if f.get("type") == "list" or f.get("kind") == "collection"
+    )
+    return min(8000, 400 * n + 1800 * n_list + 1500)
 
 
 # value 칸에 값 대신 '없음'을 뜻하는 말을 적어 보내는 경우 — 문자열이라 bool() 로는
@@ -295,6 +311,7 @@ def extract_document(view: dict, *, product_group: str | None = None,
 
     _reclassify_already_handled(result)
     prune_empty_events(result)
+    prune_empty_observations(result)
     # 미발견 필드의 3분류(해당없음 / 미표시 / 확인필요) — 코드 전용, LLM 호출 없음.
     # not_found 한 통에 뭉쳐 두면 심의 지적사항(미표시)을 골라낼 수 없다.
     result["review_gaps"] = classify_absences(result, pack)
@@ -385,6 +402,39 @@ def _reclassify_already_handled(result: dict) -> None:
         # 2차: 토큰 겹침 비율(어순이 달라진 의역) — 뽑힌 값 전체를 배경 텍스트로 본다.
         if check_field_consistency(u.get("text", ""), extracted_blob) >= _RECLASSIFY_TOKEN_RATIO:
             u["kind"] = "다른항목에서_처리됨"
+
+
+def prune_empty_observations(result: dict) -> None:
+    """인용문이 빈 관측 항목을 걷어낸다. 조용히 지우지 않고 사실을 남긴다.
+
+    실측(2026-08-19, v2 스키마 5문서): 관측항목 49건 중 **41건이 빈 quote** 였다.
+    관측할 게 없을 때 빈 배열을 내는 대신 `{quote:"", evidence:[], why:""}` 한 칸을
+    채워 보낸다 — strict 스키마가 배열 항목의 모양은 강제해도 '항목을 만들지 마라'는
+    강제하지 못하기 때문이다([[vlm-strict-schema-empty-array]] 와 같은 뿌리, 다른 증상).
+
+    그대로 두면 하류 심의 단계가 **있지도 않은 금지표현 관측 41건**을 받는다.
+    관측은 '의심 후보'라 하류가 그대로 신뢰하는 값이므로 유령을 넘기면 안 된다.
+    프롬프트로 막기보다 코드가 검산한다(이벤트의 prune_empty_events 와 같은 처리).
+    """
+    obs = result.get("observations") or {}
+    if not obs:
+        return
+    dropped: dict[str, int] = {}
+    for key, items in list(obs.items()):
+        if not isinstance(items, list):
+            continue
+        kept = [o for o in items
+                if isinstance(o, dict) and (o.get("quote") or "").strip()]
+        n = len(items) - len(kept)
+        if n:
+            dropped[key] = n
+            obs[key] = kept
+    if dropped:
+        result["observations_pruned"] = {
+            "dropped_per_field": dropped,
+            "total": sum(dropped.values()),
+            "reason": "인용문이 빈 관측 — 하류가 없는 위반 후보를 보게 된다",
+        }
 
 
 def prune_empty_events(result: dict) -> None:
