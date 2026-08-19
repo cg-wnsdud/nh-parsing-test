@@ -287,3 +287,60 @@ def ingest_hwp(
     if skipped:
         doc.notes.append(f"장식 내장 이미지 {skipped}개 스킵 (크기 필터)")
     return doc
+
+
+def table_to_html(table, depth: int = 0) -> str | None:
+    """TableIR → 농협 KL 이 요구하는 HTML `<table>` 문자열.
+
+    **왜 필요한가.** 농협 KL 규격은 `table` item 의 `value` 가 HTML `<table>` 이어야
+    한다고 못박고, 정답 샘플도 `<table cols=2 rows=7><tr><td>용어</td>…` 형식이다
+    (`out_sample_hrc.jsonl` 실물). 그런데 우리는 `_tables_to_lines()` 로 표를 **행 단위
+    평문**(`'용어 | 설명'`)으로 눌러 왔다. 구조를 이미 갖고 있는데 버리고 있었던 것이라,
+    표를 표로 넘기려면 이 함수가 필요하다.
+
+    `iter_cell_positions()` 를 쓰는 이유는 `_struct_table_rows()` 와 같다 — `markdown()`
+    은 병합 셀을 걸친 칸 수만큼 반복 출력해서 '값이 진짜로 같은 이웃 칸'과 구분이 안 된다.
+    구조 API 는 병합 셀을 **논리 셀 하나로 한 번만** 돌려준다.
+
+    `cols`/`rows` 속성값은 정답 샘플의 형식을 그대로 따른다. 실제 셀이 없는 행은 건너뛰되
+    `rows` 는 파서가 준 `row_count` 를 쓴다 — 원본 표의 크기를 신고하는 값이라 우리가
+    센 것으로 바꾸면 뜻이 달라진다.
+
+    구조 API 가 없거나 셀이 하나도 없으면 None 을 돌려준다. 호출측은 그때 평문 경로로
+    되돌아가면 된다 — **표가 아닌 것을 표로 신고하지 않는 것**이 이 함수의 계약이다.
+    """
+    if depth > 3 or not hasattr(table, "iter_cell_positions"):
+        return None
+    try:
+        positions = list(table.iter_cell_positions())
+    except Exception:
+        return None
+    if not positions:
+        return None
+
+    by_row: dict[int, list[tuple[int, str]]] = {}
+    for row, col, cell in positions:
+        by_row.setdefault(row, []).append((col, _cell_render(cell, depth)))
+
+    body: list[str] = []
+    for row in sorted(by_row):
+        cells = [text for _, text in sorted(by_row[row])]
+        if not any(c.strip() for c in cells):
+            continue
+        body.append("<tr>" + "".join(f"<td>{_html_escape(c)}</td>" for c in cells) + "</tr>")
+    if not body:
+        return None
+
+    col_count = int(getattr(table, "col_count", 0) or max(len(v) for v in by_row.values()))
+    row_count = int(getattr(table, "row_count", 0) or len(by_row))
+    return f"<table cols={col_count} rows={row_count}>" + "".join(body) + "</table>"
+
+
+def _html_escape(text: str) -> str:
+    """셀 안의 `<`·`&` 가 태그로 오해되지 않게 한다. 줄바꿈은 `<br>` 로 살린다.
+
+    셀 안에 줄바꿈이 실재한다(중첩표를 인라인한 셀). 그냥 두면 HTML 에서 공백 하나로
+    접혀 '한 줄이었던 것'과 구분이 안 된다.
+    """
+    out = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return out.replace("\n", "<br>")

@@ -54,13 +54,26 @@ def test_coordinates_never_leak_into_embedding_slots() -> None:
             assert "_c0" not in value and "_img_" not in value, value
 
 
-def test_table_chunk_becomes_text_not_table() -> None:
-    """우리 table 청크의 text 는 HTML 이 아니다 → table item 으로 신고하면 거짓이 된다."""
+def test_table_chunk_without_html_falls_back_to_text() -> None:
+    """구조 API 를 못 읽어 table_html 이 없으면 text item 폴백 — table 로 신고하면 거짓이 된다."""
     items, notes = build_items(_doc([{"chunk_id": "c1", "kind": "table", "text": "Ⅰ. 목적", "heading": None}]))
     body = [i for i in items if i["item"] != "image"]
     assert [i["item"] for i in body] == ["text"]
     assert body[0]["cust_meta"][0] == {"name": "cust_attr1", "value": "table"}
-    assert any("table 청크" in n for n in notes)
+    assert any("text item 으로 내보냈다" in n for n in notes)
+
+
+def test_table_chunk_with_html_becomes_table_item() -> None:
+    """`table_html` 이 있으면(hwp_ingest.table_to_html) 규격이 요구하는 그대로 table item."""
+    items, notes = build_items(_doc([{
+        "chunk_id": "c1", "kind": "table", "text": "용어 | 설명", "heading": None,
+        "table_html": "<table cols=2 rows=1><tr><td>용어</td><td>설명</td></tr></table>",
+    }]))
+    body = [i for i in items if i["item"] != "image"]
+    assert [i["item"] for i in body] == ["table"]
+    assert body[0]["value"] == "<table cols=2 rows=1><tr><td>용어</td><td>설명</td></tr></table>"
+    assert body[0]["type_property"] == {"title": ""}  # 규격: table item 은 title 필수
+    assert any("table item(HTML)" in n for n in notes)
 
 
 def test_image_caption_goes_out_as_text_and_image() -> None:

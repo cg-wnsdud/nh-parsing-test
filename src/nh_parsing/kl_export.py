@@ -110,9 +110,10 @@ def build_items(rag_doc: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str
     | RagChunk.kind   | KL item        | 왜 |
     |---|---|---|
     | `text`          | `text`         | 그대로 |
-    | `table`         | **`text`**     | 우리 table 청크의 `text` 는 HTML 이 아니라 평문이다(실측: "Ⅰ. 목적", "Ⅲ. 일반원칙"). KL 의 `table` item 은 `value` 가 HTML `<table>` 이어야 하므로, 평문을 `<table>` 로 감싸면 표가 아닌 것을 표로 신고하는 것이 된다. 원래 kind 는 `cust_attr1` 에 남긴다 |
+    | `table` (HTML 있음) | **`table`** | `RagChunk.table_html` 이 있으면 그대로 `value` 로 쓴다(`hwp_ingest.table_to_html`, `TableIR.iter_cell_positions()` 로 병합 셀을 논리 셀 하나로 렌더) |
+    | `table` (HTML 없음) | `text`      | 구조 API 가 없거나 셀을 못 읽은 경우의 폴백. 청크의 `text` 는 평문(실측: "Ⅰ. 목적")이라 `<table>` 로 감싸면 표가 아닌 것을 표로 신고하는 것이 된다. 원래 kind 는 `cust_attr1` 에 남긴다 |
     | `image_caption` | **`text`**     | KL 의 `image` item 은 `value` 가 파일명이고 캡션을 담을 곳이 `type_property.title` 뿐인데, 그 title 이 임베딩 대상인지 규격에 없다. readme "VectorDB 활용 예"에서 본문으로 임베딩되는 것은 `TEXT` 의 `value` 다 → 캡션은 text item 으로 넣어 검색에 걸리게 한다. 이미지 파일 자체는 별도 `image` item + `_img.zip` |
-    | `ocr_page`      | `text`         | 사내 파서가 건너뛴 스캔 페이지를 OCR 로 복원한 것. **정본 신뢰도가 낮다**는 사실을 `cust_attr4="ocr"` 로 남긴다 |
+    | `ocr_page`      | `text`         | 사내 파서가 건너뛴 스캔 페이지에서 디지털 텍스트로 못 얻은 **이미지 내용만** OCR 로 복원한 것. **정본 신뢰도가 낮다**는 사실을 `cust_attr4="ocr"` 로 남긴다. 같은 페이지의 디지털 텍스트는 별도 `text` 청크로 이미 나갔다 |
 
     `heading` 이 있으면 그 청크 **앞에** `h1`~`h4` item 을 넣는다. KL 은 h 아이템을
     "이후 본문의 meta" 로 적용하므로(readme:300) 순서가 뜻을 만든다. 같은 제목이
@@ -126,11 +127,13 @@ def build_items(rag_doc: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str
     notes: list[str] = []
     last_heading: str | None = None
     table_as_text = 0
+    table_as_html = 0
     caption_as_text = 0
 
     for chunk in rag_doc.get("chunks", []):
         kind = chunk.get("kind") or "text"
         text = (chunk.get("text") or "").strip()
+        table_html = (chunk.get("table_html") or "").strip()
         heading = (chunk.get("heading") or "").strip()
         chunk_id = chunk.get("chunk_id") or ""
         asset_id = chunk.get("asset_id") or ""
@@ -139,36 +142,34 @@ def build_items(rag_doc: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str
             items.append({"item": heading_level(heading), "value": heading})
             last_heading = heading
 
-        if not text:
+        if not text and not (kind == "table" and table_html):
             continue
 
+        meta = _cust_meta(
+            attrs=[
+                kind,                                   # attr1 원래 청크 종류
+                chunk_id,                               # attr2 우리 산출물과 대조
+                asset_id,                               # attr3 캡션의 원본 이미지
+                "ocr" if kind == "ocr_page" else "digital",  # attr4 정본 신뢰도
+            ],
+            sattrs=[
+                doc_title,                              # sattr1 출처 문서명 (검색어)
+                pgroup,                                 # sattr2 상품군 (검색 필터)
+                heading or (last_heading or ""),        # sattr3 조항 제목
+            ],
+        )
+        # `page` 는 0 으로 낸다. RagChunk 에 페이지 정보가 없고, 규격이 "페이지 번호를
+        # 알 수 없는 경우에는 0" 을 허용한다. 농협 정답 샘플도 141줄 전부 page=0 이었다.
+        if kind == "table" and table_html:
+            table_as_html += 1
+            items.append({"item": "table", "value": table_html,
+                          "type_property": {"title": ""}, "page": 0, "cust_meta": meta})
+            continue
         if kind == "table":
             table_as_text += 1
         elif kind == "image_caption":
             caption_as_text += 1
-
-        # `page` 는 0 으로 낸다. RagChunk 에 페이지 정보가 없고, 규격이 "페이지 번호를
-        # 알 수 없는 경우에는 0" 을 허용한다. 농협 정답 샘플도 141줄 전부 page=0 이었다.
-        items.append(
-            {
-                "item": "text",
-                "value": text,
-                "page": 0,
-                "cust_meta": _cust_meta(
-                    attrs=[
-                        kind,                                   # attr1 원래 청크 종류
-                        chunk_id,                               # attr2 우리 산출물과 대조
-                        asset_id,                               # attr3 캡션의 원본 이미지
-                        "ocr" if kind == "ocr_page" else "digital",  # attr4 정본 신뢰도
-                    ],
-                    sattrs=[
-                        doc_title,                              # sattr1 출처 문서명 (검색어)
-                        pgroup,                                 # sattr2 상품군 (검색 필터)
-                        heading or (last_heading or ""),        # sattr3 조항 제목
-                    ],
-                ),
-            }
-        )
+        items.append({"item": "text", "value": text, "page": 0, "cust_meta": meta})
 
     # 이미지 파일 자체. `value` 는 **파일명**으로 낸다 — 규격서(readme)가 "이미지
     # 파일명" 이라고 적었다. 정답 샘플은 절대경로였지만(`/HYB008/datasets/...`) 그건
@@ -193,11 +194,13 @@ def build_items(rag_doc: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str
                 }
             )
 
+    if table_as_html:
+        notes.append(f"table 청크 {table_as_html}개를 table item(HTML)으로 내보냈다.")
     if table_as_text:
         notes.append(
-            f"table 청크 {table_as_text}개를 text item 으로 내보냈다 — 청크의 text 가 "
-            f"HTML 이 아니라 평문이어서 KL 의 table item 규격(value=HTML <table>)을 "
-            f"만족할 수 없다. 원래 kind 는 cust_attr1 에 남겼다."
+            f"table 청크 {table_as_text}개는 text item 으로 내보냈다 — 구조 API 를 "
+            f"못 읽어 HTML 을 못 만든 폴백. 감싸면 표가 아닌 것을 표로 신고하는 것이 "
+            f"되므로 평문 그대로 냈다. 원래 kind 는 cust_attr1 에 남겼다."
         )
     if caption_as_text:
         notes.append(

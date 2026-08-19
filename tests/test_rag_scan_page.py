@@ -77,7 +77,7 @@ def test_스킵페이지가_다음쪽_앵커_앞에_끼워진다(monkeypatch, pa
     assert kinds == ["text", "text", "ocr_page", "text"], kinds
     restored = doc.chunks[2]
     assert restored.chunk_id == "D_p003_ocr"
-    assert restored.heading == "[3쪽 — OCR 복원]"
+    assert restored.heading == "[3쪽 — 이미지 내 텍스트]"
     assert "2. 예시" in restored.text
     # 판독본임을 하류가 알 수 있어야 한다 (정본 아님)
     assert any("OCR" in n for n in restored.notes)
@@ -126,3 +126,63 @@ def test_글자를_한_건도_못_읽으면_빈_청크를_안_만든다(monkeypa
 
     assert [c.kind for c in doc.chunks] == ["text"]
     assert any("글자 0건" in n for n in doc.notes)
+
+
+def _fake_page(digital_text: str):
+    """`.get_textpage().get_text_bounded()` 가 `digital_text` 를 돌려주는 가짜 페이지."""
+    return SimpleNamespace(get_textpage=lambda: SimpleNamespace(get_text_bounded=lambda: digital_text))
+
+
+def test_디지털_텍스트가_있으면_정확한_문장으로_먼저_들어간다(monkeypatch, patched):
+    """실측(2026-08-19, 대출성 준수사항 3쪽): 렌더+OCR 은 '[1] 최저·최고금리 병기'의
+    띄어쓰기를 깬다('[1]최저·최고금리 병기'). pypdfium2 디지털 텍스트는 정확하다."""
+    monkeypatch.setattr(
+        "pypdfium2.PdfDocument",
+        lambda _p: [_fake_page(""), _fake_page(""), _fake_page("[1] 최저·최고금리 병기"), _fake_page("")],
+    )
+    monkeypatch.setattr(rag_ingest, "_page_lead_text", lambda _pdf, _i: "어디에도없는글자")
+    doc = _doc(["가"])
+
+    rag_ingest._ocr_skipped_pdf_pages(Path("x.pdf"), _docir([3]), doc)
+
+    digital = next(c for c in doc.chunks if c.kind == "text" and c.chunk_id == "D_p003_digital")
+    assert digital.text == "[1] 최저·최고금리 병기"  # 띄어쓰기 보존
+    assert any("디지털 텍스트 복원" in n for n in doc.notes)
+
+
+def test_디지털_텍스트와_겹치는_OCR_줄은_버리고_새_내용만_남긴다(monkeypatch, patched):
+    """OCR 라인 중 '2. 예시'는 디지털 텍스트와 같은 내용 → 버려야 한다.
+    이미지 안에만 있던 나머지(연4.4% 등)만 ocr_page 청크로 남아야 한다."""
+    monkeypatch.setattr(
+        "pypdfium2.PdfDocument",
+        lambda _p: [_fake_page(""), _fake_page(""), _fake_page("2. 예시"), _fake_page("")],
+    )
+    monkeypatch.setattr(rag_ingest, "_page_lead_text", lambda _pdf, _i: "어디에도없는글자")
+    monkeypatch.setattr(
+        "nh_parsing.paddlex_client.request_layout_parsing",
+        lambda _img: SimpleNamespace(ocr_lines=[
+            Line(text="2. 예시", bbox=[0, 0, 10, 10], source="ocr"),      # 디지털과 중복
+            Line(text="연4.4%", bbox=[0, 10, 10, 20], source="ocr"),      # 이미지 전용 내용
+        ]),
+    )
+    doc = _doc(["가"])
+
+    rag_ingest._ocr_skipped_pdf_pages(Path("x.pdf"), _docir([3]), doc)
+
+    kinds = [c.kind for c in doc.chunks]
+    assert kinds.count("text") == 2   # 원본 1줄 + 복원된 디지털 텍스트 1줄
+    ocr_chunk = next(c for c in doc.chunks if c.kind == "ocr_page")
+    assert ocr_chunk.text == "연4.4%"          # 중복 줄은 빠졌다
+    assert "2. 예시" not in ocr_chunk.text
+
+
+def test_디지털_텍스트가_없어도_OCR은_그대로_동작한다(monkeypatch, patched):
+    """3.13 이하 등 get_textpage 가 실패하는 경우 — 예외를 삼키고 기존 OCR 경로로."""
+    monkeypatch.setattr("pypdfium2.PdfDocument", lambda _p: ["p0", "p1", "p2", "p3"])
+    monkeypatch.setattr(rag_ingest, "_page_lead_text", lambda _pdf, _i: "어디에도없는글자")
+    doc = _doc(["가"])
+
+    rag_ingest._ocr_skipped_pdf_pages(Path("x.pdf"), _docir([3]), doc)
+
+    assert [c.kind for c in doc.chunks] == ["text", "ocr_page"]
+    assert not any(c.chunk_id.endswith("_digital") for c in doc.chunks)

@@ -29,15 +29,19 @@ from pydantic import BaseModel, Field
 
 from .assets import decode_asset_image, is_decorative, iter_assets
 from .gemma_client import chat_json, image_part
-from .hwp_ingest import _paragraph_text, _tables_to_lines
+from .hwp_ingest import _paragraph_text, _tables_to_lines, table_to_html
 
 
 class RagChunk(BaseModel):
     chunk_id: str
-    kind: str  # text | table | image_caption
+    kind: str  # text | table | image_caption | ocr_page
     heading: str | None = None   # 청크가 속한 조항/제목 (출처 표시용)
     text: str
     asset_id: str | None = None  # image_caption 청크의 원본 asset 키
+    # 표 청크의 HTML 표현. `text` 는 사람이 읽는 평문(미리보기·검색용)이고 이쪽은
+    # 농협 KL 의 `table` item 이 요구하는 `<table>` 문자열이다. 구조 API 가 없거나
+    # 셀이 비면 None — 그때 하류는 text item 으로 낸다(표가 아닌 것을 표로 신고하지 않는다).
+    table_html: str | None = None
     notes: list[str] = Field(default_factory=list)
 
 
@@ -64,8 +68,8 @@ def _is_heading(text: str) -> bool:
     return len(text) <= 80 and bool(_HEADING_RE.match(text))
 
 
-def _chunk_blocks(blocks: list[tuple[str, str]], doc_id: str) -> list[RagChunk]:
-    """(kind, text) 문서 순서 블록 → 제목 경계·길이 상한 기준 청크."""
+def _chunk_blocks(blocks: list[tuple[str, str, str | None]], doc_id: str) -> list[RagChunk]:
+    """(kind, text, table_html) 문서 순서 블록 → 제목 경계·길이 상한 기준 청크."""
     chunks: list[RagChunk] = []
     buf: list[str] = []
     heading: str | None = None
@@ -80,12 +84,12 @@ def _chunk_blocks(blocks: list[tuple[str, str]], doc_id: str) -> list[RagChunk]:
             ))
             buf = []
 
-    for kind, text in blocks:
+    for kind, text, table_html in blocks:
         if kind == "table":
             flush()
             chunks.append(RagChunk(
                 chunk_id=f"{doc_id}_c{len(chunks):03d}",
-                kind="table", heading=heading, text=text,
+                kind="table", heading=heading, text=text, table_html=table_html,
             ))
             continue
         if _is_heading(text):
@@ -139,12 +143,47 @@ def _page_lead_text(pdf, page_index: int, take: int = 24) -> str:
     return re.sub(r"\s+", "", text)[:take]
 
 
+def _insert_at_anchor(doc: RagDocument, pdf, page_no: int, chunk: RagChunk) -> None:
+    """`chunk` 를 스킵된 `page_no` 다음 쪽이 시작하는 자리 앞에 끼운다.
+
+    DocIR 문단에는 쪽 번호가 없다(실측: `native_anchor.debug_path` 가 전부 `s1.pN`).
+    그래서 다음 쪽의 첫 글자를 텍스트 레이어에서 읽어, 그 글자로 시작하는 청크 **앞**에
+    복원 청크를 끼운다. 못 찾으면 문서 말미에 붙인다.
+    """
+    anchor = _page_lead_text(pdf, page_no)  # 다음 쪽(0-based 인덱스 = page_no)
+    idx = None
+    if anchor:
+        idx = next(
+            (i for i, c in enumerate(doc.chunks)
+             if anchor[:12] and anchor[:12] in re.sub(r"\s+", "", c.text)),
+            None,
+        )
+    if idx is None:
+        chunk.notes.append("다음 쪽 앵커를 못 찾음 — 문서 말미 부착")
+        doc.chunks.append(chunk)
+    else:
+        doc.chunks.insert(idx, chunk)
+
+
 def _ocr_skipped_pdf_pages(path: Path, docir, doc: RagDocument) -> None:
-    """사내 파서가 건너뛴 스캔형 페이지를 렌더+OCR 해 청크로 복원한다.
+    """사내 파서가 건너뛴 스캔형 페이지를 복원한다 — 디지털 텍스트 우선, 이미지만 OCR.
 
     광고 트랙에서 이미 쓰는 부품(canvas 렌더 · tiling · PaddleX)만 재사용하고,
     역할 판정·카드 분할·필드 추출 같은 광고 전용 단계는 **타지 않는다** —
     법령 조문에 '제목/유의사항' 역할은 의미가 없고 비용만 든다.
+
+    **왜 디지털 텍스트를 먼저 읽나** (2026-08-19 실측, 대출성 준수사항 3쪽). 사내
+    파서가 이 페이지를 `skipped` 로 표시한 건 "문단 추출에 실패했다"는 뜻이지
+    "텍스트가 없다"는 뜻이 아니다. `pypdfium2` 로 직접 읽으면 캡션 4줄(69자,
+    `[1] 최저·최고금리 병기` 등)이 정확한 띄어쓰기로 나온다. 예전 구현은 이 페이지를
+    통째로 렌더해 OCR 했는데, 그 결과 같은 4줄이 `[1]최저·최고금리 병기`처럼
+    띄어쓰기가 깨졌다 — 렌더 이미지를 다시 판독하면서 생긴 손실이지 원본 결함이
+    아니다. 반면 스크린샷 예시 안의 수치(`연4.4%`, `연7.50%~13.30%` 등)는 디지털
+    텍스트 레이어에 없다 — 그건 진짜 이미지라 OCR 이 필요한 부분이다.
+
+    그래서 순서를 둘로 나눈다: ① 디지털 텍스트를 그대로 청크로 낸다(정확) ②
+    렌더+OCR 은 계속하되, 디지털 텍스트와 정규화 후 일치하는 줄은 **버리고** 남는
+    줄만 청크로 낸다 — 그 남는 줄이 이미지 안에만 있던 내용이다.
     """
     pages = getattr(docir, "pages", None) or []
     skipped = [
@@ -167,6 +206,23 @@ def _ocr_skipped_pdf_pages(path: Path, docir, doc: RagDocument) -> None:
         return
 
     for page_no in skipped:
+        digital_text = ""
+        try:
+            digital_text = pdf[page_no - 1].get_textpage().get_text_bounded() or ""
+        except Exception:
+            pass
+        digital_lines = [ln.strip() for ln in digital_text.splitlines() if ln.strip()]
+        seen = {re.sub(r"\s+", "", d) for d in digital_lines}
+
+        if digital_lines:
+            _insert_at_anchor(doc, pdf, page_no, RagChunk(
+                chunk_id=f"{doc.doc_id}_p{page_no:03d}_digital",
+                kind="text",
+                heading=f"[{page_no}쪽]",
+                text="\n".join(digital_lines),
+            ))
+            doc.notes.append(f"{page_no}쪽 디지털 텍스트 복원 ({len(digital_lines)}줄, {len(digital_text)}자)")
+
         try:
             pdf_page = pdf[page_no - 1]
             # 스캔형은 내장 래스터의 네이티브 해상도로 렌더한다 — 업스케일하면
@@ -181,35 +237,31 @@ def _ocr_skipped_pdf_pages(path: Path, docir, doc: RagDocument) -> None:
             doc.notes.append(f"{page_no}쪽 OCR 복원 실패: {exc}")
             continue
 
-        text = "\n".join(ln.text.strip() for ln in lines if ln.text.strip())
+        # 디지털 텍스트로 이미 확보한 줄은 뺀다 — 남는 건 이미지(스크린샷) 안에만
+        # 있던 내용이다. 그게 이 페이지를 OCR 하는 진짜 이유다.
+        new_lines = [
+            ln for ln in lines
+            if ln.text.strip() and re.sub(r"\s+", "", ln.text.strip()) not in seen
+        ]
+        text = "\n".join(ln.text.strip() for ln in new_lines)
         if not text:
-            doc.notes.append(f"{page_no}쪽 OCR 복원 — 글자 0건 (빈 쪽이거나 판독 실패)")
+            if not digital_lines:
+                doc.notes.append(f"{page_no}쪽 OCR 복원 — 글자 0건 (빈 쪽이거나 판독 실패)")
             continue
 
         chunk = RagChunk(
             chunk_id=f"{doc.doc_id}_p{page_no:03d}_ocr",
             kind="ocr_page",
-            heading=f"[{page_no}쪽 — OCR 복원]",
+            heading=f"[{page_no}쪽 — 이미지 내 텍스트]",
             text=text,
             notes=[
-                f"사내 파서가 스캔형으로 건너뛴 쪽(라인 {len(lines)}개)을 OCR 로 복원. "
-                "디지털 추출이 아니라 판독이므로 정본 신뢰도가 낮다."
+                f"사내 파서가 스캔형으로 건너뛴 쪽에서, 디지털 텍스트로 못 얻은 "
+                f"이미지 내용만 OCR 로 복원(전체 {len(lines)}줄 중 {len(new_lines)}줄). "
+                "판독이므로 정본 신뢰도가 낮다."
             ],
         )
-        anchor = _page_lead_text(pdf, page_no)  # 다음 쪽(0-based 인덱스 = page_no)
-        idx = None
-        if anchor:
-            idx = next(
-                (i for i, c in enumerate(doc.chunks)
-                 if anchor[:12] and anchor[:12] in re.sub(r"\s+", "", c.text)),
-                None,
-            )
-        if idx is None:
-            chunk.notes.append("다음 쪽 앵커를 못 찾음 — 문서 말미 부착")
-            doc.chunks.append(chunk)
-        else:
-            doc.chunks.insert(idx, chunk)
-        doc.notes.append(f"{page_no}쪽 OCR 복원 완료 (라인 {len(lines)}개, {len(text)}자)")
+        _insert_at_anchor(doc, pdf, page_no, chunk)
+        doc.notes.append(f"{page_no}쪽 OCR 복원 완료 ({len(new_lines)}줄, {len(text)}자)")
 
 
 def caption_image(img: Image.Image) -> dict:
@@ -239,16 +291,19 @@ def ingest_rag_file(path: Path, asset_dir: Path | None = None) -> RagDocument:
         return doc
 
     # 1) 텍스트·표 → 문서 순서 블록 → 청크
-    blocks: list[tuple[str, str]] = []
+    blocks: list[tuple[str, str, str | None]] = []
     for para in docir.paragraphs:
         text = _paragraph_text(para).strip()
         if text:
-            blocks.append(("text", text))
+            blocks.append(("text", text, None))
         for node in getattr(para, "content", []) or []:
             if type(node).__name__ == "TableIR":
                 rows = _tables_to_lines(node)
                 if rows:
-                    blocks.append(("table", "\n".join(rows)))
+                    # 평문은 미리보기·검색용, HTML 은 농협 KL `table` item 용. 둘 다
+                    # 남긴다 — 사람이 읽는 화면에 태그를 뿌리지 않으면서 규격도
+                    # 만족하려면 필요하다. table_to_html 이 구조를 못 읽으면 None.
+                    blocks.append(("table", "\n".join(rows), table_to_html(node)))
     doc.chunks = _chunk_blocks(blocks, doc.doc_id)
 
     # 1-b) 사내 파서가 조용히 건너뛴 스캔형 PDF 페이지 → 렌더 + OCR 복원
