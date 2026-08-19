@@ -43,3 +43,7 @@ out_*/
 # README 어디서도 참조하지 않아 팀 문서로서 필요하지도 않다. 로컬에는 그대로 둔다.
 code-readling-prac.md
 out_*.log
+
+# 검수 화면 — tools/make_review.py 가 다시 만든다 (5~50MB)
+docs/parsing-review.html
+docs/review.html
