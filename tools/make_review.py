@@ -264,6 +264,9 @@ _RELATION_VIEW = {
     "tail_cut":  ("뒷부분 잘림 — 정본이 더 완전", "rel-bad"),
     "diverged":  ("정본과 불일치 — 원본 확인 필요", "rel-bad"),
     "expanded":  ("정본보다 많이 읽음 — 회수 가능", "rel-good"),
+    # 범람은 겉보기가 expanded 와 같아(정본보다 길다) 예전엔 초록 '회수 가능'으로 떴다.
+    # 오염인데 이득으로 보이던 자리다 — pipeline._swallowed_regions 주석 참조.
+    "overflow":  ("다른 영역 내용을 삼킴 — 근거 채택 금지", "rel-bad"),
     "head_drop": ("앞 항목명 생략 — 값은 온전", "rel-ok"),
     "same":      ("표기 차이", "rel-ok"),
 }
@@ -561,7 +564,7 @@ def _stage3_html(page: dict, extracted: dict | None, is_first_page: bool) -> tup
     parts.append("</tbody></table>")
 
     summary = (
-        f'② STAGE_3 스키마 추출 결과'
+        f'② STAGE_3 스키마 추출 결과 <span class="draftnote">(스키마는 초안 단계)</span>'
         f'<span class="meta">있음 {counts["ok"]} · 없음 {counts["na"]} · '
         f'확신낮음 {counts["warn"]} · <b class="miss-inline">미표시 {counts["miss"]}</b> · '
         f'근거커버리지={extracted.get("coverage", {}).get("region_coverage")}</span>'
@@ -937,6 +940,7 @@ details.evidencewrap > summary, details.noteswrap > summary { background:#f6f8fa
 .ibadge { font-size:10px; background:#8b949e; color:#fff; padding:1px 6px; border-radius:8px; margin-left:8px; }
 .pill.illus { background:#eef1f4; color:#57606a; }
 .sechead .meta { font-weight:normal; color:#8b949e; font-size:11px; }
+.draftnote { font-weight:normal; color:#7d4e00; font-size:11px; }
 .line { display:flex; align-items:baseline; gap:8px; padding:2px 10px; font-size:13px; line-height:1.5; }
 .line:hover { background:#f6f8fa; }
 .line.low { background:#fff8c5; }
@@ -1027,7 +1031,7 @@ _ACTOR_META = {
 # 그룹만 그림 기준으로 다시 묶었다. <span class="gaptag"> 표시가 붙은 항목은 그림에는 없지만
 # 실제로 있는 동작이다 — 그림 한 장에 다 담을 수 없어 빠진 것들.
 _PHASES: list[tuple[str, str, str, list[tuple[str, str, str, str]]]] = [
-    ("①", "광고 파일 입력", "PDF · PNG · HWP — 오늘 기준 샘플 5건(PDF 2 · PNG 2 · HWP 1)", [
+    ("①", "광고 파일 입력", "PDF · PNG · JPG · HWP", [
         ("", "입력 형식별 시작점", "code",
          "이미지는 그 자체가 캔버스(=이후 모든 좌표의 기준). PDF 는 페이지를 렌더해 캔버스를 만든다. "
          "HWP 는 캔버스가 없다 — 좌표가 없어 미리보기·하이라이트를 못 만드는 대신 0.7~1.6초에 끝난다."),
@@ -1170,11 +1174,12 @@ def _pipeline_diagram_html() -> str:
     if not uri:
         return '<p class="nodiagram">다이어그램 이미지를 못 찾았습니다 (docs/architecture/pipeline-diagram.png).</p>'
     steps = [
-        ("①입력", "PDF · PNG · HWP. 오늘 기준 샘플 5건(PDF 2 · PNG 2 · HWP 1)."),
-        ("②라우팅", "이미지는 곧장 OCR. PDF는 페이지마다 <code>structured</code>(디지털 텍스트가 정본 → "
-         "OCR 생략) / <code>hybrid</code>(이미지 비중↑ — 5문서에서 한 번도 안 탐, 고도화 보류 중) / "
-         "<code>scan_like</code>(스캔 이미지 → OCR) 로 나눈다. HWP는 사내 파서가 정본이라 이 판정이 "
-         "없다(0.7~1.6초)."),
+        ("①입력", "PDF · PNG · JPG · HWP. 건수·형식 분포는 아래 문서 목록이 실제 값이다."),
+        ("②라우팅", "이미지는 곧장 OCR(트리아지 없음 — 텍스트 레이어가 아예 없어 판정할 대상이 없다). "
+         "PDF는 페이지마다 <code>structured</code>(디지털 텍스트가 정본 → OCR 생략) / "
+         "<code>hybrid</code>(이미지 면적비 50% 이상 → 디지털 텍스트 + 전면 OCR 병행) / "
+         "<code>scan_like</code>(글자 20자 이하·인코딩 깨짐·PUA 난독 → 전면 OCR) 로 나눈다. "
+         "HWP는 사내 파서가 정본이라 이 판정이 없다(0.7~1.6초)."),
         ("③조각 분할", "세로로 긴 이미지를 글자 밀도 기준으로 최대 1600px 씩 자른다."),
         ("④StructureV3(+OCR)", "조각당 1회 호출로 글자·좌표·레이아웃 블록을 함께 받는다."),
         ("⑤좌표 복원·영역 조립", "겹치게 잘랐던 조각 좌표를 되돌리고, 라인 중심점이 들어가는 블록에 "
