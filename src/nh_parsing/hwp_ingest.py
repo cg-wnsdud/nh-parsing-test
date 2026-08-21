@@ -20,7 +20,8 @@ from PIL import Image
 
 from .assets import decode_asset_image, is_decorative, iter_assets
 from .gemma_client import filename_prior
-from .ir import AdDocument, AdPage, Line, Region
+from .ir import AdDocument, AdPage, Line, Region, TextStyle
+from .text_style import fold
 
 _ANCHOR_RE = re.compile(r"^\[tbl:[^\]]+\]$")   # 표 뒤에 붙는 중첩표 앵커 라인(단독)
 _TOKEN_RE = re.compile(r"\[tbl:[^\]]+\]")      # 셀 안에 박힌 중첩표 참조 토큰
@@ -58,6 +59,57 @@ def _cell_render(cell, depth: int) -> str:
     return joined or _squash(getattr(cell, "text", ""))
 
 
+def _run_atoms(runs) -> list[tuple]:
+    """RunIR 목록 → `text_style.StyleAtom` 목록. 글자수만큼 반복해 담는다.
+
+    **왜 글자수만큼인가.** 대표값을 글자수 최다로 뽑으므로(text_style.fold) run 하나를
+    한 표로 세면 35pt 한 글자가 10pt 서른 글자를 이긴다. 실측(`004-대출성.hwp`):
+    `『`(30pt) · `공무원`(35pt) · `을 위한`(24pt) 이 각각 별 run 이다.
+    """
+    atoms: list[tuple] = []
+    for run in runs or []:
+        text = getattr(run, "text", None) or ""
+        if not text.strip():
+            continue
+        style = getattr(run, "run_style", None)
+        if style is None:
+            continue
+        color = getattr(style, "color", None)
+        atom = (
+            getattr(style, "size_pt", None),
+            getattr(style, "bold", None),
+            color.upper() if isinstance(color, str) and color else None,
+            getattr(style, "font_family", None),
+        )
+        atoms.extend([atom] * len(text.strip()))
+    return atoms
+
+
+def _cell_runs(cell) -> list:
+    """셀 하나가 품은 모든 run. 중첩표 안의 run 도 포함된다.
+
+    `paragraph.iter_all_runs()` 가 문단이 품은 표 셀까지 내려간다 — 실측(`004-대출성.hwp`):
+    문단 1개(content=TableIR 하나)에서 run 141개가 나오고 그중 138개가 표 안이다.
+    그래서 중첩표를 따로 훑을 필요가 없다.
+    """
+    runs: list = []
+    for para in getattr(cell, "paragraphs", None) or []:
+        try:
+            runs.extend(para.iter_all_runs())
+        except Exception:
+            continue
+    return runs
+
+
+def _paragraph_style(para) -> TextStyle | None:
+    """문단이 직접 들고 있는 run(표 밖)의 시인성. 표는 행 단위로 따로 붙인다."""
+    runs = [
+        node for node in getattr(para, "content", None) or []
+        if type(node).__name__ != "TableIR" and getattr(node, "run_style", None) is not None
+    ]
+    return fold(_run_atoms(runs), basis="declared", source="hwp_run")
+
+
 def _struct_table_rows(table, depth: int = 0) -> list[str] | None:
     """TableIR 구조에서 행 문자열을 만든다 (markdown 문자열 파싱 대신).
 
@@ -76,6 +128,17 @@ def _struct_table_rows(table, depth: int = 0) -> list[str] | None:
 
     파서가 이 API 를 제공하지 않으면 None 을 돌려 markdown 경로로 되돌아간다.
     """
+    styled = _struct_table_rows_styled(table, depth)
+    return None if styled is None else [text for text, _ in styled]
+
+
+def _struct_table_rows_styled(table, depth: int = 0) -> list[tuple[str, TextStyle | None]] | None:
+    """`_struct_table_rows` 의 본체. 행 문자열과 **그 행의 시인성**을 함께 돌려준다.
+
+    행 텍스트와 스타일을 한 함수에서 같이 만드는 이유는 **정렬을 보장**하기 위해서다.
+    행 목록과 스타일 목록을 따로 만들면 빈 셀 걸러내기 조건이 갈리는 순간 한 칸씩
+    밀려 엉뚱한 행에 크기가 붙는다.
+    """
     if depth > 3 or not hasattr(table, "iter_cell_positions"):
         return None
     try:
@@ -84,16 +147,19 @@ def _struct_table_rows(table, depth: int = 0) -> list[str] | None:
         return None
 
     by_row: dict[int, list[tuple[int, str]]] = {}
+    runs_by_row: dict[int, list] = {}
     for row, col, cell in positions:
         text = _cell_render(cell, depth)
         if text:
             by_row.setdefault(row, []).append((col, text))
+            runs_by_row.setdefault(row, []).extend(_cell_runs(cell))
 
-    rows: list[str] = []
+    rows: list[tuple[str, TextStyle | None]] = []
     for row in sorted(by_row):
         cells = [t for _, t in sorted(by_row[row])]
         if cells:
-            rows.append(" | ".join(cells))
+            style = fold(_run_atoms(runs_by_row.get(row)), basis="declared", source="hwp_run")
+            rows.append((" | ".join(cells), style))
     return rows
 
 
@@ -119,7 +185,12 @@ def _md_cell_rows(md_lines: list[str]) -> list[list[str]]:
 
 
 def _tables_to_lines(table) -> list[str]:
-    """TableIR → 행 단위 텍스트. 중첩 표(표 안의 표)를 부모 셀 자리에 인라인한다.
+    """`_tables_to_rows` 의 텍스트만. rag 트랙(rag_ingest)과 기존 시험이 이 형태를 쓴다."""
+    return [text for text, _ in _tables_to_rows(table)]
+
+
+def _tables_to_rows(table) -> list[tuple[str, TextStyle | None]]:
+    """TableIR → 행 단위 (텍스트, 시인성). 중첩 표(표 안의 표)를 부모 셀 자리에 인라인한다.
 
     사내 파서 markdown 은 중첩표 셀을 ``[tbl:<경로>]`` 토큰으로 남기고, 표 뒤에
     같은 토큰을 앵커로 붙여 중첩표 markdown 을 나열하는 각주 방식이다(004 실측).
@@ -131,7 +202,7 @@ def _tables_to_lines(table) -> list[str]:
     구조 API 가 있으면 그쪽을 쓴다 — markdown 문자열은 병합 셀을 반복 출력해서
     '값이 같은 이웃 칸'과 구분이 안 된다(_struct_table_rows 주석 참조).
     """
-    structural = _struct_table_rows(table)
+    structural = _struct_table_rows_styled(table)
     if structural is not None:
         return structural
 
@@ -176,7 +247,8 @@ def _tables_to_lines(table) -> list[str]:
             break
 
     # ③ 본 표 셀의 토큰을 중첩표 평문으로 치환 후 행 문자열 생성
-    rows: list[str] = []
+    # 폴백 경로는 스타일을 못 붙인다 — markdown 문자열에 run 정보가 없다. None 으로 둔다.
+    rows: list[tuple[str, TextStyle | None]] = []
     for cells in _md_cell_rows(main_lines):
         replaced = [
             _TOKEN_RE.sub(lambda m: nested.get(m.group(0)[5:-1], ""), c).strip()
@@ -188,7 +260,7 @@ def _tables_to_lines(table) -> list[str]:
             if cell and (not collapsed or collapsed[-1] != cell):
                 collapsed.append(cell)
         if collapsed:
-            rows.append(" | ".join(collapsed))
+            rows.append((" | ".join(collapsed), None))
     return rows
 
 
@@ -232,11 +304,15 @@ def ingest_hwp(
     for para in docir.paragraphs:
         text = _paragraph_text(para)
         if text.strip():
-            lines.append(Line(text=text.strip(), source="digital"))
+            lines.append(
+                Line(text=text.strip(), source="digital", style=_paragraph_style(para))
+            )
         for node in getattr(para, "content", []) or []:
             if type(node).__name__ == "TableIR":
-                for row_text in _tables_to_lines(node):
-                    lines.append(Line(text=row_text, source="digital"))
+                # 광고 HWP 는 표가 본체다 — 실측(`004-대출성.hwp`): run 141개 중 138개가
+                # 표 안이다. 그래서 표 행에 시인성을 못 붙이면 사실상 아무것도 못 붙는다.
+                for row_text, row_style in _tables_to_rows(node):
+                    lines.append(Line(text=row_text, source="digital", style=row_style))
 
     page = AdPage(
         page_no=1,

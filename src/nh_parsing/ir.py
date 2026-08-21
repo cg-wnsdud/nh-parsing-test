@@ -18,11 +18,49 @@ ParseRoute = Literal["digital", "ocr", "hybrid"]
 ParseStatus = Literal["ok", "partial", "unreadable"]
 
 
+# 크기 값이 어떻게 얻어진 것인가. 둘은 **서로 다른 물리량**이므로 섞어 비교하면 안 된다.
+#   declared — 문서가 선언한 글자 크기 그대로 (HWP `RunIR.run_style.size_pt`)
+#   fontbox  — 글꼴칸(loose charbox) 높이를 pt 로 환산한 값 (PDF). 실제 선언 크기보다
+#              크다(글꼴 메트릭의 ascent+descent 를 포함). PDF 는 선언 크기를 못 믿는다 —
+#              실측(2026-08-21, 광고 PDF 3건 전수): `FPDFText_GetFontSize` 가 모든 글자에
+#              1.0pt 를 돌려준다. 크기를 텍스트 행렬로 주는 문서라 명목값이 무의미하다.
+# 같은 문서 안에서는 basis 가 일정하므로 **상대 비교(제목 대 유의사항)는 두 경우 다 유효**하다.
+SizeBasis = Literal["declared", "fontbox"]
+
+
+class TextStyle(BaseModel):
+    """라인의 시인성 — 글자 크기·굵기·색.
+
+    **왜 담나.** 심의 항목 `DEP-FMT-01`/`LOAN-FMT-01`("글자 색깔·크기 또는 음성 속도·크기
+    등이 혜택과 불이익을 균형 있게 전달하는가")은 텍스트만으로 판정이 불가능하다. 실제
+    심의사례에도 `유의사항 문구 글자크기 작음`(대출성 #2) 지적이 있다. 파서가 주는 값을
+    버리지 않고 담기만 한다 — **어느 크기부터 위반인가(판정)는 여기서 하지 않는다.**
+
+    **왜 대표값과 범위를 함께 담나.** 한 라인에 여러 스타일이 섞인다. 실측(2026-08-21,
+    `NH농협은행-2026_004-대출성.hwp`): 같은 표 행에 35pt 헤드라인(`공무원`)과 10pt 본문이
+    같이 오고, 8.5pt 심의필 문구가 따로 있다(최대/최소 4.1배). 대표값 하나로 접으면 그
+    격차가 사라진다.
+    """
+
+    size_pt: Optional[float] = None       # 대표 크기 — 글자수가 가장 많은 값
+    size_pt_min: Optional[float] = None
+    size_pt_max: Optional[float] = None
+    size_basis: Optional[SizeBasis] = None
+    bold: Optional[bool] = None           # 라인에 굵은 글자가 하나라도 있으면 True
+    color: Optional[str] = None           # 대표 색 `#RRGGBB` (글자수 최다)
+    colors: list[str] = Field(default_factory=list)  # 라인에 등장한 색 전부 (대표 색 포함)
+    font: Optional[str] = None            # 대표 글꼴명. PDF 는 서브셋 접두어(`ABCDEF+`)를 뗀다
+    style_source: Optional[str] = None    # hwp_run | pdf_char — 어디서 얻었는지
+
+
 class Line(BaseModel):
     text: str
     bbox: Optional[list[int]] = None
     confidence: Optional[float] = None
     source: Source
+    # 시인성. OCR 라인은 pt·색을 알 수 없어 항상 None 이다(글자 이미지만 있다) —
+    # 값이 없는 것과 "스타일이 없는 문서"를 구분해야 하므로 style_source 로 출처를 남긴다.
+    style: Optional[TextStyle] = None
     # 라인 단위 VLM 재판독 후보 — Region.vlm_reading 과 같은 원칙(B안)을 라인에도 적용한다.
     # 원칙은 원래 Region 에만 지켜지고 라인에서는 두 단계가 정본을 갈아치우고 있었다:
     # 스윕-OCR 중복 심판(pipeline)과 저신뢰 재판독(vlm_direct). 두 단계 다 비결정

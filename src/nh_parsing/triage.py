@@ -10,6 +10,7 @@ hybrid 중 하나로 판정되고 판정 근거가 AdPage.triage 에 남는다.
 
 from __future__ import annotations
 
+import ctypes
 import unicodedata
 from dataclasses import dataclass, field
 
@@ -18,6 +19,10 @@ import pypdfium2.raw as pdfium_c
 
 from .config import SETTINGS
 from .ir import Line
+from .text_style import fold, rgb_hex, strip_subset_prefix
+
+# FPDFText_GetFontInfo 버퍼. 실측 글꼴명이 `TRDBGG+SDGothicNeoa-fSm`(23자) 수준이라 넉넉하다.
+_FONT_NAME_BUF = 128
 
 
 @dataclass
@@ -163,16 +168,56 @@ def _split_by_column_gap(
     """
     if len(group) < 2:
         return [group]
-    widths = [b[2] - b[0] for _, b in group]
+    widths = [item[1][2] - item[1][0] for item in group]
     avg_w = sum(widths) / len(widths)
     gap_limit = max(avg_w * _LINE_GAP_MULTIPLIER, _LINE_GAP_MIN_PX)
     segments: list[list[tuple[str, tuple[float, float, float, float]]]] = [[group[0]]]
-    for ch, box in group[1:]:
+    # 항목을 재조립하지 않고 **그대로** 넣는다. 2-튜플만 다루던 예전 코드는 `(ch, box)` 로
+    # 다시 만들어 3번째 원소(시인성)를 잘라 버렸다. 여기서 필요한 건 [0]=글자·[1]=칸뿐이므로
+    # 길이에 관여하지 않는 편이 호출자를 안 묶는다.
+    for item in group[1:]:
+        box = item[1]
         prev_right = segments[-1][-1][1][2]
         if box[0] - prev_right > gap_limit:
             segments.append([])
-        segments[-1].append((ch, box))
+        segments[-1].append(item)
     return segments
+
+
+# PDF 글꼴 굵기 → bold 판정 경계. 실측(2026-08-21, `1. 대출성상품.pdf` p1 전수):
+# 260(OTMGothicL) 1060자 · 440(M) 491 · 360(R) 128 · **600(OTMGothicB) 99** · 540 34 · 520 16.
+# 글꼴명이 Bold 인 것이 정확히 600 이라 그 값을 경계로 쓴다(CSS 관례 700 이 아니다 —
+# 이 문서군의 글꼴이 600 을 Bold 로 쓴다).
+_PDF_BOLD_WEIGHT = 600
+
+
+def _char_style(textpage, index: int) -> tuple[float | None, bool | None, str | None, str | None]:
+    """글자 하나의 (크기pt, 굵음, 색, 글꼴명). 못 얻는 항목은 None.
+
+    크기는 여기서 안 채운다 — 호출자가 글꼴칸 높이로 넣는다(`ir.SizeBasis` 주석 참조).
+    """
+    weight = pdfium_c.FPDFText_GetFontWeight(textpage.raw, index)
+    bold = (weight >= _PDF_BOLD_WEIGHT) if weight and weight > 0 else None
+
+    color: str | None = None
+    r, g, b, a = (ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint())
+    if pdfium_c.FPDFText_GetFillColor(
+        textpage.raw, index, ctypes.byref(r), ctypes.byref(g), ctypes.byref(b), ctypes.byref(a)
+    ):
+        color = rgb_hex(r.value, g.value, b.value)
+
+    font: str | None = None
+    buf = ctypes.create_string_buffer(_FONT_NAME_BUF)
+    flags = ctypes.c_int()
+    used = pdfium_c.FPDFText_GetFontInfo(
+        textpage.raw, index, buf, _FONT_NAME_BUF, ctypes.byref(flags)
+    )
+    if used:
+        name = buf.raw[: max(0, used - 1)].decode("utf-8", "replace").strip()
+        if name:
+            font = strip_subset_prefix(name)
+
+    return None, bold, color, font
 
 
 def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
@@ -194,8 +239,8 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
     textpage = page.get_textpage()
     _, page_h = page.get_size()
     n = textpage.count_chars()
-    # (글자, 잉크칸, 글꼴칸)
-    chars: list[tuple[str, tuple[float, ...], tuple[float, ...]]] = []
+    # (글자, 잉크칸, 글꼴칸, 시인성)
+    chars: list[tuple[str, tuple[float, ...], tuple[float, ...], tuple]] = []
     for i in range(n):
         ch = textpage.get_text_range(i, 1)
         if not ch or ch.isspace():
@@ -210,7 +255,13 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
             loose = tight  # 글꼴칸을 못 얻는 글자는 종전(잉크칸) 동작으로 되돌아간다
         if loose[3] - loose[1] <= 0:
             loose = tight
-        chars.append((ch, tight, loose))
+        try:
+            _, bold, color, font = _char_style(textpage, i)
+        except Exception:
+            bold = color = font = None  # 스타일을 못 얻어도 텍스트 추출은 멈추지 않는다
+        # 크기는 글꼴칸 높이(pt). 선언값(FPDFText_GetFontSize)은 못 쓴다 — ir.SizeBasis 주석.
+        size = round(loose[3] - loose[1], 1)
+        chars.append((ch, tight, loose, (size, bold, color, font)))
     if not chars:
         return []
 
@@ -235,13 +286,14 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
     for group in lines_raw:
         group.sort(key=lambda c: c[1][0])
         # 가로 공백 분리와 최종 좌표는 잉크칸 기준 (글꼴칸은 좌우로도 넉넉해 칸 경계가 뭉갠다)
-        tight_group = [(ch, tight) for ch, tight, _ in group]
+        # 3번째 원소로 시인성을 함께 실어 보낸다 — _split_by_column_gap 은 [0]·[1]만 본다.
+        tight_group = [(ch, tight, atom) for ch, tight, _, atom in group]
         for segment in _split_by_column_gap(tight_group):
-            text = "".join(ch for ch, _ in segment)
-            left = min(b[0] for _, b in segment)
-            bottom = min(b[1] for _, b in segment)
-            right = max(b[2] for _, b in segment)
-            top = max(b[3] for _, b in segment)
+            text = "".join(item[0] for item in segment)
+            left = min(item[1][0] for item in segment)
+            bottom = min(item[1][1] for item in segment)
+            right = max(item[1][2] for item in segment)
+            top = max(item[1][3] for item in segment)
             # PDF pt(원점 좌하단) → 렌더 픽셀(원점 좌상단)
             bbox = [
                 int(left * px_per_pt),
@@ -249,7 +301,14 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
                 int(right * px_per_pt),
                 int((page_h - bottom) * px_per_pt),
             ]
-            lines.append(Line(text=text, bbox=bbox, confidence=None, source="digital"))
+            style = fold(
+                (item[2] for item in segment if len(item) > 2),
+                basis="fontbox",
+                source="pdf_char",
+            )
+            lines.append(
+                Line(text=text, bbox=bbox, confidence=None, source="digital", style=style)
+            )
     from .tiling import sort_reading_order
 
     return sort_reading_order(lines)
