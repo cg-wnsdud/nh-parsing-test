@@ -184,6 +184,237 @@ def _split_by_column_gap(
     return segments
 
 
+# ── PDF 자체 구조로 줄을 정하는 재료 ─────────────────────────────────────────
+# 왜 이걸 쓰나. 종전에는 글자를 세로 겹침으로 군집해 줄을 만들었다. 그러면 **큰 글자가
+# 멀리 있는 작은 글자를 빨아들인다** — 겹침 분모가 작은 쪽이라 24pt 글꼴칸(높이 67px)
+# 안에 든 10.4pt 글자는 겹침이 100% 가 된다. 가로로 640px 떨어져 있어도 같은 줄이 됐다.
+# 실측(2026-08-21, `1. 예금성상품(적립식).pdf`): `기본금리 연 2.25%` 가 오른쪽 칸
+# 예금자보호 문구 **두 줄**을 끌어와 한 줄이 되고, x 정렬 때 글자가 교차해
+# `1이인예당금“1은억예원금까자지보”…` 가 됐다(판독 불가). 89개 PDF 전수로 4줄/4파일.
+# 같은 원인의 다른 얼굴이 칼럼 넘김이다 — 좌우 2단이 한 줄로 붙어 엉뚱한 영역에 배정됐다.
+#
+# PDF 는 답을 이미 갖고 있다. 두 가지를 읽는다.
+#   ① TEXT 런  — PDF 가 선언한 텍스트 조각. 실측 143개 전부 높이 48.8px 이하로
+#                **한 런은 두 줄에 걸치지 않는다.** 런의 `matrix.f` 가 베이스라인이며
+#                같은 시각 줄은 1pt 안쪽, 다른 줄은 7pt 이상 떨어진다(같은 파일 실측:
+#                예금자보호 1줄 f=135.60 · 2줄 f=124.10).
+#   ② 세로 구분선 — 여백에 그려진 얇고 긴 벡터 경로. 위 파일의 좌우 2단 점선이
+#                `x=711.5..714.3, y=1236..2018` 로 실제 객체다. 임계값이 아니라
+#                파일에 그려진 사실이라 문서마다 흔들리지 않는다.
+_DIVIDER_MIN_H_PT = 36.0      # 이보다 짧으면 칸 구분선이 아니라 장식으로 본다(≈3줄)
+_DIVIDER_MAX_W_PT = 6.0       # 실측 구분선 폭 0.4~3.0pt. 그보다 두꺼우면 막대/아이콘
+_DIVIDER_MIN_RATIO = 6.0      # 세로/가로 비. 가로 괘선을 걸러낸다
+
+# 베이스라인 허용차 = **글자 크기**의 이 비율. 잉크 높이를 쓰면 안 된다 — 마침표는
+# 잉크가 1.2pt 뿐이라 허용차가 0 으로 눌리고, 같은 베이스라인인데도 탈락한다(실측:
+# `1.0%p` 의 `.` 이 f=327.40 으로 `1`·`0%` 와 같은데 떨어져 나가 `10%p` 가 됐다).
+# 글자 크기는 `matrix.a` 로 얻는다 — `FPDFTextObj_GetFontSize` 는 이 문서들에서
+# 전부 1.0 을 돌려줘 못 쓴다(ir.SizeBasis 주석과 같은 사정).
+# 같은 줄 안의 흔들림은 첨자성 보정에서 온다(실측: `p` 가 본문보다 0.98pt 높다).
+_BASELINE_TOL_RATIO = 0.20
+
+# 문장부호·글머리 기호는 광학적으로 가운데 맞춰 그려서 베이스라인이 어긋난다 —
+# 실측: `■`(4pt)이 본문(8pt) 베이스라인보다 1.25pt 높다. 이런 조각은 베이스라인으로
+# 못 붙이므로, **줄이 세로로 감싸고 가로로 맞붙어 있으면** 그 줄에 넣는다.
+#
+# 대상을 **글자 하나짜리 런**으로 한정한다. 글자 크기(pt)로 자르면 안 된다 — `●` 는
+# 글리프가 작아도 글꼴 크기는 본문과 같아서(실측 `1. 대출성상품.pdf`) 크기 상한에
+# 걸리지 않는다. 한 글자로 한정하면 낱말을 옆 칸으로 빨아들일 수가 없다.
+# 간격 한계는 **조각 자신의 폭**을 잣대로 쓴다. 실측: 기호와 본문 사이는 0~10px 인데
+# 표 칸 사이는 93~120px 로 한 자리 수 배 차이가 난다.
+_MARK_GAP_RATIO = 2.0         # 가로 간격 한계 = 조각 폭의 이 배수
+_MARK_MIN_GAP_PT = 2.0        # 폭이 아주 좁은 기호(마침표)를 위한 하한
+_MARK_CONTAIN_RATIO = 0.8     # 줄의 y 범위가 조각의 이 비율 이상을 덮어야 한다
+
+
+def _obj_key(obj) -> int:
+    """페이지 객체의 동일성 열쇠. 핸들 주소를 쓴다 — 글자→런 대응에만 쓰는 값이다."""
+    return ctypes.cast(obj.raw, ctypes.c_void_p).value
+
+
+def _text_runs(page: pdfium.PdfPage) -> list[dict]:
+    """TEXT 객체를 (베이스라인, 좌표, 열쇠) 로 모은다. 못 읽으면 빈 리스트."""
+    runs: list[dict] = []
+    try:
+        objects = list(page.get_objects(max_depth=6))
+    except Exception:  # noqa: BLE001 — 구조를 못 읽으면 글자 군집으로 되돌아간다
+        return []
+    for obj in objects:
+        if obj.type != pdfium_c.FPDF_PAGEOBJ_TEXT:
+            continue
+        try:
+            left, bottom, right, top = obj.get_bounds()
+            matrix = obj.get_matrix()
+        except Exception:  # noqa: BLE001
+            continue
+        if right - left <= 0 or top - bottom <= 0:
+            continue  # 폭·높이 0 인 런이 실제로 있다(빈 문자열 자리)
+        runs.append({
+            "key": _obj_key(obj),
+            "baseline": matrix.f,
+            # 실효 글자 크기. 텍스트 행렬의 가로 배율이 곧 pt 크기다(실측: 본문 8.00 ·
+            # `가입기간` 12.62 · `■` 4.00). 행렬을 못 읽으면 잉크 높이로 대신한다.
+            "size": abs(matrix.a) or (top - bottom),
+            "box": (left, bottom, right, top),
+        })
+    return runs
+
+
+def _vertical_dividers(page: pdfium.PdfPage, chars) -> list[tuple[float, float, float]]:
+    """칸을 가르는 세로 구분선 → [(x중심, y하, y상)]. PDF pt 좌표.
+
+    **여백 조건이 핵심이다.** 얇고 긴 경로라는 모양만 보면 막대그래프·아이콘 조각까지
+    걸린다 — 실측(2026-08-21, 89개 PDF): 모양만으로 242개가 잡히고 그중 폭이 13pt 인
+    것도 있었다. 진짜 칸 구분선은 **글자가 없는 자리에** 그려져 있으므로, 자기 x 띠
+    안에 글자 잉크가 겹치면 구분선으로 안 본다. 이 조건은 문서별 조정이 필요 없다.
+    """
+    try:
+        objects = list(page.get_objects(max_depth=6))
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[float, float, float]] = []
+    for obj in objects:
+        if obj.type != pdfium_c.FPDF_PAGEOBJ_PATH:
+            continue
+        try:
+            left, bottom, right, top = obj.get_bounds()
+        except Exception:  # noqa: BLE001
+            continue
+        w, h = right - left, top - bottom
+        if h < _DIVIDER_MIN_H_PT or w > _DIVIDER_MAX_W_PT:
+            continue
+        if h / max(w, 0.01) < _DIVIDER_MIN_RATIO:
+            continue
+        if any(
+            tight[2] > left and tight[0] < right and tight[3] > bottom and tight[1] < top
+            for _, tight, _, _, _ in chars
+        ):
+            continue  # 글자가 올라타 있다 → 여백의 구분선이 아니다
+        out.append(((left + right) / 2.0, bottom, top))
+    return out
+
+
+def _crosses_divider(box_a, box_b, dividers) -> bool:
+    """두 상자 사이에 구분선이 놓여 있는가. 구분선의 y 범위 안에서만 막는다."""
+    lo = min(box_a[2], box_b[2])
+    hi = max(box_a[0], box_b[0])
+    if lo >= hi:
+        return False  # 가로로 겹친다 — 사이에 뭐가 들어갈 자리가 없다
+    y_lo = min(box_a[1], box_b[1])
+    y_hi = max(box_a[3], box_b[3])
+    return any(lo <= x <= hi and bottom < y_hi and top > y_lo for x, bottom, top in dividers)
+
+
+def _lines_from_runs(chars, runs, dividers) -> list[list] | None:
+    """런의 베이스라인으로 줄을 정하고 글자를 그 줄에 담는다.
+
+    반환은 '줄 = 글자 리스트' 의 리스트. 런에 못 붙은 글자가 하나라도 있으면 None 을
+    돌려 호출자가 종전 방식(글자 군집)으로 되돌아가게 한다 — **텍스트를 잃지 않는
+    쪽이 먼저다.**
+    """
+    if not runs:
+        return None
+    index = {r["key"]: i for i, r in enumerate(runs)}
+    buckets: list[list] = [[] for _ in runs]
+    for entry in chars:
+        slot = index.get(entry[4])
+        if slot is None:
+            return None  # 소속을 모르는 글자가 있으면 이 경로를 쓰지 않는다
+        buckets[slot].append(entry)
+
+    live = [(runs[i], buckets[i]) for i in range(len(runs)) if buckets[i]]
+    if not live:
+        return None
+    # **큰 런부터** 처리한다. 줄의 기준 베이스라인을 본문이 잡아야 하기 때문이다 —
+    # 작은 조각이 먼저 그룹을 만들면 그 조각의 어긋난 베이스라인이 줄의 기준이 된다.
+    live.sort(key=lambda rb: (-rb[0]["size"], -rb[0]["baseline"], rb[0]["box"][0]))
+
+    groups: list[dict] = []
+    for run, items in live:
+        box, size = run["box"], run["size"]
+        part = {"box": box, "items": items, "baseline": run["baseline"], "size": size}
+        for g in groups:
+            # **그룹의 첫 런이 아니라 이미 들어간 런들과 각각 비교한다(연쇄).** 첫 런에
+            # 기준을 고정하면 아치형(곡선) 제목이 끊긴다 — 실측(`1. 예금성상품(입출식·
+            # 적립식 통합).pdf`): `NH비대면전용입출식및적립식` 이 글자마다 베이스라인이
+            # 달라(647.81→640.79→645.92, 폭 7pt) 4조각으로 갈렸다. 이웃끼리는 1.6pt
+            # 안쪽이라 연쇄로 보면 한 줄로 이어진다.
+            if not any(
+                abs(run["baseline"] - p["baseline"]) <= max(size, p["size"]) * _BASELINE_TOL_RATIO
+                and not _crosses_divider(box, p["box"], dividers)
+                for p in g["parts"]
+            ):
+                continue
+            g["parts"].append(part)
+            g["box"] = (min(g["box"][0], box[0]), min(g["box"][1], box[1]),
+                        max(g["box"][2], box[2]), max(g["box"][3], box[3]))
+            break
+        else:
+            groups.append({"box": box, "parts": [part]})
+
+    _attach_marks(groups, dividers)
+    groups.sort(key=lambda g: (-g["box"][3], g["box"][0]))
+    return [[it for p in g["parts"] for it in p["items"]] for g in groups]
+
+
+def _attach_marks(groups: list[dict], dividers) -> None:
+    """떠 있는 한 글자 조각(마침표·`■`·`●` 등)을 그것을 감싸는 줄에 넣는다.
+
+    베이스라인만으로는 못 붙는다 — 이런 기호는 광학적으로 가운데 맞춰 그려서
+    베이스라인이 본문과 다르다(실측: `■` 이 본문보다 1.25pt 높다). 대신 **줄이 세로로
+    감싸고 가로로 맞붙어 있다**는 기하 사실을 쓴다.
+
+    **런 단위로 옮긴다.** 그룹 단위로 하면 같은 베이스라인의 기호 여럿이 한 그룹으로
+    묶여 빠져나간다 — 실측(`1. 대출성상품.pdf`): 좌우 칼럼의 `●` 두 개가 497px,
+    `■` 두 개가 838px 떨어져 있는데 베이스라인이 같아 한 그룹이었다.
+
+    **한 글자 런 전부를 대상으로 보되, 자기 줄에 붙어 있으면 안 건드린다.** 기호가 다른
+    칼럼의 본문과 베이스라인이 같으면 그 그룹에 들어가고, 뒤이은 가로 공백 분리가 그
+    기호를 다시 떼어 낸다 — 실측(`17. 대출성상품.pdf`): `●근저당설정비…` 가 `●` + 본문
+    으로 갈렸다. 그렇다고 한 글자 런을 무조건 재배치하면 **한 글자씩 그려진 슬로건이
+    흩어진다** — 실측(`1. 예금성상품(거치식·적립식 통합).pdf`): `모든순간` 이 `모든` +
+    낱자로 깨졌다. 그래서 기준은 하나다: **자기 그룹의 나머지와 맞붙어 있으면 제자리다.**
+    """
+    singles = [(g, p) for g in groups for p in g["parts"] if len(p["items"]) == 1]
+    for src, part in singles:
+        box = part["box"]
+        height = box[3] - box[1]
+        limit = max((box[2] - box[0]) * _MARK_GAP_RATIO, _MARK_MIN_GAP_PT)
+
+        def _abuts(obox, _box=box, _h=height, _lim=limit) -> float | None:
+            """세로로 감싸고 가로로 맞붙으면 그 간격, 아니면 None."""
+            covered = min(_box[3], obox[3]) - max(_box[1], obox[1])
+            if _h > 0 and covered / _h < _MARK_CONTAIN_RATIO:
+                return None
+            gap = max(obox[0] - _box[2], _box[0] - obox[2], 0.0)
+            if gap > _lim or _crosses_divider(_box, obox, dividers):
+                return None
+            return gap
+
+        rest = [p for p in src["parts"] if p is not part]
+        if rest:
+            rest_box = (min(p["box"][0] for p in rest), min(p["box"][1] for p in rest),
+                        max(p["box"][2] for p in rest), max(p["box"][3] for p in rest))
+            if _abuts(rest_box) is not None:
+                continue  # 이미 자기 줄에 붙어 있다 — 슬로건 낱자·`1.0%p` 의 `1` 등
+        best, best_gap = None, None
+        for other in groups:
+            if other is src:
+                continue
+            gap = _abuts(other["box"])
+            if gap is None:
+                continue
+            if best_gap is None or gap < best_gap:
+                best, best_gap = other, gap
+        if best is None:
+            continue
+        best["parts"].append(part)
+        best["box"] = (min(best["box"][0], box[0]), min(best["box"][1], box[1]),
+                       max(best["box"][2], box[2]), max(best["box"][3], box[3]))
+        src["parts"] = [p for p in src["parts"] if p is not part]
+    groups[:] = [g for g in groups if g["parts"]]
+
+
 def _char_style(textpage, index: int):
     """글자 하나의 (크기pt, 굵음, 색, 글꼴명, 굵기원값). 못 얻는 항목은 None.
 
@@ -216,8 +447,18 @@ def _char_style(textpage, index: int):
 
 
 def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
-    """텍스트 레이어 → 라인(문자 글꼴칸 y-겹침 군집 + 가로 공백 분리). 좌표는 렌더 픽셀로 환산.
+    """텍스트 레이어 → 라인. 좌표·시인성은 글자 단위, **줄 소속은 PDF 구조**로 정한다.
 
+    두 단계다.
+      1) 줄 소속 — `_lines_from_runs`: TEXT 런의 베이스라인 + 세로 구분선. 임계값이
+         아니라 파일에 적힌 사실이라 문서마다 흔들리지 않는다(위 주석 블록 참조).
+      2) 줄 안의 글자 순서·좌표·시인성 — 종전 그대로 글자 단위. 한 줄에 두 시각 줄이
+         섞이지 않게 된 뒤라 x 정렬이 안전하다.
+
+    구조를 못 읽는 PDF(TEXT 객체가 없거나 글자-런 대응이 끊긴 경우)는 **아래 글자 군집
+    으로 되돌아간다** — 조용히 텍스트를 잃지 않는 쪽이 먼저다.
+
+    ── 폴백(글자 군집)에 대하여 ────────────────────────────────────────────
     **줄 묶기는 글꼴칸(loose charbox), 좌표는 잉크칸(tight charbox)을 쓴다.** 잉크칸은
     글자마다 높이가 제각각이라(같은 줄에서 `ㆍ` 5.3px · `임` 25.8px 실측) 겹침 비율이
     글자 모양에 좌우된다. 그래서 키 큰 글자가 윗줄 글자와 임계값을 아슬하게 넘겨
@@ -234,8 +475,8 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
     textpage = page.get_textpage()
     _, page_h = page.get_size()
     n = textpage.count_chars()
-    # (글자, 잉크칸, 글꼴칸, 시인성)
-    chars: list[tuple[str, tuple[float, ...], tuple[float, ...], tuple]] = []
+    # (글자, 잉크칸, 글꼴칸, 시인성, 소속 런 열쇠)
+    chars: list[tuple[str, tuple[float, ...], tuple[float, ...], tuple, int | None]] = []
     for i in range(n):
         ch = textpage.get_text_range(i, 1)
         if not ch or ch.isspace():
@@ -254,35 +495,44 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
             _, bold, color, font, weight = _char_style(textpage, i)
         except Exception:
             bold = color = font = weight = None  # 스타일 실패가 텍스트 추출을 멈추지 않는다
+        # 글자가 속한 TEXT 런. pdfium 이 직접 알려주므로 좌표로 추측하지 않는다.
+        try:
+            owner = pdfium_c.FPDFText_GetTextObject(textpage.raw, i)
+            owner_key = ctypes.cast(owner, ctypes.c_void_p).value if owner else None
+        except Exception:  # noqa: BLE001
+            owner_key = None
         # 크기는 글꼴칸 높이(pt). 선언값(FPDFText_GetFontSize)은 못 쓴다 — ir.SizeBasis 주석.
         size = round(loose[3] - loose[1], 1)
-        chars.append((ch, tight, loose, (size, bold, color, font, weight)))
+        chars.append((ch, tight, loose, (size, bold, color, font, weight), owner_key))
     if not chars:
         return []
 
-    # 글꼴칸 top 기준 정렬 후 수직 겹침 50% 이상이면 같은 라인으로 군집
-    chars.sort(key=lambda c: (-c[2][3], c[1][0]))
-    lines_raw: list[list[tuple[str, tuple[float, ...], tuple[float, ...]]]] = []
-    for entry in chars:
-        box = entry[2]
-        placed = False
-        for group in lines_raw:
-            gbox = group[0][2]
-            overlap = min(box[3], gbox[3]) - max(box[1], gbox[1])
-            height = min(box[3] - box[1], gbox[3] - gbox[1])
-            if height > 0 and overlap / height >= 0.5:
-                group.append(entry)
-                placed = True
-                break
-        if not placed:
-            lines_raw.append([entry])
+    # ① 우선 PDF 구조로 줄을 정한다. 실패하면 ②로 되돌아간다.
+    lines_raw = _lines_from_runs(chars, _text_runs(page), _vertical_dividers(page, chars))
+    if lines_raw is None:
+        # ② 폴백 — 글꼴칸 top 기준 정렬 후 수직 겹침 50% 이상이면 같은 라인으로 군집
+        chars.sort(key=lambda c: (-c[2][3], c[1][0]))
+        lines_raw = []
+        for entry in chars:
+            box = entry[2]
+            placed = False
+            for group in lines_raw:
+                gbox = group[0][2]
+                overlap = min(box[3], gbox[3]) - max(box[1], gbox[1])
+                height = min(box[3] - box[1], gbox[3] - gbox[1])
+                if height > 0 and overlap / height >= 0.5:
+                    group.append(entry)
+                    placed = True
+                    break
+            if not placed:
+                lines_raw.append([entry])
 
     lines: list[Line] = []
     for group in lines_raw:
         group.sort(key=lambda c: c[1][0])
         # 가로 공백 분리와 최종 좌표는 잉크칸 기준 (글꼴칸은 좌우로도 넉넉해 칸 경계가 뭉갠다)
         # 3번째 원소로 시인성을 함께 실어 보낸다 — _split_by_column_gap 은 [0]·[1]만 본다.
-        tight_group = [(ch, tight, atom) for ch, tight, _, atom in group]
+        tight_group = [(ch, tight, atom) for ch, tight, _, atom, _ in group]
         for segment in _split_by_column_gap(tight_group):
             text = "".join(item[0] for item in segment)
             left = min(item[1][0] for item in segment)
