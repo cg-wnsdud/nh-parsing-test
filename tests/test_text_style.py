@@ -10,16 +10,41 @@ from pathlib import Path
 import pypdfium2 as pdfium
 import pytest
 
-from nh_parsing.text_style import fold, rgb_hex, strip_subset_prefix
+from nh_parsing.text_style import fold, is_bold, rgb_hex, strip_subset_prefix
 from nh_parsing.triage import extract_digital_lines
 
 PDF = Path("nh-data/new-sample-data/1. 예금성상품(적립식).pdf")
 PX_PER_PT = 200 / 72.0
 
 
+def test_굵음_판정은_pdfium_버전에_흔들리지_않는다():
+    """⚠️ 실측 사고(2026-08-21): `FPDFText_GetFontWeight` 가 빌드마다 다른 값을 준다.
+
+    같은 파일 같은 글자 1,081자에서
+      pypdfium2 5.12.0 → 260·360·440·520·600 (글꼴 선언 weight)
+      pypdfium2 5.13.0 → 400·700 두 값만    (CSS 관례로 뭉갬)
+    `준법감시인 심의필` 글자가 5.12 에서 360(보통), 5.13 에서 700(굵음)으로 뒤집혔다.
+    숫자만 보면 같은 문서가 환경에 따라 다른 판정을 받는다 — 그래서 글꼴명을 1차 근거로 쓴다.
+    """
+    # Bold 글꼴은 두 버전 값 어느 쪽이 와도 굵음이다
+    assert is_bold(600, "OTMGothicB") is True
+    assert is_bold(700, "OTMGothicB") is True
+    # Medium·Regular 는 5.13 이 700 으로 올려도 굵음이 아니다 ← 이 줄이 회귀를 막는다
+    assert is_bold(440, "OTMGothicM") is False
+    assert is_bold(700, "OTMGothicM") is False
+    assert is_bold(360, "OTMGothicR") is False
+    assert is_bold(700, "OTMGothicR") is False
+    # 서브셋 접두어가 붙어 있어도 같다
+    assert is_bold(700, "TRDBGG+OTMGothicB") is True
+    # 글꼴명을 못 얻으면 숫자로만 판단할 수밖에 없다 — 그 한계를 숨기지 않는다
+    assert is_bold(700, None) is True
+    assert is_bold(400, None) is False
+    assert is_bold(None, None) is None
+
+
 def test_대표값은_평균이_아니라_글자수_최다다():
     """평균을 쓰면 실제로 존재하지 않는 크기가 나온다 — 35pt 한 글자 + 8pt 서른 글자."""
-    atoms = [(35.0, True, "#FF0000", "Big")] + [(8.0, False, "#000000", "Small")] * 30
+    atoms = [(35.0, True, "#FF0000", "Big", 700)] + [(8.0, False, "#000000", "Small", 400)] * 30
     style = fold(atoms, basis="declared", source="hwp_run")
     assert style.size_pt == 8.0        # 평균(8.87)이 아니다
     assert style.size_pt_max == 35.0   # 격차는 min/max 로 읽는다
@@ -28,13 +53,13 @@ def test_대표값은_평균이_아니라_글자수_최다다():
 
 def test_굵기는_다수결이_아니라_하나라도_있으면_참이다():
     """금리 숫자만 굵은 흔한 배치에서 다수결은 False 가 되어 강조를 놓친다."""
-    atoms = [(24.0, True, None, None)] + [(8.0, False, None, None)] * 20
+    atoms = [(24.0, True, None, None, 700)] + [(8.0, False, None, None, 400)] * 20
     assert fold(atoms, basis="declared", source="hwp_run").bold is True
 
 
 def test_스타일을_하나도_못_얻으면_None():
     assert fold([], basis="declared", source="hwp_run") is None
-    assert fold([(None, None, None, None)], basis="declared", source="hwp_run") is None
+    assert fold([(None, None, None, None, None)], basis="declared", source="hwp_run") is None
 
 
 def test_서브셋_글꼴_접두어를_뗀다():
@@ -67,8 +92,8 @@ def test_PDF_금리는_크고_심의필은_작다():
     stamp = [ln for ln in lines if "심의필" in ln.text]
     assert rate and stamp, "기준 문구를 못 찾았다 — 샘플이 바뀌었는지 확인"
     assert rate[0].style.size_pt > stamp[0].style.size_pt * 2
-    assert rate[0].style.bold is True
-    assert stamp[0].style.bold is False
+    assert rate[0].style.bold is True          # OTMGothicB
+    assert stamp[0].style.bold is False         # OTMGothicR — 굵기 원값이 무엇이든 보통이다
 
 
 @pytest.mark.skipif(not PDF.exists(), reason="샘플 PDF 없음")

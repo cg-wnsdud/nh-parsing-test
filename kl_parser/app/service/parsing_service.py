@@ -103,6 +103,60 @@ def _parse_remote(work: Path, img_dir: Path, src: Path, option) -> None:
                  payload.get("item_count") or 0)
 
 
+def parse_ad(work_dir: str, img_dir: str, file_path: str, option=None) -> None:
+    """광고물 트랙. 규정문서와 **통신 방식은 같고 산출물이 다르다.**
+
+    왜 다른가. 규정문서는 KL 벡터DB 에 색인될 대상이라 `_hrc.jsonl`(텍스트 청크)로
+    변환한다. 광고물은 색인 대상이 아니라 **매번 새로 들어오는 질문**이고, 심의는
+    "이 지적의 근거가 원본 어디인가"를 화면에 표시해야 한다 — `_hrc.jsonl` 규격에는
+    좌표·역할·판독대조를 담을 칸이 없어 그 정보가 전부 버려진다.
+
+    그래서 광고물은 **우리 파싱 산출물(AdDocument)을 그대로** 낸다. 좌표·시인성·
+    OCR/VLM 후보가 다 살아 있는 형태다. 다음 단계(RAG/RDB 엔진)가 이걸 받는다.
+    """
+    work = Path(work_dir)
+    try:
+        write_parse_status(work_dir, PARSING)
+        from nh_parsing.pipeline import process_file
+
+        src = Path(file_path)
+        doc = process_file(src, preview_dir=Path(img_dir))
+        out = work / f"{src.name}_parsed.json"
+        out.write_text(doc.model_dump_json(indent=2), encoding="utf-8")
+
+        # 요약을 따로 낸다 — 호출한 쪽이 본문 전체를 파싱하지 않고도 상태를 알 수 있게.
+        pages = doc.pages or []
+        regions = sum(len(p.regions or []) for p in pages)
+        lines = sum(len(r.lines or []) for p in pages for r in (p.regions or []))
+        styled = sum(
+            1 for p in pages for r in (p.regions or []) for ln in (r.lines or []) if ln.style
+        )
+        (work / "ad_summary.json").write_text(
+            json.dumps(
+                {
+                    "doc_id": doc.doc_id,
+                    "file_type": doc.file_type,
+                    "product_group": doc.product_group,
+                    "ad_type": doc.ad_type,
+                    "pages": len(pages),
+                    "parse_routes": [p.parse_route for p in pages],
+                    "regions": regions,
+                    "lines": lines,
+                    "lines_with_style": styled,
+                    "unassigned_lines": sum(len(p.unassigned_lines or []) for p in pages),
+                    "notes": doc.notes,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        write_parse_status(work_dir, DONE)
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        write_parse_status(work_dir, ERROR, f"{exc.__class__.__name__}: {exc}")
+
+
 def _fix_info_source(info_path: Path, src: Path, option) -> None:
     """`_hrc.json` 의 `source` 를 KL 에게 의미 있는 값으로 바꾼다.
 

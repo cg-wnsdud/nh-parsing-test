@@ -80,6 +80,7 @@ def _run_atoms(runs) -> list[tuple]:
             getattr(style, "bold", None),
             color.upper() if isinstance(color, str) and color else None,
             getattr(style, "font_family", None),
+            None,  # HWP 는 파서가 bold 를 bool 로 준다 — 굵기 원값이 없다
         )
         atoms.extend([atom] * len(text.strip()))
     return atoms

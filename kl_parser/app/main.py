@@ -34,7 +34,7 @@ from fastapi import BackgroundTasks, FastAPI, Form, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .service.parsing_service import parse
+from .service.parsing_service import parse, parse_ad
 from .service.status import DONE, PARSING, get_parse_status
 
 TIMEOUT = int(os.getenv("TIMEOUT", "600"))
@@ -43,17 +43,39 @@ KEEP_WORK_DIR = os.getenv("KEEP_WORK_DIR", "") not in ("", "0", "false", "False"
 
 # zip 에 넣을 결과 파일. 규격서 "Output jsonl" 단락이 정한 3종 + doc_data(선택).
 # `kl_parser_notes.json` 은 우리 검수용이라 **일부러 제외**한다.
-_RESULT_SUFFIXES = ("_hrc.jsonl", "_hrc.json", "doc_data.json")
+_RESULT_SUFFIXES = (
+    "_hrc.jsonl", "_hrc.json", "doc_data.json",   # 규정문서 트랙 (KL 규격)
+    "_parsed.json", "ad_summary.json",            # 광고물 트랙 (우리 규격)
+)
 
 app = FastAPI(title="NH KL Custom Parser (CGInside)", version="0.1.0")
 
 
-@app.post("/parsing", name="Request parsing", description="문서 파싱을 요청한다(비동기).")
+@app.post("/parsing", name="Request parsing", description="규정문서 파싱을 요청한다(KL 규격).")
 async def request_parsing(
     src_file: UploadFile,
     background_tasks: BackgroundTasks,
     option: str = Form(default=None),
 ):
+    """KL 이 호출하는 자리. 산출물은 `_hrc.jsonl`/`_hrc.json`/`_img.zip`."""
+    return await _accept(src_file, background_tasks, option, parse)
+
+
+@app.post("/ad/parsing", name="Request ad parsing", description="광고물 파싱을 요청한다.")
+async def request_ad_parsing(
+    src_file: UploadFile,
+    background_tasks: BackgroundTasks,
+    option: str = Form(default=None),
+):
+    """광고 심의용. **통신 방식(202·uuid·폴링·zip)은 위와 완전히 같고 산출물만 다르다.**
+
+    KL 이 부르는 자리가 아니다 — 광고물은 벡터DB 색인 대상이 아니라 매번 새로 들어오는
+    질문이다. 산출물은 좌표·시인성이 살아 있는 우리 파싱 결과(`_parsed.json`)다.
+    """
+    return await _accept(src_file, background_tasks, option, parse_ad)
+
+
+async def _accept(src_file, background_tasks, option, worker):
     work_dir = ""
     try:
         base_filename = os.path.basename(src_file.filename or "unknown")
@@ -72,7 +94,7 @@ async def request_parsing(
 
         write_parse_status(work_dir, PARSING)
 
-        background_tasks.add_task(parse, work_dir, img_dir, file_fullpath, _decode_option(option))
+        background_tasks.add_task(worker, work_dir, img_dir, file_fullpath, _decode_option(option))
 
         # 규격: 파싱 요청 정상 응답은 **반드시 202**, body 에 uuid·timeout.
         return JSONResponse(

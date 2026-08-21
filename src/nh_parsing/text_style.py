@@ -15,8 +15,39 @@ from typing import Iterable, Optional
 
 from .ir import SizeBasis, TextStyle
 
-# 글자 하나 = (크기pt, 굵음, 색, 글꼴). 크기·색·글꼴은 없을 수 있다.
-StyleAtom = tuple[Optional[float], Optional[bool], Optional[str], Optional[str]]
+# 글자 하나 = (크기pt, 굵음, 색, 글꼴, 굵기원값). 뒤 4개는 없을 수 있다.
+StyleAtom = tuple[
+    Optional[float], Optional[bool], Optional[str], Optional[str], Optional[int]
+]
+
+# 글꼴명이 굵기를 말해주는 접미사. PDF 굵기 원값이 빌드마다 달라 이쪽이 더 안정적이다 —
+# 실측(2026-08-21): `OTMGothicB`(Bold) 는 5.12.0 에서 600, `OTMGothicM`(Medium) 은 440.
+# 5.13.0 은 둘 다 700 으로 뭉개 Medium 을 굵음으로 잘못 올린다.
+_BOLD_FONT_SUFFIXES = ("bold", "black", "heavy", "-b", "b")
+# Medium·Semibold 는 굵음이 아니다. 이름이 M/L/R 로 끝나면 굵음 후보에서 제외한다.
+_NOT_BOLD_FONT_SUFFIXES = ("light", "regular", "medium", "thin", "-l", "-r", "-m", "l", "r", "m")
+
+
+def is_bold(weight: Optional[int], font: Optional[str]) -> Optional[bool]:
+    """굵음 판정. **글꼴명이 1차 근거**이고 굵기 원값은 보조다.
+
+    왜 뒤집었나. PDF 굵기 원값이 pdfium 빌드에 따라 달라진다(ir.TextStyle.font_weight
+    주석). 글꼴명은 문서에 박힌 값이라 빌드와 무관하다. 이름으로 판별이 안 될 때만
+    숫자를 쓰고, 그때 경계는 5.12.0·5.13.0 양쪽에서 같은 답이 나오는 **700** 을 쓴다
+    (5.12 의 Bold=600 은 5.13 에서 700 이 되고, 5.12 의 Medium=440 은 5.13 에서도 700 이
+    되어버리므로 이름이 없으면 어차피 완전하지 않다 — 그 사실을 숨기지 않는다).
+    """
+    if font:
+        stem = font.split("+")[-1].lower()
+        for suffix in _NOT_BOLD_FONT_SUFFIXES:
+            if stem.endswith(suffix):
+                return False
+        for suffix in _BOLD_FONT_SUFFIXES:
+            if stem.endswith(suffix):
+                return True
+    if weight is None or weight <= 0:
+        return None
+    return weight >= 700
 
 
 def fold(atoms: Iterable[StyleAtom], *, basis: SizeBasis, source: str) -> TextStyle | None:
@@ -34,6 +65,7 @@ def fold(atoms: Iterable[StyleAtom], *, basis: SizeBasis, source: str) -> TextSt
     colors = Counter(a[2] for a in atoms if a[2])
     fonts = Counter(a[3] for a in atoms if a[3])
     bolds = [a[1] for a in atoms if a[1] is not None]
+    weights = Counter(a[4] for a in atoms if len(a) > 4 and a[4])
 
     if not sizes and not colors and not fonts and not bolds:
         return None
@@ -46,6 +78,7 @@ def fold(atoms: Iterable[StyleAtom], *, basis: SizeBasis, source: str) -> TextSt
         # 라인 안에 굵은 글자가 하나라도 있으면 True. "강조가 있었나"를 묻는 값이라
         # 다수결이 아니다 — 금리 숫자만 굵은 흔한 배치에서 다수결은 False 가 된다.
         bold=any(bolds) if bolds else None,
+        font_weight=weights.most_common(1)[0][0] if weights else None,
         color=colors.most_common(1)[0][0] if colors else None,
         colors=[c for c, _ in colors.most_common()],
         font=fonts.most_common(1)[0][0] if fonts else None,

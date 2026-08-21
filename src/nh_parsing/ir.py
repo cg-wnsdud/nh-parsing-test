@@ -47,6 +47,13 @@ class TextStyle(BaseModel):
     size_pt_max: Optional[float] = None
     size_basis: Optional[SizeBasis] = None
     bold: Optional[bool] = None           # 라인에 굵은 글자가 하나라도 있으면 True
+    # 글꼴 굵기 **원값**. bold 판정을 하류가 다시 할 수 있게 담는다.
+    # ⚠️ PDF 는 이 값이 **pdfium 빌드에 따라 다르다** — 실측(2026-08-21, 같은 파일 1,081자):
+    #   pypdfium2 5.12.0 → 260·360·440·520·600 (글꼴이 선언한 실제 weight)
+    #   pypdfium2 5.13.0 → 400·700 두 값만    (CSS 관례로 뭉갠 값)
+    # 같은 글자가 5.12 에서 360(보통), 5.13 에서 700(굵음)으로 나온다. 그래서 이 값만으로
+    # bold 를 정하지 않고 글꼴명을 함께 본다(text_style.is_bold). HWP 는 파서가 bool 을 준다.
+    font_weight: Optional[int] = None
     color: Optional[str] = None           # 대표 색 `#RRGGBB` (글자수 최다)
     colors: list[str] = Field(default_factory=list)  # 라인에 등장한 색 전부 (대표 색 포함)
     font: Optional[str] = None            # 대표 글꼴명. PDF 는 서브셋 접두어(`ABCDEF+`)를 뗀다

@@ -19,7 +19,7 @@ import pypdfium2.raw as pdfium_c
 
 from .config import SETTINGS
 from .ir import Line
-from .text_style import fold, rgb_hex, strip_subset_prefix
+from .text_style import fold, is_bold, rgb_hex, strip_subset_prefix
 
 # FPDFText_GetFontInfo 버퍼. 실측 글꼴명이 `TRDBGG+SDGothicNeoa-fSm`(23자) 수준이라 넉넉하다.
 _FONT_NAME_BUF = 128
@@ -184,20 +184,15 @@ def _split_by_column_gap(
     return segments
 
 
-# PDF 글꼴 굵기 → bold 판정 경계. 실측(2026-08-21, `1. 대출성상품.pdf` p1 전수):
-# 260(OTMGothicL) 1060자 · 440(M) 491 · 360(R) 128 · **600(OTMGothicB) 99** · 540 34 · 520 16.
-# 글꼴명이 Bold 인 것이 정확히 600 이라 그 값을 경계로 쓴다(CSS 관례 700 이 아니다 —
-# 이 문서군의 글꼴이 600 을 Bold 로 쓴다).
-_PDF_BOLD_WEIGHT = 600
-
-
-def _char_style(textpage, index: int) -> tuple[float | None, bool | None, str | None, str | None]:
-    """글자 하나의 (크기pt, 굵음, 색, 글꼴명). 못 얻는 항목은 None.
+def _char_style(textpage, index: int):
+    """글자 하나의 (크기pt, 굵음, 색, 글꼴명, 굵기원값). 못 얻는 항목은 None.
 
     크기는 여기서 안 채운다 — 호출자가 글꼴칸 높이로 넣는다(`ir.SizeBasis` 주석 참조).
+    굵음 판정은 `text_style.is_bold` 에 맡긴다 — 굵기 원값이 pdfium 빌드마다 달라
+    글꼴명을 1차 근거로 써야 한다.
     """
     weight = pdfium_c.FPDFText_GetFontWeight(textpage.raw, index)
-    bold = (weight >= _PDF_BOLD_WEIGHT) if weight and weight > 0 else None
+    weight = weight if weight and weight > 0 else None
 
     color: str | None = None
     r, g, b, a = (ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint())
@@ -217,7 +212,7 @@ def _char_style(textpage, index: int) -> tuple[float | None, bool | None, str | 
         if name:
             font = strip_subset_prefix(name)
 
-    return None, bold, color, font
+    return None, is_bold(weight, font), color, font, weight
 
 
 def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
@@ -256,12 +251,12 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
         if loose[3] - loose[1] <= 0:
             loose = tight
         try:
-            _, bold, color, font = _char_style(textpage, i)
+            _, bold, color, font, weight = _char_style(textpage, i)
         except Exception:
-            bold = color = font = None  # 스타일을 못 얻어도 텍스트 추출은 멈추지 않는다
+            bold = color = font = weight = None  # 스타일 실패가 텍스트 추출을 멈추지 않는다
         # 크기는 글꼴칸 높이(pt). 선언값(FPDFText_GetFontSize)은 못 쓴다 — ir.SizeBasis 주석.
         size = round(loose[3] - loose[1], 1)
-        chars.append((ch, tight, loose, (size, bold, color, font)))
+        chars.append((ch, tight, loose, (size, bold, color, font, weight)))
     if not chars:
         return []
 
