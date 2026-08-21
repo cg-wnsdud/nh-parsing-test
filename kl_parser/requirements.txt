@@ -1,0 +1,10 @@
+# 진입점(Custom 파서) 전용 의존성 — 농협 폐쇄망 반입 대상.
+#
+# 농협 베이스 이미지에 이미 있는 것(2.Package.txt 기준, 285개 목록에서 확인):
+#   requests 2.34.2 · pydantic · numpy · Pillow 12.3.0   → 반입 불필요
+#
+# 아래는 반입이 필요한 것. 농협 예제(server/flow/requirements.txt)도 같은 방식으로
+# whl 파일을 동봉해 `pip install --target=` 으로 로컬 설치한다.
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.17    # 농협 예제가 동봉한 그 버전 (whl 제공됨)

@@ -1,0 +1,5 @@
+.venv-entry/
+temp/
+samples/out/
+samples/in/
+__pycache__/
