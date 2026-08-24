@@ -31,25 +31,48 @@ def reset_stats() -> None:
     STATS.clear()
 
 
-def _record(schema_name: str, seconds: float, cached: bool) -> None:
-    s = STATS.setdefault(schema_name, {"calls": 0, "cached": 0, "seconds": 0.0})
+def _record(schema_name: str, seconds: float, cached: bool,
+            attempts: int = 1, timeouts: int = 0) -> None:
+    """한 `chat_json` 호출의 비용을 단계별로 적는다.
+
+    `attempts`·`timeouts` 를 따로 세는 이유(2026-08-25). `seconds` 만 보면 "모델이 느리다"와
+    "타임아웃 나서 재시도했다"를 구분할 수 없다. `chat_json` 은 실패 시 3회까지 시도하고
+    (`retries=2`) 사이에 2초·4초를 쉬므로, **한 호출이 최악 366초**
+    (120+2+120+4+120, `gemma_timeout_s=120`)까지 가는데 그게 `calls=1` 로 집계된다.
+    실측: `13. 대출성상품.pdf` 이 "VLM 195초 11회 (캐시 10)" 로 찍혀 미캐시 1회가
+    195초처럼 보였다 — 이 두 칸이 없으면 원인을 좁힐 수가 없다.
+    """
+    s = STATS.setdefault(
+        schema_name,
+        {"calls": 0, "cached": 0, "seconds": 0.0, "attempts": 0, "timeouts": 0},
+    )
     s["calls"] += 1
     s["seconds"] += seconds
+    s["attempts"] += attempts
+    s["timeouts"] += timeouts
     if cached:
         s["cached"] += 1
 
 
 def stats_table() -> str:
-    """단계별 호출 수·누적 시간 표 (호출 많은 순)."""
+    """단계별 호출 수·시도 수·타임아웃·누적 시간 표 (시간 많이 쓴 순)."""
     if not STATS:
         return "(VLM 호출 없음)"
-    rows = sorted(STATS.items(), key=lambda kv: -kv[1]["calls"])
-    out = [f"{'단계(schema_name)':34s} {'호출':>5s} {'캐시':>5s} {'초':>8s}"]
+    rows = sorted(STATS.items(), key=lambda kv: -kv[1]["seconds"])
+    out = [f"{'단계(schema_name)':30s} {'호출':>4s} {'캐시':>4s} {'시도':>4s} "
+           f"{'타임아웃':>7s} {'초':>8s} {'초/시도':>8s}"]
     for name, s in rows:
-        out.append(f"{name:34s} {int(s['calls']):5d} {int(s['cached']):5d} {s['seconds']:8.1f}")
-    tot_c = sum(s["calls"] for _, s in rows)
-    tot_s = sum(s["seconds"] for _, s in rows)
-    out.append(f"{'합계':34s} {int(tot_c):5d} {'':5s} {tot_s:8.1f}")
+        live = max(1, int(s["attempts"]) - int(s["cached"]))
+        out.append(
+            f"{name:30s} {int(s['calls']):4d} {int(s['cached']):4d} "
+            f"{int(s['attempts']):4d} {int(s['timeouts']):7d} "
+            f"{s['seconds']:8.1f} {s['seconds'] / live:8.1f}"
+        )
+    tot = {k: sum(s[k] for _, s in rows) for k in ("calls", "cached", "attempts", "timeouts", "seconds")}
+    out.append(
+        f"{'합계':30s} {int(tot['calls']):4d} {int(tot['cached']):4d} "
+        f"{int(tot['attempts']):4d} {int(tot['timeouts']):7d} {tot['seconds']:8.1f}"
+    )
     return "\n".join(out)
 
 
@@ -97,6 +120,7 @@ def chat_json(
     }
     last_exc: Exception | None = None
     last_text: str | None = None
+    timeouts = 0
     for attempt in range(retries + 1):
         try:
             resp = requests.post(
@@ -116,15 +140,23 @@ def chat_json(
             if cache_key is not None:
                 vlm_cache.store(cache_key, schema_name, parsed)
                 vlm_cache.note("stored")
-            _record(schema_name, _time.time() - _t0, cached=False)
+            _record(schema_name, _time.time() - _t0, cached=False,
+                    attempts=attempt + 1, timeouts=timeouts)
             return parsed
         except Exception as exc:  # 연결 오류·JSON 파싱 실패 모두 재시도
             last_exc = exc
+            # 타임아웃은 따로 센다 — 재시도 사유가 '서버가 안 끝냈다'인지
+            # '응답이 깨졌다'인지에 따라 손볼 곳이 다르다(타임아웃 값 vs 스키마·토큰).
+            if isinstance(exc, requests.Timeout):
+                timeouts += 1
             if attempt < retries:
                 time.sleep(2 * (attempt + 1))
-    _record(schema_name, _time.time() - _t0, cached=False)  # 실패도 시간·호출은 썼다
+    # 실패도 시간·호출은 썼다
+    _record(schema_name, _time.time() - _t0, cached=False,
+            attempts=retries + 1, timeouts=timeouts)
     raise RuntimeError(
-        f"VLM 호출 실패({retries + 1}회): {last_exc}{_failure_excerpt(last_exc, last_text)}"
+        f"VLM 호출 실패({retries + 1}회, 타임아웃 {timeouts}회): "
+        f"{last_exc}{_failure_excerpt(last_exc, last_text)}"
     )
 
 

@@ -31,7 +31,7 @@ from PIL import Image                                          # noqa: E402
 
 from nh_parsing import ad_template as AT                       # noqa: E402
 from nh_parsing.ad_export import label_parsed_ad, page_canvases  # noqa: E402
-from nh_parsing.gemma_client import STATS, reset_stats          # noqa: E402
+from nh_parsing.gemma_client import STATS, reset_stats, stats_table  # noqa: E402
 from nh_parsing.pipeline import process_file                   # noqa: E402
 
 EXTS = {".pdf", ".png", ".jpg", ".jpeg"}
@@ -125,6 +125,9 @@ def main() -> None:
         print(f"  영역 {row['regions']} / VLM라벨 {row['vlm_labeled']} / "
               f"줄 {row['lines']} / 라벨닿음 {row['covered']} / {row['elapsed']:.0f}초 "
               f"(VLM {row['vlm_s']:.0f}초 {row['vlm_calls']}회, 캐시 {row['vlm_cached']})")
+        # 단계별 내역. 합계만 보면 "모델이 느리다"와 "타임아웃 나서 재시도했다"를
+        # 구분할 수 없다 — 손볼 곳이 완전히 다르다(gemma_client._record 주석 참조).
+        print("  " + stats_table().replace("\n", "\n  "))
 
     print(f"\n{'=' * 112}")
     print(f'{"파일":<32}{"템플릿":<26}{"영역":>5}{"VLM라벨":>8}{"줄":>5}{"라벨닿음":>9}'
