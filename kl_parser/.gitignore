@@ -1,5 +1,14 @@
 .venv-entry/
 temp/
 samples/out/
+samples/out_ad/
 samples/in/
 __pycache__/
+
+# VLM 캐시 — `vlm_cache._DIR` 이 **cwd 기준 상대경로**(`.vlm_cache`)라, 진입점을 배포와
+# 같은 방식(`cd app_custom_parser && …`)으로 띄우면 **납품 폴더 안에** 생긴다.
+# 운영에서는 VLM_CACHE 가 꺼져 있어 만들어지지 않지만, 개발 중 켜 두면 반입 자료에
+# 광고 판독 결과가 섞여 들어갈 수 있다. 절대 커밋하지 않는다.
+#   → 개발 중 캐시를 쓰려면 `VLM_CACHE_DIR` 에 **절대경로**를 주는 편이 낫다.
+.vlm_cache/
+app_custom_parser/.vlm_cache/

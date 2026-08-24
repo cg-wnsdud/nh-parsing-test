@@ -4,8 +4,22 @@
 계약은 농협 규격서(`readme.md`)와 예제(`app_custom_parser/main.py`)를 그대로 따른다.
 바꾼 곳은 파싱 본체(`service.parsing_service.parse`)뿐이다.
 
+**폴더가 평평한 이유.** 농협 배포 스크립트(`run-application.sh`)는
+`export FLOW_APP_NAME="app_custom_parser"` 뒤 `cd $FLOW_APP_NAME && gunicorn main:app`
+로 뜬다 — gunicorn 이 `main` 을 **최상위 모듈**로 import 한다(`app_custom_parser.main` 이
+아니다). 그 상태에서 `from .service import ...` 같은 상대 import 를 쓰면
+`attempted relative import with no known parent package` 로 뜨지도 못한다.
+그래서 농협 예제도 절대 import(`from service.parsing_service import ...`)를 쓰고
+`service/` 에 `__init__.py` 를 두지 않는다(네임스페이스 패키지) — 이 파일도 그대로 따른다.
+2026-08-24 이전에는 `app/` 로 한 겹 더 감싸고 상대 import 를 썼는데, 로컬 왕복 시험
+(`uvicorn app.main:app`, cwd=kl_parser/)에서는 통과하고 **농협 배포 형태에서만 깨지는**
+결함이었다 — 실행해 보기 전까진 안 드러난다.
+
   POST /parsing                  → **202** + {result, body:{uuid, timeout}}
-  GET  /parsing/result/{uuid}    → 200 + zip | 200 + {"status":"PARSING"} | 500 + {message}
+  GET  /parsing/result/{uuid}    → 200 + zip
+                                  | 200 + {"status":"PARSING"}
+                                  | 200 + {"status":"ERROR", message}   (파싱 오류)
+                                  | 500 + {message}                    (그 외 오류 — uuid 못 찾음 등)
   GET  /health                   → 200 + {"status":"OK"}
 
 **예제와 다르게 한 것 2가지와 그 이유**
@@ -34,10 +48,21 @@ from fastapi import BackgroundTasks, FastAPI, Form, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .service.parsing_service import parse, parse_ad
-from .service.status import DONE, PARSING, get_parse_status
+from service.parsing_service import parse, parse_ad
+from service.status import DONE, ERROR, PARSING, get_parse_status, write_parse_status
 
-TIMEOUT = int(os.getenv("TIMEOUT", "600"))
+# 202 응답에 실어 보내는 값 — **KL 이 결과를 기다려 주는 시간**이다. 짧게 신고하면
+# 우리가 아직 파싱 중인데 KL 이 먼저 포기한다.
+#
+# 실측(2026-08-24, 캐시 없는 콜드 실행)이 예전 기본값 600초를 이미 넘겼다:
+#     13. 대출성상품.pdf   627초   ← 600 이었으면 시연 중에 잘렸다
+#     2. 예금성상품.pdf    153초
+#     올원e적금.png        198초
+#     규정문서 HWP/PDF     4~44초
+# 대부분이 VLM 대기다(대출성 312초 중 309초). 그래서 3배 여유를 두고 1800 으로 올린다.
+# 규격서(`parser_howto.txt:14`)상 이 값을 **생략하면 기본 3시간**이므로 1800 은 그보다
+# 보수적인 값이다. 파싱을 빠르게 만들면 그때 낮추면 된다.
+TIMEOUT = int(os.getenv("TIMEOUT", "1800"))
 PATH_WORK = os.getenv("PATH_TEMP", "./temp")
 KEEP_WORK_DIR = os.getenv("KEEP_WORK_DIR", "") not in ("", "0", "false", "False")
 
@@ -90,8 +115,6 @@ async def _accept(src_file, background_tasks, option, worker):
             fo.write(await src_file.read())
 
         # 상태를 **응답 전에** 쓴다. 폴링이 202 직후에 들어와도 UNKNOWN 이 아니라 PARSING 이다.
-        from .service.status import write_parse_status
-
         write_parse_status(work_dir, PARSING)
 
         background_tasks.add_task(worker, work_dir, img_dir, file_fullpath, _decode_option(option))
@@ -122,8 +145,15 @@ async def get_parsing_result(uuid: str):
         status, msg = get_parse_status(work_dir)
         if status == PARSING:
             return JSONResponse(status_code=200, content={"status": PARSING})
+        if status == ERROR:
+            # 규격(parser_howto.txt §1-2): "파싱 오류가 발생하면 status 200,
+            # {"status":"ERROR", "message": "..."}" — **500 이 아니다.** 500 은 그
+            # 아래 문장 "그 외 오류"(uuid 를 못 찾는 등) 몫이다. 이전에는 이 둘을
+            # 같은 분기로 묶어 파싱 실패도 500 으로 냈다 — 실행해서 왕복해 보지 않고는
+            # 안 드러나는 차이라 왕복 시험(§spec_check)에 이 경로 검사를 새로 추가했다.
+            return JSONResponse(status_code=200, content={"status": ERROR, "message": msg})
         if status != DONE:
-            # 실패 디렉터리는 남긴다(위 ② 참조).
+            # 여기 남는 건 UNKNOWN(상태 파일이 아예 없음) 같은 "그 외 오류" 뿐이다.
             return JSONResponse(status_code=500, content={"message": msg or status})
 
         zip_bytes = _build_result_zip(Path(work_dir))
@@ -166,12 +196,18 @@ def _build_result_zip(work: Path) -> bytes:
         if p.is_file() and p.name.endswith(_RESULT_SUFFIXES)
     ]
 
-    # 이미지가 있으면 `<원본파일명>_img.zip` 을 만들어 함께 넣는다.
-    jsonl = next((p for p in targets if p.name.endswith("_hrc.jsonl")), None)
-    if jsonl and img_dir.is_dir():
+    # 이미지가 있으면 `<원본파일명>_img.zip` 을 만들어 함께 넣는다. 이름의 기준이 되는
+    # 결과 파일은 트랙마다 다르다 — 규정문서는 `_hrc.jsonl`, 광고물은 `_parsed.json`
+    # (§parse_ad, 2026-08-24: 광고 쪽지 이미지를 img_dir 에 놓기 시작하면서 추가했다.
+    # 이 기준을 안 넓히면 이미지를 저장은 해 놓고 zip 에 담기지 않아 응답에서 빠진다).
+    primary = next(
+        (p for p in targets if p.name.endswith(("_hrc.jsonl", "_parsed.json"))), None,
+    )
+    if primary and img_dir.is_dir():
         images = [p for p in sorted(img_dir.iterdir()) if p.is_file()]
         if images:
-            img_zip = work / jsonl.name.replace("_hrc.jsonl", "_img.zip")
+            base = primary.name.replace("_hrc.jsonl", "").replace("_parsed.json", "")
+            img_zip = work / f"{base}_img.zip"
             with zipfile.ZipFile(img_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for p in images:
                     zf.write(p, p.name)

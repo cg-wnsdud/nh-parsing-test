@@ -165,6 +165,9 @@ def _ocr_canvas_to_page(
                 score=block.score,
                 content=block.content,
                 source=block.source,
+                # 표 셀 좌표도 블록 bbox 와 같은 만큼 내려야 한다 — 안 하면 셀이 타일
+                # 좌표에 남아 페이지 위쪽 엉뚱한 자리를 가리킨다.
+                table=_shift_table(block.table, tile.y_offset),
             )
             all_blocks.append(shifted)
 
@@ -180,6 +183,19 @@ def _ocr_canvas_to_page(
     page.notes.append(f"타일 {len(tiles)}개 처리 (오버랩 {SETTINGS.tile_overlap_px}px)")
     return page
 
+
+
+def _shift_table(table: dict | None, y_offset: int) -> dict | None:
+    """표 격자의 셀 좌표를 타일 오프셋만큼 내린다. 좌표가 없는 셀은 그대로 둔다."""
+    if not table or not y_offset:
+        return table
+    out = dict(table)
+    out["cells"] = [
+        {**c, "bbox": ([c["bbox"][0], c["bbox"][1] + y_offset,
+                        c["bbox"][2], c["bbox"][3] + y_offset] if c.get("bbox") else None)}
+        for c in table.get("cells") or []
+    ]
+    return out
 
 
 def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
@@ -424,19 +440,42 @@ def _note_layout_gaps(page: AdPage) -> None:
 
 
 def _finalize_reading_order(page: AdPage) -> None:
-    """각 영역의 라인을 국소적으로 읽기 순서 재정렬한다.
+    """읽기 순서를 확정한다 — **영역끼리의 순서**와 각 영역 **안 라인의 순서** 둘 다.
 
-    build_regions 는 전역 정렬된 라인 목록을 영역에 분배하는데, 전역
+    영역 안 라인. build_regions 는 전역 정렬된 라인 목록을 영역에 분배하는데, 전역
     sort_reading_order 는 각 라인을 '직전 행'하고만 비교하므로 세로로 긴
     페이지에서는 같은 시각적 줄의 단어들 사이에 다른 위치의 줄이 끼어들어
     행 묶기가 깨진다(단어가 top 좌표순으로만 나열 — 001 실측). 영역 하나로
     범위를 좁혀 다시 정렬하면 끼어드는 무관한 줄이 없어 올바른 순서가 된다.
+
+    영역끼리의 순서 (2026-08-24 추가). `page.regions` 는 그동안 PaddleX 의
+    `parsing_res_list` 순서 그대로였다. 그 순서는 **문장을 거꾸로 놓는 데가 있다** —
+    실측(`[예금성상품-적금] 올원e적금.png` p1, 원본 이미지 대조 완료):
+
+        원본:  '금융소비자 보호에 관한 법률 제19조제1항에 따른 설명을 받을'  y=5546
+               '수 있는 권리가 있습니다.'                                    y=5611
+        기존:  r044 '수 있는 권리가 있습니다.'      ← 뒷줄이 먼저 실렸다
+               r045 '금융소비자 보호에 관한 법률…'
+        → 이어 읽으면 '수 있는 권리가 있습니다. 금융소비자 보호에…' 가 된다
+
+    **다시 정렬하지 않고 최소 교정만 한다** — y 로 전부 다시 정렬하면 2단 문서가
+    망가진다(이유와 실측은 `llm_view.repair_reading_order` 주석에 있다).
+
+    **왜 여기서 하나.** 순서를 산출물 쪽(`ad_export`)에서 바꾸면 `line_ref` 가
+    `ad_template.collect_lines` 의 것과 어긋난다 — 둘 다 `enumerate` 로 번호를 매기므로
+    라벨이 **다른 줄에 조용히 붙는다**. 파싱 단계에서 한 번 고쳐 두면 하류 전부가
+    같은 순서를 본다(검수 화면·추출층도 같은 함수를 쓴다).
+
+    카드 경계를 지키므로 **카드 배정 뒤에** 불려야 한다(`_apply_vlm_judgments` 안,
+    `assign_cards_vlm` 다음). 지금 호출 위치가 그 조건을 만족한다.
     """
+    from .llm_view import repair_reading_order
     from .tiling import sort_reading_order
 
     for region in page.regions:
         if len(region.lines) > 1:
             region.lines = sort_reading_order(region.lines)
+    page.regions = repair_reading_order(page.regions)
 
 
 def _attach_line_to_region(line: Line, target: Region) -> bool:
@@ -798,6 +837,7 @@ def _classify_into(doc: AdDocument, canvas: Image.Image) -> None:
     result = classify(canvas, doc.source_file)
     doc.product_group = result.product_group
     doc.ad_type = result.ad_type
+    doc.product_name_shown = result.product_name_shown
     doc.category_source = result.category_source
     doc.classification_confidence = result.confidence
     if result.reason:

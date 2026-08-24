@@ -39,7 +39,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).parent.parent
 from nh_parsing.ir import Line, Region      # noqa: E402
-from nh_parsing.llm_view import region_order_key  # noqa: E402
+from nh_parsing.llm_view import repair_reading_order  # noqa: E402
 from nh_parsing.tiling import sort_reading_order  # noqa: E402
 
 
@@ -95,7 +95,11 @@ def _region_evidence_html(page: dict) -> tuple[str, int, int]:
 
     반환: (html, 영역 개수, 미배정 줄 수) — 뒤 둘은 접힌 summary 표시용.
     """
-    ordered = sorted(page.get("regions", []), key=lambda r: region_order_key(Region(**r)))
+    # 파이프라인(`_finalize_reading_order`)·추출층(`llm_view`)과 **같은 함수**를 쓴다.
+    # 검수 화면이 다른 순서를 보이면 "코드가 무엇을 봤나"를 화면으로 확인할 수 없다.
+    _regions = [Region(**r) for r in page.get("regions", [])]
+    _by_id = {r["region_id"]: r for r in page.get("regions", [])}
+    ordered = [_by_id[r.region_id] for r in repair_reading_order(_regions)]
     blocks = []
     for r in ordered:
         raw = r.get("lines", [])

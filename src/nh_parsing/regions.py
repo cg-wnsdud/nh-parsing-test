@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from .ir import Line, Region
+from .ir import Line, Region, RegionTable
 from .paddlex_client import LayoutBlock
 
 # PP-StructureV3 공식 block_label 전체 매핑 (공식 문서 + 실측 vision_footnote)
@@ -104,6 +104,8 @@ def build_regions(
                 label=block.label,
                 layout_score=block.score,   # 엔진 확신도 — 판정엔 안 쓰고 진단용으로만 보관
                 role=_LABEL_TO_ROLE.get(block.label.lower(), "본문"),
+                # 표 격자(PaddleX table_res_list). 없으면 None — 표가 아닌 영역이다.
+                table=RegionTable(**block.table) if block.table else None,
             )
         )
 

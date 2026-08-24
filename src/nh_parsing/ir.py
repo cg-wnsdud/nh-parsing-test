@@ -80,6 +80,36 @@ class Line(BaseModel):
     vlm_reading_stage: Optional[str] = None  # sweep_dedupe | lowconf_reread
 
 
+class TableCell(BaseModel):
+    """표 한 칸. `row`/`col` 은 0부터, 병합셀은 `row_span`/`col_span` 으로 나타낸다."""
+    row: int
+    col: int
+    row_span: int = 1
+    col_span: int = 1
+    bbox: Optional[list[int]] = None
+    # PaddleX 표 인식이 읽은 셀 텍스트. **정본이 아니다** — 표 안 글자에도 OCR 오류가
+    # 있어서(실측 'BD', '2 295,000원') 정본은 Region.lines 쪽이다. 이 값은 격자 해석의
+    # 근거로 남기고, 정본 줄과의 연결은 좌표로 짝지운다(ad_export._table_out).
+    text: str = ""
+
+
+class RegionTable(BaseModel):
+    """표 영역의 행·열 구조 (PaddleX `table_res_list`).
+
+    2026-08-24 이전에는 이 정보가 통째로 사라졌다. PaddleX 는 `pred_html` 과
+    `cell_box_list` 를 정확히 돌려주는데(실측: 우대조건↔우대금리 짝이 맞다)
+    `paddlex_client` 가 `table_res_list` 를 읽지 않았다. 그래서 표가 줄로 흩어지고
+    `'-(가입월부터…)입출식05%p'` 처럼 소수점이 문장에 붙는 일까지 생겼다.
+    """
+    n_rows: int = 0
+    n_cols: int = 0
+    # PaddleX 원본 HTML. 우리 격자 해석이 틀렸을 때 대조할 유일한 근거라 버리지 않는다.
+    html: str = ""
+    cells: list[TableCell] = Field(default_factory=list)
+    # 격자를 온전히 못 만든 이유 (셀 개수 불일치 등). 조용히 비우지 않는다.
+    note: Optional[str] = None
+
+
 class Region(BaseModel):
     region_id: str
     bbox: Optional[list[int]] = None
@@ -102,6 +132,11 @@ class Region(BaseModel):
     # 2026-08-03 섹션 제거 때 설정 코드가 같이 빠졌다. 읽는 곳 3군데(vlm_direct·pipeline·
     # applicability)가 전부 항상 False 로 돈다. 되살릴 조건은 walkthrough §9-⑥ 참조.
     is_illustrative: bool = False
+    # 표로 인식된 영역의 행·열 격자. 표가 아니거나 인식이 안 되면 None.
+    # 실측(2026-08-24): `13. 대출성상품.pdf` p1 은 표 블록 1개(요율표)만 이걸 받는다 —
+    # 왼쪽 '대출대상/대출한도/대출기간' 2열 항목표는 PaddleX 가 label="text" 로 보고
+    # 표로 검출하지 않으므로 여기 안 담긴다. 그 짝짓기는 별개 문제다.
+    table: Optional[RegionTable] = None
     lines: list[Line] = Field(default_factory=list)
     # 영역별 VLM 통독(§6) — B안: OCR 정본을 덮어쓰지 않고 '후보'로만 보존한다. VLM 이
     # 이 영역 크롭을 통독한 clean text(회전·장식 교정 포함)이며, ocr_score(정밀도)로
@@ -152,6 +187,9 @@ class AdDocument(BaseModel):
     file_type: str                  # pdf|image|hwp|hwpx
     product_group: Optional[str] = None
     ad_type: Optional[str] = None
+    # 고유 상품명이 광고에 적혀 있나 (노출|미노출). 템플릿 12종이 이 값으로 갈린다 —
+    # 같은 대출성인데 노출형 12항목 · 미노출형 3항목이다. VLM 이 판단불가면 None.
+    product_name_shown: Optional[str] = None
     # 분류가 어느 경로로 정해졌나 (gemma_client.classify 주석 참조). prior 와 VLM 이
     # 둘 다 있을 때: filename_and_vlm(합의) | vlm_overrode_filename(충돌, VLM 채택).
     # VLM 만: vlm | vlm_abstained. 파일명만: filename_vlm_abstained(VLM 이 반대) |

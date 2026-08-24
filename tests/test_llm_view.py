@@ -46,8 +46,21 @@ def test_llm_view_strips_machine_signals_and_keeps_region_id():
     assert "bbox" not in region and "confidence" not in region and "source" not in region
 
 
-def test_llm_view_orders_regions_top_to_bottom_left_to_right():
-    """섹션 라벨이 사라진 만큼 순서가 문맥을 담는다 — 화면 흐름대로 나와야 한다."""
+def test_llm_view_moves_clearly_out_of_order_regions_up():
+    """섹션 라벨이 사라진 만큼 순서가 문맥을 담는다 — 확실히 거꾸로면 올려야 한다.
+
+    **계약이 바뀐 자리다 (2026-08-24).** 예전에는 좌표로 전부 다시 정렬해
+    `[위-왼쪽, 위-오른쪽, 아래]` 를 기대했다. 이제는 **레이아웃 엔진이 준 순서를 정본으로
+    두고 확실히 거꾸로인 이웃만 교환**한다(`llm_view.repair_reading_order`).
+
+    왜 바꿨나. 전부 다시 정렬하면 2단 문서가 좌우 칸을 번갈아 읽힌다 — 실측
+    `2. 예금성상품(적립식).pdf` p1 에서 `우대금리`(오른쪽 y1480) 와 `가입대상`(왼쪽 y1494)
+    이 14px 차이라, y 만으로는 어느 칸 소속인지 알 수 없었다.
+
+    **포기한 것:** 같은 행에서 좌우 순서가 뒤집힌 경우는 이제 안 고친다 — 아래에서
+    `위-오른쪽` 이 `위-왼쪽` 보다 먼저 나오는 것이 그 예다. 좌우 순서는 엔진을 믿는다
+    (실측 5문서에서 엔진이 같은 행 좌우를 뒤집은 사례는 없었다).
+    """
     doc = _doc(AdPage(
         page_no=1, canvas_w=200, canvas_h=400, parse_route="ocr",
         regions=[
@@ -60,7 +73,10 @@ def test_llm_view_orders_regions_top_to_bottom_left_to_right():
         ],
     ))
     ids = [r["region_id"] for r in llm_view.build_doc_view(doc)["pages"][0]["regions"]]
-    assert ids == ["위-왼쪽", "위-오른쪽", "아래"]
+    # '아래'(y300)가 위 두 개보다 먼저 실려 있었다 → 확실히 거꾸로이므로 뒤로 밀린다.
+    # 위 두 개의 좌우 순서는 엔진이 준 그대로 유지된다.
+    assert ids == ["위-오른쪽", "위-왼쪽", "아래"]
+    assert ids[-1] == "아래"
 
 
 def test_llm_view_keeps_unassigned_lines():

@@ -223,22 +223,45 @@ def _strip_fences(text: str) -> str:
 _CLASSIFY_SCHEMA = {
     "type": "object",
     "properties": {
-        "product_group": {"type": "string", "enum": ["예금성", "대출성", "기타", "판단불가"]},
+        # `analysis` 를 선두에 둔다 — 배열/열거가 스키마 앞에 오면 모델이 최소 유효 출력으로
+        # 조기 종료하는 퇴행이 실측됐다(2026-07-16). 먼저 서술하게 하고 값을 뒤에 받는다.
+        "analysis": {"type": "string"},
+        "product_group": {
+            "type": "string",
+            "enum": ["예금성", "대출성", "카드", "기타", "판단불가"],
+        },
         "ad_type": {
             "type": "string",
             "enum": ["상세페이지", "안내장", "배너", "이벤트페이지", "기타"],
         },
+        # 상품명이 광고에 드러나 있는가. 농협 광고 템플릿이 "상품명 노출/미노출"로
+        # 갈리는데 그 갈림에서 필수항목 수가 12개 ↔ 3개로 바뀐다 — 템플릿 판정의
+        # 핵심 갈림길이라 분류 단계에서 같이 관측한다(호출을 늘리지 않는다).
+        "product_name_shown": {"type": "string", "enum": ["노출", "미노출", "판단불가"]},
         "confidence": {"type": "number"},
         "reason": {"type": "string"},
     },
-    "required": ["product_group", "ad_type", "confidence", "reason"],
+    "required": [
+        "analysis", "product_group", "ad_type", "product_name_shown", "confidence", "reason",
+    ],
     "additionalProperties": False,
 }
 
 _PROMPT = """당신은 금융상품 광고물 분류기입니다. 이미지를 보고 다음을 판정하세요.
 
-1. product_group: 광고하는 상품의 성격 — 예금성(예금/적금/입출금), 대출성, 기타, 판단불가
-2. ad_type: 광고물 형태 — 상세페이지(세로 스크롤 웹/모바일), 안내장(인쇄물 형태), 배너, 이벤트페이지, 기타
+1. analysis: 이미지에서 무엇이 보이는지 두 문장 이내로 먼저 서술하세요.
+2. product_group: 광고하는 상품의 성격
+   - 예금성 : 예금·적금·입출금 통장
+   - 대출성 : 대출 상품
+   - 카드   : 신용카드·체크카드, 카드사가 파는 장·단기 카드대출
+   - 기타 / 판단불가
+   ※ '카드대출'은 카드 상품이지 대출성이 아닙니다.
+3. ad_type: 광고물 형태 — 상세페이지(세로 스크롤 웹/모바일), 안내장(인쇄물 형태), 배너, 이벤트페이지, 기타
+4. product_name_shown: 특정 상품의 **고유 상품명**이 광고에 적혀 있는지
+   - 노출   : "올원e적금", "NH직장인대출" 처럼 상품 이름이 보인다
+   - 미노출 : 은행/카드사 브랜드만 있고 개별 상품명이 없다 (브랜드 홍보·이벤트 등)
+   - 판단불가
+   ※ "NH농협은행" 같은 회사명은 상품명이 아닙니다.
 
 파일명 힌트: "{filename}"
 파일명 힌트는 강한 사전확률입니다. 이미지에서 명확히 반대되는 증거가 보일 때만 뒤집으세요.
@@ -259,6 +282,9 @@ class Classification:
     confidence: float | None
     category_source: str
     reason: str = ""
+    # 상품명 노출 여부. 템플릿 판정이 쓰지만 **여기서 템플릿을 정하지는 않는다** —
+    # 관측만 넘기고 12종 중 무엇인지는 ad_template.resolve_template() 이 정한다.
+    product_name_shown: str | None = None
 
 
 def classify(canvas: Image.Image, filename: str) -> Classification:
@@ -325,10 +351,12 @@ def classify(canvas: Image.Image, filename: str) -> Classification:
         source, group = "vlm_abstained", None
     else:
         source, group = "none", None
+    shown = data.get("product_name_shown")
     return Classification(
         product_group=group,
         ad_type=data.get("ad_type"),
         confidence=data.get("confidence"),
         category_source=source,
         reason=reason,
+        product_name_shown=None if shown == "판단불가" else shown,
     )

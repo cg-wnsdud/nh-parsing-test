@@ -22,7 +22,9 @@ import shutil
 import traceback
 from pathlib import Path
 
-from .status import DONE, ERROR, PARSING, write_parse_status
+# 절대 import — 농협 배포는 `cd app_custom_parser && gunicorn main:app` 이라
+# `service` 가 최상위 패키지가 된다(main.py 모듈 주석 참조).
+from service.status import DONE, ERROR, PARSING, write_parse_status
 
 AGENT_URL = os.getenv("AGENT_URL", "").strip()
 AGENT_TIMEOUT = int(os.getenv("AGENT_TIMEOUT", "600"))
@@ -111,40 +113,42 @@ def parse_ad(work_dir: str, img_dir: str, file_path: str, option=None) -> None:
     "이 지적의 근거가 원본 어디인가"를 화면에 표시해야 한다 — `_hrc.jsonl` 규격에는
     좌표·역할·판독대조를 담을 칸이 없어 그 정보가 전부 버려진다.
 
-    그래서 광고물은 **우리 파싱 산출물(AdDocument)을 그대로** 낸다. 좌표·시인성·
-    OCR/VLM 후보가 다 살아 있는 형태다. 다음 단계(RAG/RDB 엔진)가 이걸 받는다.
+    그래서 광고물은 **파싱(좌표) + 템플릿 판정 + 라벨링을 합친 통합 JSON**을 낸다
+    (`nh_parsing.ad_export.process_ad_file` — `tools/run_ad_label.py` 로컬 실행과
+    같은 함수를 쓴다). 좌표·시인성·OCR/VLM 후보에 더해 템플릿 항목명까지 붙어 있다.
     """
     work = Path(work_dir)
     try:
         write_parse_status(work_dir, PARSING)
-        from nh_parsing.pipeline import process_file
+        from nh_parsing.ad_export import process_ad_file
 
         src = Path(file_path)
-        doc = process_file(src, preview_dir=Path(img_dir))
+        unified, canvases = process_ad_file(src)
         out = work / f"{src.name}_parsed.json"
-        out.write_text(doc.model_dump_json(indent=2), encoding="utf-8")
+        out.write_text(json.dumps(unified, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # 요약을 따로 낸다 — 호출한 쪽이 본문 전체를 파싱하지 않고도 상태를 알 수 있게.
-        pages = doc.pages or []
-        regions = sum(len(p.regions or []) for p in pages)
-        lines = sum(len(r.lines or []) for p in pages for r in (p.regions or []))
-        styled = sum(
-            1 for p in pages for r in (p.regions or []) for ln in (r.lines or []) if ln.style
-        )
+        # 페이지 원본 이미지를 KL 규격의 `image/` 자리에 둔다 — main.py 가 `_img.zip` 으로
+        # 묶는다(2026-08-24: 이 묶기 조건이 `_hrc.jsonl` 존재로만 걸려 있어 광고 트랙
+        # 이미지가 생성만 되고 응답에 안 담기는 결함을 같이 고쳤다 — main.py 참조).
+        # **박스를 그려 넣지 않는다** — 좌표·라벨은 이미 통합 JSON 에 있으니 하류가
+        # 원하는 대로(항목별 색 등) 그리면 된다. 그림에 박아 넣으면 그 선택을 우리가
+        # 대신 하는 셈이라 `tools/run_ad_label.py` 의 검수 화면과 같은 원칙을 따른다.
+        img_path = Path(img_dir)
+        img_path.mkdir(parents=True, exist_ok=True)
+        for pno, img in canvases.items():
+            img.convert("RGB").save(img_path / f"{src.stem}_p{pno}.jpg", quality=85)
+
+        # 요약을 따로 낸다 — 호출한 쪽이 통합 JSON 전체를 읽지 않고도 상태를 알 수 있게.
         (work / "ad_summary.json").write_text(
             json.dumps(
                 {
-                    "doc_id": doc.doc_id,
-                    "file_type": doc.file_type,
-                    "product_group": doc.product_group,
-                    "ad_type": doc.ad_type,
-                    "pages": len(pages),
-                    "parse_routes": [p.parse_route for p in pages],
-                    "regions": regions,
-                    "lines": lines,
-                    "lines_with_style": styled,
-                    "unassigned_lines": sum(len(p.unassigned_lines or []) for p in pages),
-                    "notes": doc.notes,
+                    "doc_id": unified["doc_id"],
+                    "file_type": unified["file_type"],
+                    "classification": unified["classification"],
+                    "template": unified["template"],
+                    "pages": len(unified["pages"]),
+                    "completeness": unified["completeness"],
+                    "notes": unified["notes"],
                 },
                 ensure_ascii=False,
                 indent=2,

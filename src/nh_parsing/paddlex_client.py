@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 
 import requests
 from PIL import Image
@@ -25,6 +27,9 @@ class LayoutBlock:
     score: float | None = None
     content: str | None = None
     source: str = "parsing_res_list"
+    # 표 블록일 때만 채워지는 행·열 격자 (`_build_table_grid`). ir.RegionTable 로 그대로
+    # 넘어가므로 dict 로 나른다 — 같은 모양을 두 곳에 정의하지 않으려고.
+    table: dict | None = None
 
 
 @dataclass
@@ -69,6 +74,161 @@ def _norm_bbox(raw, width: int, height: int) -> list[int] | None:
     if x1 <= x0 or y1 <= y0:
         return None
     return [x0, y0, x1, y1]
+
+
+class _TableHTMLParser(HTMLParser):
+    """`pred_html` 을 훑어 셀마다 (행, 열, rowspan, colspan, 텍스트)를 **문서 순서로** 낸다.
+
+    왜 점유 격자를 들고 가나. `rowspan` 이 있으면 다음 행의 `<td>` 개수가 줄어들어
+    "몇 번째 td 인가"가 열 번호와 어긋난다. 실측(2026-08-24, `16. 대출성상품.pdf` p1):
+
+        <tr><td>구분</td><td>임차보증금…</td><td>5천만원 이하</td>… </tr>   6칸
+        <tr><td rowspan="4">일반</td><td>2천만원 이하</td><td>2.5%</td>… </tr>
+        <tr><td>4천만원이하</td><td>2.7%</td>… </tr>                       5칸 ← '일반'이 계속 점유
+
+    문서 순서를 지키는 이유는 `cell_box_list` 가 그 순서로 오기 때문이다(실측: 4개 표
+    전부 `<td>` 개수 == `cell_box_list` 개수, 행우선).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.cells: list[dict] = []
+        self._row = -1
+        self._col = 0
+        self._occupied: set[tuple[int, int]] = set()
+        self._open: dict | None = None
+        self._buf: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self._row += 1
+            self._col = 0
+            return
+        if tag not in ("td", "th"):
+            return
+        a = {k: (v or "") for k, v in attrs}
+        row_span = _positive_int(a.get("rowspan"), 1)
+        col_span = _positive_int(a.get("colspan"), 1)
+        while (self._row, self._col) in self._occupied:
+            self._col += 1
+        cell = {
+            "row": max(0, self._row), "col": self._col,
+            "row_span": row_span, "col_span": col_span, "text": "",
+        }
+        for dr in range(row_span):
+            for dc in range(col_span):
+                self._occupied.add((self._row + dr, self._col + dc))
+        self._col += col_span
+        self._open = cell
+        self._buf = []
+
+    def handle_data(self, data: str) -> None:
+        if self._open is not None:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th") and self._open is not None:
+            self._open["text"] = re.sub(r"\s+", " ", "".join(self._buf)).strip()
+            self.cells.append(self._open)
+            self._open, self._buf = None, []
+
+    def close(self) -> None:  # 닫는 </td> 가 없는 응답도 버리지 않는다
+        if self._open is not None:
+            self.handle_endtag("td")
+        super().close()
+
+
+def _positive_int(raw, default: int) -> int:
+    try:
+        v = int(str(raw))
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0 else default
+
+
+def _build_table_grid(pred_html: str, cell_boxes, width: int, height: int) -> dict:
+    """`pred_html` + `cell_box_list` → 행·열 격자.
+
+    **왜 텍스트를 HTML 에서 가져오나.** 표 안 글자에도 OCR 오류가 있어(실측 `'BD'`,
+    `'2 295,000원'`) HTML 텍스트가 정본은 아니다. 그래서 `html` 원본과 셀 텍스트를
+    같이 남기고, 정본 줄과의 연결은 상류(`ad_export`)가 좌표로 짝지운다. 여기서
+    하는 일은 **행·열 관계와 셀 좌표를 잃지 않는 것**뿐이다.
+
+    개수가 안 맞으면 좌표를 **비운다**(틀린 좌표보다 없는 좌표). 격자 자체는 남긴다.
+    """
+    parser = _TableHTMLParser()
+    parser.feed(pred_html or "")
+    parser.close()
+    cells = parser.cells
+
+    boxes = list(cell_boxes or [])
+    note = None
+    if len(boxes) == len(cells) and cells:
+        for cell, raw in zip(cells, boxes):
+            cell["bbox"] = _norm_bbox(raw, width, height)
+    else:
+        note = (
+            f"셀 좌표를 붙이지 못했다 — HTML 셀 {len(cells)}개 vs cell_box_list "
+            f"{len(boxes)}개. 행·열 관계만 남긴다"
+        )
+        for cell in cells:
+            cell["bbox"] = None
+
+    n_rows = max((c["row"] + c["row_span"] for c in cells), default=0)
+    n_cols = max((c["col"] + c["col_span"] for c in cells), default=0)
+    return {
+        "n_rows": n_rows, "n_cols": n_cols,
+        # 우리 격자 해석이 틀렸을 때 대조할 원본. 버리면 재현할 방법이 없다.
+        "html": pred_html or "",
+        "cells": cells, "note": note,
+    }
+
+
+def _attach_tables(blocks: list[LayoutBlock], table_res_list, width: int, height: int) -> None:
+    """`table_res_list` 의 격자를 같은 표의 `parsing_res_list` 블록에 붙인다.
+
+    짝짓는 기준은 **`block_content` == `pred_html`** 이다 (실측 2026-08-24: 정확히 일치).
+    같은 HTML 이 두 번 나오는 문서(실측: `1. 예금성상품(거치식·적립식 통합).pdf` 는
+    거치식/적립식 우대금리표가 열 이름만 다르다)가 있으므로 **한 번 쓴 블록은 소비**한다.
+    내용이 안 맞으면 셀 합집합이 블록 안에 들어가는지로 폴백한다.
+    """
+    candidates = [b for b in blocks if b.source == "parsing_res_list" and b.table is None]
+    for entry in table_res_list or []:
+        if not isinstance(entry, dict):
+            continue
+        grid = _build_table_grid(entry.get("pred_html") or "", entry.get("cell_box_list"), width, height)
+        if not grid["cells"]:
+            continue
+        html = (entry.get("pred_html") or "").strip()
+        target = next((b for b in candidates if (b.content or "").strip() == html and html), None)
+        if target is None:
+            union = _cells_union(grid["cells"])
+            target = next(
+                (b for b in candidates
+                 if union and _contains(b.bbox, union)
+                 and str(b.label).lower() == "table"),
+                None,
+            )
+        if target is None:
+            continue
+        target.table = grid
+        candidates.remove(target)
+
+
+def _cells_union(cells: list[dict]) -> list[int] | None:
+    boxes = [c["bbox"] for c in cells if c.get("bbox")]
+    if not boxes:
+        return None
+    return [min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes)]
+
+
+def _contains(outer: list[int] | None, inner: list[int]) -> bool:
+    if not outer:
+        return False
+    pad = 4  # 셀 테두리 반올림 여유
+    return (outer[0] - pad <= inner[0] and outer[1] - pad <= inner[1]
+            and outer[2] + pad >= inner[2] and outer[3] + pad >= inner[3])
 
 
 def request_layout_parsing(image: Image.Image) -> PaddleXPageResult:
@@ -138,6 +298,8 @@ def request_layout_parsing(image: Image.Image) -> PaddleXPageResult:
             )
         )
     _attach_det_scores(result.blocks, det_blocks)
+    # 표 격자를 블록에 붙인다 — `det_blocks` 를 섞기 **전에** (그쪽엔 block_content 가 없다).
+    _attach_tables(result.blocks, pruned.get("table_res_list"), width, height)
     result.blocks.extend(det_blocks)
     return result
 
