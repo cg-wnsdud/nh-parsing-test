@@ -1,344 +1,295 @@
-# NH GenAI Knowledge Lake — Custom 파서 (씨지인사이드)
+# NH Knowledge Lake Custom Parser
 
-농협 GenAI Knowledge Lake 의 **Custom 파서 슬롯**에 꽂아 쓰는 문서 파싱 API 입니다.
-원본 문서(HWP·PDF·이미지)를 받아 KL 이 요구하는 구조화 파일 3종을 만들어 돌려줍니다.
+`kl_parser`는 농협 Knowledge Lake(KL)가 호출하는 **Custom Parser API**다.
 
-- 규격 근거: `1.awx_custom_parser_example_api/readme.md` **"Output jsonl"** 단락
-- 통신 방식: **비동기**(POST → uuid → 폴링 → zip). 규격서가 권장한 방식입니다
-- 이 폴더만으로 **로컬 왕복 시험까지** 돌아갑니다 (§5)
+농협은 파일 업로드·상태 조회·결과 ZIP의 통신 규격을 정하고, 이 폴더는
+`nh_parsing`으로 문서를 읽고 구조화하는 방식을 구현한다. 즉 이 폴더는 파싱 엔진
+자체가 아니라 **농협 KL과 우리 파싱 엔진을 연결하는 어댑터**다.
 
----
+## 먼저 알아둘 구조
 
-## 1. 무엇을 하는가
-
-```
-   ┌─ KL ─────────────────────────────────────────────────────────┐
-   │  POST /parsing (src_file, option)                            │
-   │        └──▶ 202 {result:"OK", body:{uuid, timeout}}          │
-   │  GET  /parsing/result/{uuid}                                 │
-   │        └──▶ 200 zip  |  200 {"status":"PARSING"}  |  500     │
-   └──────────────────────────────────────────────────────────────┘
-                              │
-                    ┌──────────────────────────┐
-                    │  진입점 (이 폴더)        │  얇다. fastapi·uvicorn·multipart 3개
-                    │  app_custom_parser/main.py │
-                    └─────────┬────────────────┘
-                              │ HTTP (배포)  또는  직접 호출 (로컬 시험)
-                    ┌─────────▼──────────┐
-                    │  에이전트 서비스   │  파싱 본체
-                    │  nh_parsing        │  PP-StructureV3 · VLM · 사내 HWP 파서
-                    └────────────────────┘
-                              │
-              <원본파일명>_hrc.jsonl   구조화 본문 (item 단위)
-              <원본파일명>_hrc.json    문서 정보
-              <원본파일명>_img.zip     추출 이미지 (있을 때만)
+```text
+농협 KL
+  │  POST /parsing 또는 /ad/parsing
+  ▼
+kl_parser (이 폴더)
+  │  Python 직접 호출
+  ▼
+nh_parsing (프로젝트 루트의 src/nh_parsing)
+  ├─ HTTP → PaddleX/OCR 서비스
+  └─ HTTP → VLM 서비스
 ```
 
-### 진입점과 에이전트를 나눈 이유
+ `nh_parsing`은 `PADDLEX_URL`, `GEMMA_URL` 환경변수에
+설정한 GPU 서비스로 HTTP 요청을 보낸다. 로컬에서는 DGX-Spark 주소를, 농협 내부
+배포에서는 농협 내부 GPU 서비스 주소를 설정하는 그림을 전제로 한다.
 
-| | 한 컨테이너에서 직접 | **별도 에이전트 서비스 (채택)** |
+## 이 프로젝트의 두 입력 트랙
+
+| 트랙 | 요청 | 입력 | 결과 | 주 용도 |
+|---|---|---|---|---|
+| 규정문서 | `POST /parsing` | HWP/HWPX/PDF 등 기준 문서 | `_hrc.jsonl`, `_hrc.json`, 선택적 `_img.zip` | KL 색인·검색용 지식 생성 |
+| 광고물 | `POST /ad/parsing` | 광고 PDF/PNG/JPG | `_parsed.json`, `ad_summary.json`, 선택적 `_img.zip` | 광고의 문구·좌표·표·라벨 보존 |
+
+규정문서와 광고물은 역할이 다르다.
+
+```text
+규정문서 → “무엇을 기준으로 판단할 것인가”를 KL에 넣는다.
+광고물   → “광고에 실제 무엇이 보였는가”를 구조화한다.
+```
+
+이 파서는 최종 심의 위반을 확정하거나 KL 검색 API를 구현하지 않는다. 그 판단과 검색
+연동은 이 API 밖의 다음 단계다.
+
+## 농협이 보는 비동기 API 흐름
+
+문서 파싱은 오래 걸릴 수 있으므로, 업로드 요청은 즉시 접수만 하고 결과는 나중에 받는다.
+
+```text
+1. KL → POST /parsing (src_file, option)
+2. kl_parser → 202 {result: "OK", body: {uuid, timeout}}
+3. kl_parser → 백그라운드에서 파싱 수행
+4. KL → GET /parsing/result/{uuid} 반복 호출
+5. 결과
+   - 200 {"status":"PARSING"}              아직 처리 중
+   - 200 {"status":"ERROR", "message":…} 파싱 실패
+   - 200 ZIP                                  처리 완료
+```
+
+`uuid`마다 `PATH_TEMP/<uuid>/` 작업 폴더가 만들어진다. 그 안의 `genaikl.status` 파일이
+`PARSING`, `DONE`, `ERROR` 상태를 보관한다.
+
+## API 명세
+
+엔드포인트는 4개다. **결과 조회는 두 트랙이 같은 경로를 쓴다** — `/ad/parsing`으로 넣은
+광고도 `/parsing/result/{uuid}`로 받는다. 광고 전용 조회 경로는 없다.
+
+### `POST /parsing` · `POST /ad/parsing`
+
+요청은 `multipart/form-data`다.
+
+| 항목 | 필수 | 설명 |
 |---|---|---|
-| KL 컨테이너에 필요한 것 | pypdfium2 + 사내 HWP 파서 + **JVM** + Pillow… | **추가 반입 0건** (fastapi·uvicorn·multipart 전부 농협 이미지에 이미 있다 — `requirements.txt` 주석) |
-| Python 버전 제약 | 우리 코드 전부가 3.11 에서 돌아야 함 | **진입점만.** 에이전트는 자유 |
-| 실패 격리 | 파싱이 죽으면 슬롯이 죽는다 | 진입점은 살아서 상태를 돌려준다 |
+| `src_file` | 필수 | 파싱할 원본 파일 |
+| `option` | 선택 | base64로 인코딩한 JSON. 해석에 실패하면 경고만 찍고 무시한 채 계속한다 |
 
-사내 HWP 파서가 `jpype1` + JVM 을 요구하는데 DAP 베이스 이미지는 그 조합을 담지 않습니다.
-이 분리로 그 충돌이 자동으로 풀립니다. (2026-08 회의 결정사항)
+응답:
 
----
+```text
+202  {"result": "OK", "body": {"uuid": "<32자 hex>", "timeout": 1800}}
+500  {"message": "Exception : <예외이름> <메시지>"}
+```
 
-## 2. 규격을 어떻게 맞췄나 — 조항별 대조
+`202`는 “파싱을 끝냈다”가 아니라 **“접수했다”**는 뜻이다. `timeout`은 KL에게 “이만큼은
+기다려 달라”고 알려 주는 값이며 `TIMEOUT` 환경변수에서 온다.
 
-`readme.md` "Output jsonl" 단락의 요구사항을 하나씩 확인했습니다.
-검사는 코드로 자동화돼 있습니다 → `tests/spec_check.py`
+`500`은 접수 자체가 실패한 경우다(파일 저장 불가 등). 이때 만들던 작업 폴더는 지운다.
 
-| # | 규격 요구사항 | 우리 구현 | 검사 |
-|---|---|---|---|
-| 1 | POST 방식 | `POST /parsing` | O |
-| 2 | request parameter 이름은 `src_file`, 멀티파트 | 동일 | O |
-| 3 | `option` 은 base64 인코딩 → 디코딩 후 `parser_info`·`doc_data` 활용 | 디코딩해 `doc_data.origin_url` 을 `_hrc.json` 의 `source` 에 반영 | O |
-| 4 | TEXT 파일명은 `원본파일명 + "_hrc.jsonl"` | 확장자 포함 원본명 그대로 (예제 코드와 동일) | O |
-| 5 | INFO 파일명은 `원본파일명 + "_hrc.json"` | 동일 | O |
-| 6 | 이미지가 있으면 `원본파일명 + "_img.zip"` 으로 압축 | 동일. **경로 없이 파일만** 압축 | O |
-| 7 | 결과 3종을 zip 으로 압축해 리턴 | 동일 | O |
-| 8 | 각 행은 `item` 항목으로 구성 | jsonl 한 행 = 객체 하나 | O |
-| 9 | `item` 유형은 `text`·`table`·`image`·`h1`~`h4` | 이 6종만 사용 | O |
-| 10 | 헤딩으로 도출된 항목을 `h1`~`h4` 로 변환 | 조항 번호 패턴으로 판별 (§4) | O |
-| 11 | `value` 는 필수. `table` 은 HTML table, `image` 는 파일명 | 동일 | O |
-| 12 | `table` 은 `type_property.title` 필수 (없으면 `""`) | 동일 | O |
-| 13 | `image` 는 `title`·`width`·`height`·`ratio` 필수 | 동일 | O |
-| 14 | `page` 를 알 수 없으면 `0` | HWP 는 페이지 개념이 없어 `0` | O |
-| 15 | 사용자 메타는 `cust_attr1~5`(조회) / `cust_sattr1~5`(검색·조회) | §3 참조 | O |
-| 16 | 파싱 요청 응답은 **반드시 202**, body 에 `uuid`·`timeout` | 동일 | O (왕복 시험이 검사) |
-| 17 | 상태 파일 `genaikl.status` (`PARSING`/`DONE`/`ERROR`) | 예제의 DO NOT EDIT 함수를 그대로 사용 (`app_custom_parser/service/status.py`) | O |
-| 18 | 파싱 오류 → **200** + `{"status":"ERROR", "message"}` / 그 외 오류 → 500 | 두 분기를 갈라 처리 | O (`tests/boot_check.py`) |
-| 19 | `cd $FLOW_APP_NAME && gunicorn main:app` 으로 기동 | 폴더 구조·import 를 예제와 동일하게 | O (`tests/boot_check.py`) |
+### `GET /parsing/result/{uuid}`
 
-> **18·19 는 2026-08-24 에 고쳤습니다.** 둘 다 행복 경로 왕복 시험만으로는 안 잡히는
-> 결함이었습니다 — 18 은 정상 파일만 넣어 보면 그 분기를 안 지나가고, 19 는 로컬에서
-> `uvicorn app.main:app` 으로 띄우면 통과하고 **농협 배포 형태에서만** 깨집니다.
-> 그래서 `tests/boot_check.py` 를 새로 만들어 두 경로를 직접 태웁니다.
+작업 상태에 따라 응답이 네 가지로 갈린다.
 
-> **규격서와 예제 코드가 서로 다른 항목** (§7-10): 위 18번을 규격서
-> (`parser_howto.txt` §1-2)는 **200**이라 하는데, 농협 **예제 코드**
-> (`app_custom_parser/main.py:195`)는 같은 상황에서 **500**을 돌려줍니다.
-> 규격서 본문을 따랐습니다. 확인이 필요합니다.
-
-### 예제 코드와 일부러 다르게 한 것 3가지
-
-**1. 파싱 실행을 `subprocess` 대신 `BackgroundTasks` 로 했습니다.**
-예제는 `python -c "…parse({repr 로 박은 인자})"` 로 명령줄을 만듭니다. 우리 입력 파일명에는
-한글·공백·괄호가 흔해서 그 방식이 깨집니다 (예: `(2023년)예금성상품 광고시 준수사항_은행연합회.hwp`).
-규격이 요구하는 것은 **응답을 즉시 202 로 돌려주는 것**이고 그건 지켜집니다.
-
-**2. 실패한 작업 디렉터리를 지우지 않습니다.**
-예제는 `ERROR` 일 때도 디렉터리를 삭제합니다. 그러면 무엇이 왜 실패했는지 남지 않습니다.
-성공(`DONE`) 시에는 예제와 같이 삭제합니다.
-
-**3. 예제의 문법 오류를 고쳤습니다.**
-`parsing_service.py` 의 `except Exception as e:(` — 괄호 위치가 잘못돼 그대로는 실행되지
-않습니다. 같은 동작(상태 파일에 ERROR 기록)으로 다시 썼습니다.
-
----
-
-## 3. `cust_meta` 를 어떻게 채웠나
-
-규격은 이름만 정하고 용도는 우리에게 맡깁니다. 검색 필터로 쓸 것은 `sattr`(검색·조회),
-참고용은 `attr`(조회만)에 넣었습니다.
-
-| 칸 | 넣은 값 | 왜 |
+| 작업 폴더 / 상태 | 응답 | 본문 |
 |---|---|---|
-| `cust_attr1` | 청크 종류 (`text`/`table`/`heading`) | 조회 시 구분용 |
-| `cust_attr2` | 청크 ID (`<문서명>_c000`) | 원본 청크로 되짚기용 |
-| `cust_attr4` | 추출 출처 (`digital`/`ocr`) | 품질 판단 재료 |
-| `cust_sattr1` | 문서명 | **검색 필터** — "이 규정 문서 안에서만" |
-| `cust_sattr2` | 상품군 (`예금성`/`대출성`/`공통`) | **검색 필터** — 파일명에서 결정론적으로 판별 |
-| `cust_sattr3` | 소속 조항 제목 | **검색 필터** — 조문 단위 좁히기 |
+| 폴더 없음 | `500` | `{"message": "Requested url does not exist."}` |
+| `PARSING` | `200` | `{"status": "PARSING"}` |
+| `ERROR` | `200` | `{"status": "ERROR", "message": "<예외이름>: <메시지>"}` |
+| `DONE` | `200` | ZIP 바이너리 |
 
-> `cust_attr6~10` 은 쓰지 않았습니다. 규격서 **본문은 5개**라 하고 **표는 10개**로
-> 적혀 있어 어느 쪽이 맞는지 확인이 필요합니다 (§7 미확정 항목 2번).
+**파싱 실패가 `500`이 아니라 `200` + `ERROR`인 것은 농협 규격이다**(`parser_howto.txt`).
+`500`은 “API 호출 자체가 잘못됐다”는 뜻으로만 쓴다. 농협 예제 코드는 파싱 실패에도
+`500`을 주는데, 규격서와 예제가 어긋나는 부분이라 규격서를 따랐다.
 
----
+성공 ZIP은 `Content-Disposition: attachment; filename=kl-core-s2-output.zip`으로 나간다.
+ZIP을 만든 뒤 작업 폴더는 지운다(`KEEP_WORK_DIR=1`이면 남긴다).
 
-## 4. `h1`~`h4` 판별 규칙
+### `GET /health`
 
-규정 문서의 조항 번호 패턴으로 결정론적으로 정합니다. **AI 판단을 쓰지 않습니다** —
-같은 문서를 두 번 넣으면 같은 결과가 나와야 하기 때문입니다.
-
-```
-h1  ←  I. II. III …            (로마 숫자)
-h1  ←  제1조 · 제2장 · 제3절 …
-h2  ←  1. 2. 3. …
-h3  ←  가. 나. 다. …  /  (1) (2) …
-h4  ←  그 외 헤딩으로 판별된 것
+```text
+200  {"status": "OK"}
 ```
 
-> **현재 알려진 한계**: HWP 문서의 대제목이 1×1 표 안에 들어 있으면 `table` 로 분류되어
-> `h1` 이 만들어지지 않습니다. 실측(`(2024년)대출모집인 광고 유의사항`): `h4` 1개, `h1` 0개.
-> 이 경우 KL 에서 본문에 최상위 `meta` 가 비게 됩니다.
-> `tests/spec_check.py` 가 이 상황을 **경고로 알려줍니다.**
+파싱도 GPU 호출도 하지 않고 API 프로세스가 살아 있는지만 본다.
 
----
+## 엔드포인트별 내부 흐름
 
-## 5. 실행 방법
+### 접수 (`POST` 규정문서, 심의 광고물 경로 공통)
 
-### 로컬 왕복 시험 (이 폴더만으로 가능)
+```text
+① uuid 발급 → PATH_TEMP/<uuid>/ 와 그 안의 image/ 생성
+② 업로드 파일을 PATH_TEMP/<uuid>/<원본파일명> 으로 저장
+③ genaikl.status 에 PARSING 기록          ← 응답보다 먼저 쓴다
+④ 백그라운드 작업 등록 (parse 또는 parse_ad)
+⑤ 202 응답 반환
+```
+
+③을 응답보다 먼저 하는 이유가 있다. KL이 `202`를 받은 직후 폴링하면 상태 파일이 아직
+없어 `UNKNOWN`이 나가는데, 그러면 “접수는 됐다는데 작업이 없다”처럼 보인다.
+
+### 규정문서 파싱 (`parse`)
+
+```text
+nh_parsing.rag_ingest.ingest_rag_file()     문서 → 텍스트 청크 + 추출 이미지
+        ↓
+nh_parsing.kl_export.export_kl_files()      KL 규격 파일로 변환
+        ↓
+작업 폴더에 남는 것
+├─ <원본파일명>_hrc.jsonl     KL이 읽는 구조화 본문
+├─ <원본파일명>_hrc.json      문서 정보
+├─ image/…                    추출 이미지
+├─ kl_parser_notes.json       우리 검수용 (ZIP에 넣지 않는다)
+└─ genaikl.status             DONE
+```
+
+`_hrc.json`의 `source`는 임시 작업 경로가 아니라 원본 출처로 바꿔 준다. `option`에
+`doc_data.origin_url` 또는 `doc_data.origin_doc_id`가 있으면 그 값을, 없으면 원본
+파일명을 쓴다.
+
+### 광고물 파싱 (`parse_ad`)
+
+```text
+nh_parsing.ad_export.process_ad_file()      파싱 + 템플릿 판정 + 라벨링을 한 번에
+        ↓
+작업 폴더에 남는 것
+├─ <원본파일명>_parsed.json   좌표·표·라벨을 담은 통합 결과
+├─ ad_summary.json            분류·템플릿·완결성만 뽑은 짧은 요약
+├─ image/<이름>_p1.jpg …      쪽 이미지 (박스를 그려 넣지 않은 원본)
+└─ genaikl.status             DONE
+```
+
+박스를 이미지에 그리지 않는다. 좌표는 이미 `_parsed.json`에 있으므로, 어떻게 그릴지는
+받는 쪽이 정하게 둔다.
+
+### 결과 ZIP 구성
+
+작업 폴더의 모든 파일을 담지 않는다. 호출자가 받아야 할 것만 골라 담는다.
+
+```text
+규정문서 ZIP
+├─ <원본파일명>_hrc.jsonl
+├─ <원본파일명>_hrc.json
+└─ <원본파일명>_img.zip     image/ 에 파일이 있을 때만
+
+광고물 ZIP
+├─ <원본파일명>_parsed.json
+├─ ad_summary.json
+└─ <원본파일명>_img.zip     image/ 에 파일이 있을 때만
+```
+
+`genaikl.status`와 `kl_parser_notes.json`은 내부 파일이라 넣지 않는다.
+
+## 파일별 역할
+
+```text
+app_custom_parser/
+├─ main.py
+│  농협 API 접수, UUID 생성, 상태 조회, ZIP 반환을 담당한다.
+│
+└─ service/
+   ├─ status.py
+   │  농협 예제와 호환되는 genaikl.status 읽기/쓰기를 담당한다.
+   │
+   └─ parsing_service.py
+      요청을 nh_parsing 파이프라인 호출로 연결하고 결과 파일을 작업 폴더에 쓴다.
+
+tests/
+├─ boot_check.py      농협 방식의 import·오류 응답 규격 검사
+├─ spec_check.py      규정문서 JSONL 형식 검사
+├─ roundtrip.py       규정문서 HTTP 왕복 검사
+└─ roundtrip_ad.py    광고물 HTTP 왕복 검사
+
+scripts/
+├─ run-local.sh       농협 배포와 같은 import 경로로 로컬 서버 기동
+└─ test-roundtrip.sh  규정문서 왕복 시험 실행
+```
+
+농협 배포 스크립트는 `cd app_custom_parser && gunicorn main:app` 형태로 기동한다.
+그래서 `main.py`와 `service/`의 평평한 폴더 구조, 그리고 `from service...` 절대 import를
+유지해야 한다. `boot_check.py`가 이 두 가지를 검사한다.
+
+## 로컬에서 실행하고 결과 확인하기
+
+로컬 실행에는 두 환경이 모두 필요하다.
+
+1. 이 폴더의 API 의존성: FastAPI, Uvicorn, multipart
+2. 프로젝트 루트의 `nh_parsing` 패키지와 그 의존성: HWP/PDF 처리 라이브러리, 스키마 등
 
 ```bash
-# 1) 진입점 의존성
+# kl_parser/ 에서 — 시험 환경 만들기
 python -m venv .venv-entry
 .venv-entry/Scripts/python.exe -m pip install -r requirements.txt
-
-# 2) 파싱 본체 (로컬 in-process 시험용. 배포 시에는 에이전트 서비스에 있습니다)
 .venv-entry/Scripts/python.exe -m pip install -e ..
 
-# 3) 기동·실패경로 검사 — 서버를 띄우기 전에 먼저 (외부 의존 없음, 1초)
+# ① 서버·GPU 없이 되는 검사 (1초)
 .venv-entry/Scripts/python.exe tests/boot_check.py
+#   → 검사 3건 · 실패 0건
 
-# 4) 서버 기동
-./scripts/run-local.sh                      # http://127.0.0.1:9101
-
-# 5) 왕복 시험 (다른 터미널에서)
-./scripts/test-roundtrip.sh                                    # 규정문서
-.venv-entry/Scripts/python.exe tests/roundtrip_ad.py <광고파일>  # 광고물
-```
-
-실제 실행 결과 (2026-08-21):
-
-```
-입력: (2024년)대출모집인 광고 유의사항_은행연합회.hwp  (80,384 bytes)
-POST /parsing → 202  {"result": "OK", "body": {"uuid": "0b4a…", "timeout": 600}}
-GET  /parsing/result → 200 zip 1,724 bytes (4s 대기)
-zip 내용 2개: ['…_hrc.json', '…_hrc.jsonl']
-
-[OK ] (2024년)대출모집인 광고 유의사항_은행연합회.hwp_hrc.jsonl  (6행)
-        경고: h1 이 없다 (h2 이하만 있음) — 최상위 meta 가 비게 된다
-검사 1건 · 실패 0건
-```
-
-### 배포 형태 (에이전트 분리)
-
-```bash
-export AGENT_URL=http://agent-service:8080
+# ② 서버 기동
 ./scripts/run-local.sh
+#   → 진입점 기동: http://127.0.0.1:9101
 ```
 
-이때 진입점에는 fastapi·uvicorn·multipart 만 있으면 됩니다 — `nh_parsing` 불필요.
-그 3개는 **농협 이미지에 이미 있으므로 반입할 것이 없습니다** (`requirements.txt` 주석 참조).
-
-### 환경 변수
-
-| 이름 | 기본값 | 뜻 |
-|---|---|---|
-| `PATH_TEMP` | `./temp` | 작업 디렉터리 상위 |
-| `TIMEOUT` | `1800` | 202 응답의 `timeout` 값(초) = KL 이 기다려 주는 시간. **600 이었다가 올렸다** — 실측에서 광고 1건이 627초 걸려 이미 넘었다(§10) |
-| `AGENT_URL` | (없음) | 있으면 remote 모드 |
-| `AGENT_TIMEOUT` | `600` | 에이전트 호출 타임아웃(초) |
-| `KEEP_WORK_DIR` | (없음) | `1` 이면 성공해도 작업 디렉터리 보존(개발용) |
-
----
-
-## 6. 규격 검사기
-
-우리 출력이 규격을 지키는지 코드로 검사합니다. **농협 정답 샘플도 같은 검사기를 통과합니다.**
+서버가 떴으면 실제로 불러 본다.
 
 ```bash
-.venv-entry/Scripts/python.exe tests/spec_check.py samples/out
-.venv-entry/Scripts/python.exe tests/spec_check.py <농협 out_sample_hrc.jsonl 경로>
+# 접수 — uuid 를 받는다
+curl -X POST http://127.0.0.1:9101/parsing -F "src_file=@문서.pdf"
+#   → {"result":"OK","body":{"uuid":"3f2a…","timeout":1800}}
+
+# 폴링 — 끝날 때까지 PARSING 이 나온다
+curl http://127.0.0.1:9101/parsing/result/3f2a…
+#   → {"status":"PARSING"}
+
+# 완료되면 같은 요청이 ZIP 을 준다
+curl -o out.zip http://127.0.0.1:9101/parsing/result/3f2a…
 ```
 
-검사 항목은 §2 표의 8~15번입니다. 규격서와 정답 샘플이 어긋나는 항목은 **오류가 아니라
-경고**로 냅니다 — 어느 쪽이 맞는지는 확인이 필요한 사항이기 때문입니다.
+돌고 있는 동안 `temp/<uuid>/`를 열어 보면 진행 상황이 그대로 보인다 — 업로드된 원본,
+`genaikl.status`, 그리고 완성되는 대로 결과 파일이 쌓인다.
 
----
+왕복을 스크립트로 확인할 수도 있다. 다만 이 둘은 **실제 파싱을 수행**하므로
+PaddleX·VLM 서비스가 준비된 환경에서만 돌아간다.
 
-## 7. 우리 규격과 농협 확인 항목
-
-> **2026-08-24 방침 전환.** 이 절은 원래 "확인이 필요한 사항 9건"이었습니다 — 규격서와
-> 정답 샘플이 어긋나는 대목을 회신 대기로 두고 멈춰 있었습니다. 이제 **정답 샘플은
-> 예시로 보고 우리가 규격을 정합니다.** 정본은
-> [`docs/etc/J-우리-규격-정본-v1.md`](../docs/etc/J-우리-규격-정본-v1.md) 입니다.
-> 아래는 그 요약입니다.
-
-**결정한 것** (코드에 반영됨, `spec_check.py` 가 지킴)
-
-| # | 항목 | 규격서 | 정답 샘플 | **우리 규격 v1** |
-|---|---|---|---|---|
-| 1 | `item` 유형 `break` | 없음 | 1행에 있음 | **쓰지 않는다.** 검사기는 경고만 (농협이 나중에 요구할 수 있어 실패 아님) |
-| 2 | `cust_attr` 개수 | 본문 **5개** | 표 **10개** | **5개까지만.** 6~10 저장 여부 미확인 |
-| 3 | `image` `width`·`height` 단위 | mm | PDF 는 pt, HWP 는 cm 로 보임 | **mm** — 단위를 명시한 유일한 문장이라 |
-| 4 | `image` `ratio` 형식 | "페이지 크기 대비" | `"11%"` | **문자열 `%`** |
-| 5 | 청크 단위 | 명시 없음 | — | **청크 = item 1:1** |
-| 6 | `image` 의 `value` | "이미지 파일명" | 절대경로 | **파일명만** — 경로는 농협 서버 것이라 옮기면 깨진다 |
-| 7 | `parsed_status` | 명시 없음 | `"S"` | **`"S"` 고정**, 실패는 상태 파일에 ERROR |
-| 8 | `page_info` 단위 | 명시 없음 | PDF pt, HWP cm | PDF 는 **pt 실측**, HWP 는 **빈 배열**(모르는 값을 지어내지 않음) |
-| 9 | 파싱 실패 응답 | **200+ERROR** | 예제 코드는 500 | **규격서 본문(200+ERROR).** `boot_check.py` 가 확인 |
-
-**농협에 요구할 것** (J문서 §2)
-
-| # | 요구 | 왜 |
-|---|---|---|
-| ① | `gunicorn timeout` 을 **1800초 이상**으로 | 예제는 `timeout=180`. 우리 광고 파싱 실측 **627초** — 180초면 일꾼이 먼저 죽는다 |
-| ② | 파서 신고 `TIMEOUT` **1800초** | 같은 이유. 규격 기본값 3시간보다 보수적 |
-| ③ | `item` 에 **좌표 칸**을 열어 주거나 `cust_attr` 를 좌표 용도로 써도 되는지 | 지금은 광고물을 KL 밖에 따로 둔다(§9). 좌표를 담을 수 있으면 창구를 합칠 수 있다 |
-| ④ | `cust_attr6~10` 이 실제로 저장되는지 | 되면 좌표·역할을 더 담을 수 있다 |
-
-**아직 못 받은 것**
-
-| # | 항목 | 상태 |
-|---|---|---|
-| ⑤ | **KL 검색(조회) API 규격** | 자료 자체를 못 받았다. 미구현 |
-| ⑥ | PostgreSQL 접속 정보 | 미제공. 설계는 [I문서](../docs/etc/I-광고-파싱결과-저장-설계.md) 에 굳혀 뒀다 |
-| ⑦ | 라이브러리 버전 조합 | 농협 `fastapi 0.139.2` ↔ 우리 시험 `0.115.6` |
-| ⑧ | `gunicorn_config.py` 원본 | 사내 모듈 `import dlp` 사용 — 우리 PC 에서 실행 불가 |
-
----
-
-## 8. 폴더 구성
-
-**폴더 이름과 구조는 농협 예제와 글자까지 같습니다** — 배포 스크립트가
-`export FLOW_APP_NAME="app_custom_parser"` → `cd $FLOW_APP_NAME` → `gunicorn main:app`
-이라, 이름이 다르거나 한 겹 더 감싸면 뜨지 않습니다. `service/` 에 `__init__.py` 를
-두지 않는 것도 예제와 같습니다(절대 import 가 되도록).
-
-```
-kl_parser/
-├── README.md                        이 문서
-├── requirements.txt                 로컬 시험 환경 재현용 (**반입 0건** — §7 참조)
-├── app_custom_parser/               ← 농협 예제와 같은 이름 (FLOW_APP_NAME)
-│   ├── main.py                      진입점 — POST /parsing, /ad/parsing, GET /parsing/result/{uuid}
-│   └── service/                     (__init__.py 없음 — 예제와 동일)
-│       ├── status.py                농협 예제의 DO NOT EDIT 블록 (그대로)
-│       └── parsing_service.py       파싱 본체 — 우리 파이프라인 호출
-├── scripts/
-│   ├── run-local.sh                 서버 기동 (배포와 같은 cwd·import 경로로 띄운다)
-│   └── test-roundtrip.sh            왕복 시험
-├── tests/
-│   ├── boot_check.py                기동·실패경로 검사 (서버 없이, 외부 의존 없이)
-│   ├── roundtrip.py                 규정문서 트랙: POST → 폴링 → zip → 규격 검사
-│   ├── roundtrip_ad.py              광고물 트랙: 위와 같고 산출물 검사만 다름
-│   └── spec_check.py                `_hrc.jsonl` 규격 검사기 (단독 실행 가능)
-└── samples/
-    ├── in/                          입력 예
-    ├── out/                         규정문서 출력 (왕복 시험이 채운다)
-    └── out_ad/                      광고물 출력 (왕복 시험이 채운다)
+```bash
+./scripts/test-roundtrip.sh                                     # 규정문서
+.venv-entry/Scripts/python.exe tests/roundtrip_ad.py <광고파일>   # 광고물
 ```
 
-## 9. 두 트랙의 산출물
+## 환경변수
 
-| | 규정문서 (`POST /parsing`) | 광고물 (`POST /ad/parsing`) |
-|---|---|---|
-| 받는 곳 | KL 벡터DB 색인 | 심의 엔진 (색인 안 함) |
-| 산출물 | `_hrc.jsonl` · `_hrc.json` · `_img.zip` | `_parsed.json`(통합) · `ad_summary.json` · `_img.zip` |
-| 좌표 | 없음 (규격에 칸이 없다) | **있다** — 쪽·영역·줄 bbox |
-| 이미지 | 추출 이미지 + **VLM 캡션**(text item 으로 함께 색인) | 쪽 원본 이미지 (박스 안 그림 — 좌표가 JSON 에 있다) |
+| 변수 | 기본값 | 역할 |
+|---|---:|---|
+| `PATH_TEMP` | `./temp` | UUID별 작업 폴더의 상위 경로 |
+| `TIMEOUT` | `1800`초 | KL에게 알려 주는 최대 대기 시간 |
+| `KEEP_WORK_DIR` | 꺼짐 | `1`이면 성공한 작업 폴더도 남김 |
+| `PADDLEX_URL` | 별도 설정 | OCR/레이아웃 GPU 서비스 주소 (`nh_parsing`이 사용) |
+| `GEMMA_URL` | 별도 설정 | VLM GPU 서비스 주소 (`nh_parsing`이 사용) |
 
-광고물이 `_hrc.jsonl` 이 아닌 이유: 심의는 "이 지적의 근거가 원본 어디인가"를 화면에
-표시해야 하는데 `_hrc.jsonl` 규격에는 좌표·역할·판독대조를 담을 칸이 없어 그 정보가
-전부 버려집니다.
+## 현재 확인된 것과 남은 확인
 
----
+확인됨:
 
-## 10. 실측 — 농협 규격 왕복 (2026-08-24)
+- 농협과 같은 `cd app_custom_parser && gunicorn main:app` import 방식 검사 통과
+- 오류 상태와 없는 UUID 응답 규칙 검사 통과
+- 농협 제공 JSONL 샘플이 `spec_check.py`를 통과
+- 규정문서·광고물 두 트랙 모두 로컬에서 접수 → 폴링 → ZIP 왕복 확인
 
-진입점을 **배포와 같은 방식**(`cd app_custom_parser`, `main:app`)으로 띄우고 7건을 왕복했다.
+남은 확인:
 
-### 규정문서 트랙 `POST /parsing`
+- **Python 3.11 대응**: 현재 `nh_parsing`은 `requires-python >=3.13`인데 농협 환경은
+  3.11 기준이다. 3.11에서 돌게 맞추는 작업을 추후 진행한다
+- 실제 농협 Custom Parser 이미지에서 `nh_parsing`과 HWP/JVM 의존성을 함께 반입할 수 있는지
+- 농협 내부 PaddleX/VLM 주소·인증·timeout 설정
+- 실제 농협 환경에서 장시간 문서 파싱과 결과 ZIP 수신이 안정적으로 되는지
+- 광고 트랙에 HWP/HWPX를 넣는 경우. 파싱 자체는 라우팅되지만 좌표가 없어 광고 트랙의
+  목적(근거 위치 표시)을 채우지 못한다. 이 조합은 이 API로 검증하지 않았다
+- KL 검색 API를 사용한 최종 규정 검색·심의 판단 연결
 
-| 파일 | 응답 | zip | jsonl | 소요 |
-|---|---|---|---|---|
-| (2023년)예금성상품 광고시 준수사항.hwp | 202 → 200 zip | 3종 | 82행 | 4초 |
-| (2025년)대출성 상품 광고시 준수사항.pdf | 202 → 200 zip | 3종 | 65행 | 44초 |
+## 정리
 
-이미지 3건에 **VLM 캡션**이 붙어 `text` item 으로 함께 색인된다(§2-15):
-
-> `[이미지 사례 odl-img-p59]` 금융상품 광고에서 과장될 수 있는 '90초'라는 소요 시간(빨간 원)과
-> '바로 입금'(빨간 박스)이라는 즉시성을 강조한 사례를 보여줍니다.
-> **이미지 내 텍스트:** 내 통장에 비상금이 / 90초면 뚝딱 / 최대한도 3백만원 …
-
-### 광고물 트랙 `POST /ad/parsing`
-
-| 파일 | 템플릿 판정 | 줄 | 라벨닿음 | 정본층 대조 | 소요 |
-|---|---|---|---|---|---|
-| [예금성상품-적금] 올원e적금.png | 예금성상품-적립식 | 78 | 64 | ✓ 73줄 일치 | 198초 |
-| NH농협은행-2026_002-예금성.png | 예금성상품-적립식 | 98 | 38 | ✓ 93줄 일치 | 204초 |
-| 2. 예금성상품(적립식).pdf | 예금성상품-적립식 | 76 | 54 | ✓ 69줄 일치 | 153초 |
-| 13. 대출성상품.pdf | 대출성상품-상품명 노출 | 69 | 56 | ✓ 69줄 일치 | **627초** |
-| 13. 카드상품.jpg | 카드상품-상품명 미노출 | 53 | 20 | ✓ 49줄 일치 | 72초 |
-
-**"정본층 대조"** = 진입점을 거친 결과가 직접 실행 결과와 같은가. 진입점은 얇은 껍데기라
-같아야 한다. OCR·디지털 텍스트(결정론 층)는 **5건 전부 줄·좌표까지 완전 일치**했다.
-VLM 스윕 회수 줄은 0~7줄 범위에서 실행마다 갈리는데, 이는 이미 알려진 층의 변동이지
-진입점 결함이 아니다(같은 진입점을 연달아 2회 돌리면 0건 차이).
-
-### 여기서 드러난 것 2가지
-
-**① 신고 timeout 을 넘겼다.** 대출성 627초 > 기존 기본값 600초. 시연이었으면 KL 이 먼저
-포기했을 것이다. `TIMEOUT` 기본값을 1800 으로 올렸다. 대부분이 VLM 대기다(312초 중 309초).
-
-**② 환경이 다르면 파싱 결과가 갈린다.** 개발 venv 와 진입점 venv 의 `pypdfium2` 가
-5.12.0 ↔ 5.13.0 이었는데, **같은 PDF·같은 dpi·같은 크기인데 렌더된 픽셀 해시가 달랐고**
-그래서 OCR 이 다르게 읽었다(69줄 중 글자 3건 `'7적금'↔'기적금'`, 좌표 13건). 원인을
-찾기 전까지는 진입점 어댑터 결함으로 보였다. `pyproject.toml` 에서 `pypdfium2==5.12.0`
-으로 못박아 해소했다 — 농협 폐쇄망에도 우리가 whl 을 반입하므로 여기서 고정해야
-개발·시연·납품이 같은 결과를 낸다.
+> `kl_parser`는 농협 KL이 호출하는 Custom Parser API입니다. 파일을 접수하고 UUID로
+> 상태를 관리한 뒤, 실제 파싱은 같은 프로세스의 `nh_parsing`에 맡깁니다. `nh_parsing`은
+> 농협 내부의 PaddleX OCR과 VLM GPU 서비스를 HTTP로 호출해 문서를 구조화합니다.
+> 규정문서는 KL 색인용 JSONL로, 광고물은 좌표와 템플릿 라벨을 포함한 JSON으로
+> 반환합니다. 현재 API 계약과 로컬 왕복 검증은 되어 있고, Python 3.11 대응과 농협 운영
+> 환경 의존성 반입, 실제 GPU 연동은 배포 전 확인 항목입니다.
