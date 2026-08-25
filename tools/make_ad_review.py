@@ -217,9 +217,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="src", type=Path, default=ROOT / "out_ad")
     ap.add_argument("--out", type=Path, default=ROOT / "out_ad" / "review.html")
+    ap.add_argument("--only", default=None,
+                     help="파일명(확장자 제외) 쉼표로 여러 개 — 전수조사 폴더에서 시연용 몇 건만 뽑을 때")
     args = ap.parse_args()
 
     files = sorted((args.src / "json").glob("*.json"))
+    if args.only:
+        keys = {k.strip() for k in args.only.split(",") if k.strip()}
+        files = [p for p in files if p.stem in keys]
+        missing = keys - {p.stem for p in files}
+        if missing:
+            raise SystemExit(f"--only 로 지정했지만 없는 파일: {missing}")
     if not files:
         raise SystemExit(f"통합 JSON 이 없다 — run_ad_label.py 를 먼저 돌려라: {args.src}")
 
