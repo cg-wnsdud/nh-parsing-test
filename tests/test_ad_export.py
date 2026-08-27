@@ -93,7 +93,8 @@ def test_좌표와_라벨이_한_줄에_같이_있다(pack: dict) -> None:
     """이 통합의 존재 이유 — 하류가 두 파일을 line_ref 로 이어 붙일 필요가 없어야 한다."""
     doc = _doc(["NH농협은행"])
     u = _build(doc, "예금성상품-적립식", pack,
-               vlm={"p1_r000": {"gubun": "회사명", "confidence": 0.9}})
+               vlm={"p1_r000": [{"gubun": "회사명", "confidence": 0.9,
+                                 "line_from": 0, "line_to": 0}]})
     line = u["pages"][0]["regions"][0]["lines"][0]
     assert line["bbox"] == [0, 0, 1, 1]
     assert [l["gubun"] for l in line["labels"]] == ["회사명"]
@@ -150,6 +151,7 @@ def test_영역_라벨이_있으면_그_안의_줄도_닿은_것으로_센다(pa
     """문구가 안 맞아도 '이 영역은 유의사항' 이면 그 줄들의 소속은 아는 것이다."""
     doc = _doc(["표기가 다른 유의사항 문장", "두 번째 줄"])
     u = _build(doc, "예금성상품-적립식", pack,
-               vlm={"p1_r000": {"gubun": "유의사항", "confidence": 0.8}})
+               vlm={"p1_r000": [{"gubun": "유의사항", "confidence": 0.8,
+                                 "line_from": 0, "line_to": 1}]})
     assert u["completeness"]["labeled"] == 0
     assert u["completeness"]["lines_covered"] == 2

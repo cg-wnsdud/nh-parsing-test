@@ -13,6 +13,7 @@
 
 import io
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -73,7 +74,11 @@ def _compare_with_direct(unified: dict, problems: list[str]) -> None:
     처음엔 둘을 뭉쳐 비교해서 "줄 수가 다르다(53 vs 55)"로 실패가 났는데, 갈라 보니
     OCR 49줄은 완전히 같고 vlm_sweep 만 4↔6 이었다 — 없는 결함을 만들어 낸 비교였다.
     """
-    direct = ROOT.parent / "out_ad" / "json" / f'{unified["doc_id"]}.json'
+    # 대조 대상은 **현행 전수조사 산출 폴더**다. 예전 `out_ad/` 는 tmp/ 창고로 옮겨졌고
+    # (2026-08-25) 그건 5건짜리 낡은 것이라, 그쪽을 가리키면 대조가 조용히 생략된다.
+    # `AD_OUT_DIR` 로 덮어쓸 수 있게 둔다 — 폴더 이름이 또 바뀔 때 코드를 안 고치게.
+    out_root = os.environ.get("AD_OUT_DIR", "out_ad_full")
+    direct = ROOT.parent / out_root / "json" / f'{unified["doc_id"]}.json'
     if not direct.is_file():
         print(f"  (직접 실행 결과가 없어 대조 생략: {direct.name})")
         return
@@ -167,10 +172,17 @@ def main() -> int:
         time.sleep(3)
         waited += 3
 
-    out = ROOT / "samples/out_ad"
+    # 파일 하나당 폴더 하나로 받는다. 예전엔 `samples/out_ad` 를 통째로 비우고 풀어서,
+    # 여러 파일을 잇달아 돌리면 **마지막 것만 남았다.** 시연 첨부용으로 3건을 함께
+    # 내보내려면 그 구조로는 안 된다.
+    out = ROOT / "samples/out_ad" / src.stem
     out.mkdir(parents=True, exist_ok=True)
     for p in out.glob("*"):
-        p.unlink()
+        if p.is_file():
+            p.unlink()
+    # 농협 KL 이 실제로 받는 ZIP 원본도 남긴다 — 풀어 놓은 파일만으로는 "규격대로
+    # ZIP 이 왔다"를 첨부로 보일 수 없다.
+    (out / "kl-core-s2-output.zip").write_bytes(raw)
     names = []
     with zipfile.ZipFile(io.BytesIO(raw)) as zf:
         for info in zf.infolist():

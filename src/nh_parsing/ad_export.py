@@ -93,6 +93,7 @@ def build_unified(
     `label` 은 `ad_template.label_document()` 의 반환값이다.
     """
     labels_by_ref = _labels_by_ref(label)
+    vlm_gubun_by_ref = _vlm_gubun_by_ref(label)
     regions_meta = {r["region_id"]: r for r in label.get("region_labels") or []}
 
     pages_out: list[dict] = []
@@ -103,7 +104,7 @@ def build_unified(
             rid = region.get("region_id")
             meta = regions_meta.get(rid) or {}
             lines_out = [
-                _line(f"p{pno}/{rid}/L{i:02d}", ln, labels_by_ref)
+                _line(f"p{pno}/{rid}/L{i:02d}", ln, labels_by_ref, vlm_gubun_by_ref)
                 for i, ln in enumerate(region.get("lines") or [])
             ]
             regions_out.append({
@@ -112,10 +113,13 @@ def build_unified(
                 # 파서가 붙인 범용 역할(제목·유의사항·본문…). 템플릿 항목과 다른 어휘라
                 # 덮어쓰지 않고 나란히 둔다 — 서로 검산에 쓴다.
                 "role": region.get("role"),
-                # 2층: VLM 이 정한 템플릿 항목.
+                # 2층: VLM 이 정한 템플릿 항목(대표값 — 영역 안 최대 줄범위 판정).
                 "gubun": meta.get("gubun"),
                 "gubun_source": meta.get("source"),
                 "gubun_confidence": meta.get("confidence"),
+                # 영역 하나에 항목이 여러 개 섞였을 때 그 내역 전부. gubun 하나로
+                # 접히면서 나머지가 사라지지 않도록 항상 싣는다(하나뿐이면 원소 1개).
+                "gubun_breakdown": meta.get("gubun_breakdown") or [],
                 # 1층: 이 영역 안에서 완전일치한 템플릿 문구들.
                 "phrase_hits": meta.get("phrase_hits") or [],
                 "phrase_share": meta.get("phrase_share", 0.0),
@@ -141,7 +145,7 @@ def build_unified(
             "regions": regions_out,
             # 영역에 못 붙은 낱줄. 라벨은 못 받아도 좌표와 텍스트는 그대로 실린다.
             "unassigned_lines": [
-                _line(f"p{pno}/unassigned/L{i:02d}", ln, labels_by_ref)
+                _line(f"p{pno}/unassigned/L{i:02d}", ln, labels_by_ref, vlm_gubun_by_ref)
                 for i, ln in enumerate(page.get("unassigned_lines") or [])
             ],
         })
@@ -177,7 +181,10 @@ def unified_lines(pages: list[dict]) -> list[dict]:
     return out
 
 
-def _line(ref: str, ln: dict, labels_by_ref: dict[str, list[dict]]) -> dict:
+def _line(
+    ref: str, ln: dict, labels_by_ref: dict[str, list[dict]],
+    vlm_gubun_by_ref: dict[str, list[str]] | None = None,
+) -> dict:
     return {
         "line_ref": ref,
         "text": ln.get("text") or "",
@@ -189,9 +196,14 @@ def _line(ref: str, ln: dict, labels_by_ref: dict[str, list[dict]]) -> dict:
         "vlm_reading": ln.get("vlm_reading"),
         "vlm_reading_conf": ln.get("vlm_reading_conf"),
         "vlm_reading_stage": ln.get("vlm_reading_stage"),
-        # 이 줄에 걸린 템플릿 문구. 한 줄에 여러 문구가 걸릴 수 있어 목록이다
-        # (실측: 유의사항이 `■` 로 붙어 한 줄에 두 문구가 들어 있는 경우).
+        # 1층: 이 줄에 걸린 템플릿 **정형** 문구(완전일치, 결정론). 한 줄에 여러
+        # 문구가 걸릴 수 있어 목록이다(실측: 유의사항이 `■` 로 붙어 한 줄에 두
+        # 문구가 들어 있는 경우).
         "labels": labels_by_ref.get(ref) or [],
+        # 2층: VLM 이 이 줄을 어느 항목으로 판정했는지(참고용, 1층과 우열 없음).
+        # 영역이 항목 여러 개로 쪼개졌을 때(25번 문서 등) 어느 항목인지 줄 단위로
+        # 남기는 자리 — region.gubun 하나로 접히며 사라지던 정보다.
+        "vlm_gubun": (vlm_gubun_by_ref or {}).get(ref) or [],
     }
 
 
@@ -247,7 +259,16 @@ def _mostly_inside(inner: list[int], outer: list[int], min_share: float = 0.5) -
 
 
 def _labels_by_ref(label: dict) -> dict[str, list[dict]]:
-    """`items` 의 매칭 결과를 줄 기준으로 뒤집는다."""
+    """정형 문구의 **완전일치** 결과만 줄 기준으로 뒤집는다.
+
+    VLM 이 판정한 변수형 항목(`item["line_refs"]`)은 여기 안 섞는다 — 섞으면 두
+    가지가 동시에 깨진다. ① 완전일치·VLM 판정이 같은 줄에 겹치면 `labels` 에
+    같은 gubun 이 두 번 실린다. ② `completeness.labeled`(결정론적 문구 매칭만
+    재는 지표)가 VLM 판정까지 세어 의미가 달라진다(2026-08-26 시험에서 둘 다
+    실측 회귀로 잡혔다). VLM 쪽은 `_vlm_gubun_by_ref` 로 따로 뒤집어 별도
+    필드(`line.vlm_gubun`)에 싣는다 — 두 층은 나란히 두고 우열을 안 가린다는
+    원칙(§2층 주석)을 줄 단위에도 그대로 지킨다.
+    """
     out: dict[str, list[dict]] = {}
     for item in label.get("items") or []:
         for phrase in item.get("fixed_phrases") or []:
@@ -265,14 +286,38 @@ def _labels_by_ref(label: dict) -> dict[str, list[dict]]:
     return out
 
 
+def _vlm_gubun_by_ref(label: dict) -> dict[str, list[str]]:
+    """VLM 이 줄 범위로 판정한 항목명을 줄 기준으로 뒤집는다(2층, 참고용).
+
+    `_labels_by_ref`(1층, 완전일치)와 나란히 두는 목적으로 분리했다 — 자세한 이유는
+    그 함수 docstring 참조.
+    """
+    out: dict[str, list[str]] = {}
+    for item in label.get("items") or []:
+        for ref in item.get("line_refs") or []:
+            bucket = out.setdefault(ref, [])
+            if item["gubun"] not in bucket:
+                bucket.append(item["gubun"])
+    return out
+
+
 def _items_index(label: dict, labels_by_ref: dict) -> list[dict]:
-    """항목 → (문구 상태 + 그 문구가 걸린 줄). 줄 쪽 사실의 역방향 보기다."""
+    """항목 → (문구 상태 + 그 문구가 걸린 줄). 줄 쪽 사실의 역방향 보기다.
+
+    `line_refs` 는 두 층의 합집합이다 — ① `labels_by_ref`(1층, 정형 문구 완전일치)
+    ② `item["line_refs"]`(2층, `ad_template.label_document` 이 이미 VLM 판정으로
+    채워 준 것). 여기서 ②를 안 합치면 변수형 항목(`상품명`·`대출한도` 등)이
+    VLM 이 실제로 위치를 짚었는데도 `line_refs` 가 항상 빈 채로 나간다 —
+    `label_document` 이 애써 채운 값이 이 단계에서 조용히 지워지는 결함이었다
+    (2026-08-26 발견).
+    """
     items: list[dict] = []
     for item in label.get("items") or []:
-        refs = [
+        fixed_refs = {
             r for r in labels_by_ref
             if any(e["gubun"] == item["gubun"] for e in labels_by_ref[r])
-        ]
+        }
+        refs = fixed_refs | set(item.get("line_refs") or [])
         items.append({**item, "line_refs": sorted(refs)})
     return items
 

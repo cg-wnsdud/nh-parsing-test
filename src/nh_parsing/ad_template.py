@@ -533,10 +533,14 @@ def _gubun_schema(gubuns: list[str]) -> dict:
                     "type": "object",
                     "properties": {
                         "region_id": {"type": "string"},
+                        # 그 영역 안에서 이 항목이 차지하는 줄 범위(0-based, 포함).
+                        # 한 영역이 통째로 한 항목이면 line_from=0, line_to=마지막줄.
+                        "line_from": {"type": "integer"},
+                        "line_to": {"type": "integer"},
                         "gubun": {"type": "string", "enum": [*gubuns, _ABSTAIN]},
                         "confidence": {"type": "number"},
                     },
-                    "required": ["region_id", "gubun", "confidence"],
+                    "required": ["region_id", "line_from", "line_to", "gubun", "confidence"],
                     "additionalProperties": False,
                 },
             },
@@ -564,11 +568,18 @@ _GUBUN_PROMPT = """당신은 금융상품 광고심의 보조 시스템의 항�
 - y_ratio 는 화면에서의 세로 위치입니다(0=최상단, 1=최하단). 참고만 하세요.
 - 첨부 이미지는 전체 화면 축소본입니다.
 
+**한 영역 안에 항목이 여러 개 섞여 있을 수 있습니다.** 각 영역의 줄은
+`[00] 텍스트` `[01] 텍스트` 처럼 번호가 붙어 있습니다. 그 영역 전체가 한 항목이면
+`line_from=0, line_to=마지막 줄번호` 로 한 번만 답하세요. 항목이 줄 경계에서
+바뀌면(예: 0~2번 줄은 대출금리, 3~4번 줄은 대출기간) **같은 region_id 를 항목
+수만큼 여러 번** 반환하고 각각 다른 줄 범위를 쓰세요. 범위는 겹치지 않아야 하고
+빠지는 줄이 없어야 합니다(0번줄부터 마지막 줄까지 전부 어느 판정엔가 속해야 함).
+
 영역 목록:
 {regions}
 
 먼저 analysis 에 이 광고가 어떤 내용인지 한두 문장으로 적은 뒤,
-**모든 region_id** 에 대해 하나씩 판정을 반환하세요."""
+**모든 region_id 의 모든 줄이 하나 이상의 판정에 포함되도록** 반환하세요."""
 
 
 def _gubun_definitions(pack: dict, template_id: str) -> str:
@@ -643,8 +654,13 @@ def _label_chunk(chunk, page, template_id, defs, schema, canvas, doc) -> dict:
     for r in chunk:
         bbox = r.get("bbox") or []
         y = round(bbox[1] / canvas_h, 2) if (bbox and canvas_h) else "?"
-        excerpt = " / ".join((l.get("text") or "") for l in r["lines"][:4])[:160]
-        listing.append(f'- region_id={r["region_id"]} y_ratio={y} 텍스트: "{excerpt}"')
+        # 이전에는 앞 4줄만 발췌했다 — 영역이 여러 항목을 담고 있으면(표 행이 뭉친 경우
+        # 등) 뒤쪽 줄이 안 보여 전부 첫 항목으로 오판됐다(2026-08-26 실측, 25번 문서).
+        # 전체 줄을 번호와 함께 준다. 길이는 상한을 두어 프롬프트 폭주를 막는다.
+        numbered = " ".join(
+            f"[{i:02d}]{(l.get('text') or '')[:40]}" for i, l in enumerate(r["lines"][:40])
+        )[:600]
+        listing.append(f'- region_id={r["region_id"]} y_ratio={y} 줄들: {numbered}')
 
     parts: list[dict] = [{"type": "text", "text": _GUBUN_PROMPT.format(
         template_id=template_id, gubun_defs=defs, abstain=_ABSTAIN,
@@ -665,7 +681,9 @@ def _label_chunk(chunk, page, template_id, defs, schema, canvas, doc) -> dict:
         )
         return {"verdicts": {}, "missing": asked}
 
-    verdicts: dict[str, dict] = {}
+    # region_id → 판정 목록. 한 영역에 항목이 여러 개 섞였으면 여기 여러 개가 쌓인다
+    # (예전엔 dict[str, dict] 라 영역당 값이 하나뿐이었다 — 뒤에 온 판정이 앞을 덮었다).
+    verdicts: dict[str, list[dict]] = {}
     answered: set[str] = set()
     for v in data.get("regions") or []:
         rid = v.get("region_id")
@@ -673,7 +691,12 @@ def _label_chunk(chunk, page, template_id, defs, schema, canvas, doc) -> dict:
             continue        # 안 물어본 영역을 지어낸 경우 — 버린다
         answered.add(rid)
         if v.get("gubun") and v["gubun"] != _ABSTAIN:
-            verdicts[rid] = {"gubun": v["gubun"], "confidence": v.get("confidence")}
+            verdicts.setdefault(rid, []).append({
+                "gubun": v["gubun"],
+                "confidence": v.get("confidence"),
+                "line_from": v.get("line_from", 0),
+                "line_to": v.get("line_to", 0),
+            })
     return {"verdicts": verdicts, "missing": [r for r in asked if r not in answered]}
 
 
@@ -681,15 +704,18 @@ def label_document(
     doc: dict,
     template_id: str | None,
     pack: dict | None = None,
-    vlm_labels: dict[str, dict] | None = None,
+    vlm_labels: dict[str, list[dict]] | None = None,
 ) -> dict:
     """파싱 결과에 템플릿 라벨을 붙이고 **모든 줄을 실어** 돌려준다.
 
     `template_id` 가 None(판단불가)이면 라벨 없이 전 줄을 `other_content` 로 낸다 —
     판정을 못 했다고 텍스트를 버리지는 않는다.
 
-    `vlm_labels` 는 `label_regions_vlm()` 결과(2층). 없으면 1층만으로 돈다 —
-    VLM 없이도 결정론적으로 재현되는 부분이 그대로 나온다.
+    `vlm_labels` 는 `label_regions_vlm()` 결과(2층) — `region_id` → 판정 목록
+    (`{gubun, confidence, line_from, line_to}`). 한 영역에 항목이 여러 개 섞였으면
+    목록에 여러 개가 온다(2026-08-26 이전에는 영역당 값 1개였다 — VLM 이 앞 4줄만
+    보고 영역 전체를 그 항목으로 오태깅했다. 25번·3.예금성 문서 실측). 없으면
+    1층만으로 돈다 — VLM 없이도 결정론적으로 재현되는 부분이 그대로 나온다.
     """
     pack = pack or load_pack()
     lines = collect_lines(doc)
@@ -721,19 +747,38 @@ def label_document(
                 rec["prefix_refs"] = refs
             found_by_gubun.setdefault(t["gubun"], []).append(rec)
 
+        # VLM 이 붙인 줄 단위 판정을 항목명 → line_ref 목록으로 뒤집는다. line_from/
+        # line_to 는 그 영역의 lines 배열 안 인덱스이므로 L{i:02d} 로 그대로 바뀐다
+        # (label_regions_vlm 이 준 인덱스와 collect_lines 의 인덱스는 같은 순회 순서).
+        vlm_refs_by_gubun: dict[str, list[str]] = {}
+        for rid, verdicts in (vlm_labels or {}).items():
+            pno = rid.split("_", 1)[0]                       # "p1_r011" → "p1"
+            for v in verdicts:
+                lo, hi = v.get("line_from", 0), v.get("line_to", 0)
+                if hi < lo:
+                    lo, hi = hi, lo
+                for i in range(lo, hi + 1):
+                    ref = f"{pno}/{rid}/L{i:02d}"
+                    if ref in by_ref:
+                        vlm_refs_by_gubun.setdefault(v["gubun"], []).append(ref)
+
         for item in tpl["items"]:
             g = item["gubun"]
             fixed = found_by_gubun.get(g, [])
             variables = [e for e in item["entries"] if e["kind"] == "변수"]
+            var_refs = sorted(set(vlm_refs_by_gubun.get(g, [])))
             items_out.append({
                 "gubun": g,
                 "requirement": item["requirement"],
                 "match_mode": item["match_mode"],
                 "fixed_phrases": fixed,
-                # 변수형은 값 추출이 필요해 여기서 다루지 않는다 — 미착수임을 값으로 남긴다.
+                # 변수형은 값을 아직 안 뽑는다(그 결정은 그대로다) — 다만 VLM 이 "이
+                # 줄들이 그 항목이다"라고 판정한 위치는 이제 여기 line_refs 로 남는다.
+                # status 는 "찾았다"가 아니라 "값 추출은 미착수"라는 뜻 그대로다.
                 "variable_entries": [
                     {"requirement": e["requirement"], "status": "미착수"} for e in variables
                 ],
+                "line_refs": var_refs,
             })
 
     # ── 2층: VLM 이 붙인 영역 라벨을 얹는다 ────────────────────────────────
@@ -779,13 +824,27 @@ def label_document(
         hits = sorted(hits_by_region.get(rid, {}).values(), key=lambda h: -h["chars"])
         total = region_text.get(rid) or 0
         covered = max((h["chars"] for h in hits), default=0)
-        verdict = (vlm_labels or {}).get(rid)
+        verdicts = (vlm_labels or {}).get(rid) or []
+        # region_labels[].gubun 은 한 값만 담을 수 있는 기존 필드다(_parsed.json 의
+        # regions[].gubun 이 이 값을 그대로 받는다) — 대표값으로 "가장 넓은 줄 범위를
+        # 차지한 판정"을 쓴다. 영역이 실제로는 항목 여러 개로 쪼개졌으면 그 사실을
+        # gubun_breakdown 에 전부 남긴다 — 대표값 하나로 접으면서 나머지 항목이
+        # 조용히 사라지는 걸 막는다(25번 문서: 영역 하나에 항목 3개가 있었다).
+        best = max(verdicts, key=lambda v: v.get("line_to", 0) - v.get("line_from", 0),
+                   default=None)
         regions_out.append({
             "region_id": rid,
-            # 2층 판정. 없으면 None — 1층 문구만 있는 영역이다.
-            "gubun": verdict["gubun"] if verdict else None,
-            "confidence": verdict.get("confidence") if verdict else None,
-            "source": "vlm" if verdict else None,
+            # 2층 판정(대표값). 없으면 None — 1층 문구만 있는 영역이다.
+            "gubun": best["gubun"] if best else None,
+            "confidence": best.get("confidence") if best else None,
+            "source": "vlm" if best else None,
+            # 이 영역 안에 실제로 섞여 있던 판정 전부(줄 범위 포함). 대표값과 같은
+            # 항목 하나뿐이면 원소 1개 — 정보가 늘지도 줄지도 않는다.
+            "gubun_breakdown": [
+                {"gubun": v["gubun"], "confidence": v.get("confidence"),
+                 "line_from": v.get("line_from"), "line_to": v.get("line_to")}
+                for v in sorted(verdicts, key=lambda v: v.get("line_from", 0))
+            ],
             # 1층 사실. "이 문구가 여기 있다" 이상을 주장하지 않는다.
             "phrase_hits": hits,
             "phrase_share": round(covered / total, 3) if total else 0.0,

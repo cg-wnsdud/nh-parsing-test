@@ -212,7 +212,8 @@ def test_두_층은_우열을_가리지_않고_나란히_실린다(pack: dict) -
     """
     doc = _doc(["NH농협은행 준법감시인 심의필 2026-0000(2026.06.01.~2026.12.31.)"])
     r = AT.label_document(doc, "예금성상품-적립식", pack,
-                          vlm_labels={"p1_r000": {"gubun": "심의번호", "confidence": 0.95}})
+                          vlm_labels={"p1_r000": [{"gubun": "심의번호", "confidence": 0.95,
+                                                    "line_from": 0, "line_to": 0}]})
     reg = r["region_labels"][0]
     assert reg["gubun"] == "심의번호"                                  # 2층
     assert [h["gubun"] for h in reg["phrase_hits"]] == ["회사명"]       # 1층
