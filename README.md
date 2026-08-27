@@ -1,7 +1,7 @@
 # NH 광고심의 PoC
 
-금융상품 광고물(PDF/이미지/HWP) → 구조화 텍스트 → 스키마 필드 추출 파이프라인.
-문서마다 다음을 수행한다:
+금융상품 광고물(PDF/이미지/HWP) → 구조화 텍스트 → 농협 제공 템플릿 항목 라벨링
+파이프라인. 문서마다 다음을 수행한다:
 
 ```
 입력 PDF/이미지/HWP
@@ -12,17 +12,26 @@
   -> 밴드 단위 VLM 통합판독 (OCR 교정 + 미검출 문구 스윕)
   -> (선택) 저신뢰 라인 재판독 · 카드-분할 · 미배정 블록 진단
   -> OCR 정본 vs VLM 후보 판정 (잘림/생략/불일치 라벨)
-  -> AdPageIR(JSON) + LLM 전달용 lean 투영(llm_view)
-  -> (2단계) 스키마 기반 STAGE_3 필드 추출
+  -> 템플릿 항목명(gubun) 라벨링 — 정형 문구 완전일치(1층) + VLM 판정(2층)
+  -> 통합 JSON(좌표 + 라벨) — 광고물 트랙의 최종 산출물
 ```
 
-결과물은 모두 **`out/` 아래 JSON 파일**로 쌓인다 — 서버형 DB가 없다.
-심의 판정(위반 여부 산정)은 아직 없다 — 현재 하는 일은 "광고물에서 무엇이 어디에
-있는지 빠짐없이 뽑아내는" 단계까지다. 경계는 [docs/handoff.md](docs/handoff.md) §6 참조.
+**광고물 트랙은 스키마 기반 필드 추출(STAGE_3)을 거치지 않는다** — 종점은
+농협이 준 광고 템플릿(회사명·상품명·대출한도 등 12종)을 기준으로 영역마다
+항목명을 붙인 통합 JSON이다. STAGE_3(`extract.py`/`run_extract.py`,
+`schemas/*.json`)는 예금성·대출성 심의 규정 필드를 스키마로 뽑아내는 별도
+트랙으로 코드는 남아 있지만, 광고물 파싱 결과가 이 단계를 거쳐 나가지는
+않는다 — 자세한 배경은 [docs/etc/L-템플릿-제작과-모델-사용-지점.md](docs/etc/L-템플릿-제작과-모델-사용-지점.md),
+스키마 트랙 자체 설명은 [docs/schema-explained.md](docs/schema-explained.md) 참조.
+
+결과물은 모두 **`out_ad_full/`(또는 지정한 `--out`) 아래 JSON 파일**로 쌓인다 —
+서버형 DB가 없다. 심의 판정(위반 여부 산정)은 아직 없다 — 현재 하는 일은
+"광고물에서 무엇이 어디에 있는지 빠짐없이 뽑아내고, 어느 템플릿 항목인지
+표시하는" 단계까지다. 경계는 [docs/handoff.md](docs/handoff.md) §6 참조.
 
 > **처음 읽는 분께:** 아래 [아키텍처 & 코드 맵](#아키텍처--코드-맵)부터 보는 게 빠르다.
-> 권장 순서: **이 README → `src/nh_parsing/pipeline.py`(1단계 진입점) →
-> `src/nh_parsing/extract.py`(2단계 진입점)**.
+> 권장 순서: **이 README → `src/nh_parsing/pipeline.py`(파싱 진입점) →
+> `tools/run_ad_label.py`(템플릿 라벨링 진입점, 광고물 트랙의 종점)**.
 
 ## 직접 준비해야 하는 외부 서비스
 
@@ -58,17 +67,39 @@ cp .env.example .env
 # .env 편집 — PADDLEX_URL, GEMMA_URL, GEMMA_MODEL (VPN 연결 상태에서만 접근 가능,
 # 실제 주소는 레포에 없으므로 별도로 전달받을 것)
 
-uv run python tools/run_nhdata.py        # 1단계: 파싱 → out/json, out/llm_view
-uv run python tools/run_extract.py       # 2단계: STAGE_3 필드 추출 → out/extracted
+# 광고물 트랙 (현재 개발 중심, kl_parser 가 실제로 호출하는 경로)
+uv run python tools/run_ad_label.py --input <파일 또는 폴더> --out out_ad_full
+uv run python tools/make_parse_explorer.py                 # 결과 열람 → out_ad_full/explorer.html
 ```
+
+`--input`에 폴더를 주면 그 안의 `.pdf/.png/.jpg/.jpeg` 전부를 처리한다. 이미
+저장된 파싱 결과를 재사용하고 라벨링만 다시 하려면 `--reuse-parse`를 추가한다
+(문서당 파싱이 ~9분 걸려 라벨링만 고칠 때 유용하다). 자세한 옵션은
+[tools/run_ad_label.py](tools/run_ad_label.py) 참조.
 
 `VLM_CACHE=r`(기록)/`=p`(재생) 환경변수로 모델 호출 없이 결정론적 재실행이 가능하다
 (개발 전용, 응답을 그대로 재생하므로 실제 처리 시간이 아니다).
 
+**스키마 기반 필드 추출(STAGE_3, 별도 트랙)**을 시험하려면:
+```bash
+uv run python tools/run_nhdata.py        # 파싱 → out/json, out/llm_view
+uv run python tools/run_extract.py       # STAGE_3 필드 추출 → out/extracted
+```
+이 트랙은 광고물 파싱 결과의 최종 산출물이 아니다 — 위 "광고물 트랙" 설명 참조.
+
 ## 산출물 — 파일 기반, DB 서버 없음
 
-모든 결과는 `out/`(기본값) 아래 파일로 쌓인다. `.gitignore` 대상이라 새로 클론하면
-비어 있다 — 위 명령을 돌려야 생긴다.
+### 광고물 트랙 (`run_ad_label.py`, 현재 최종 경로)
+
+```
+<out>/parse/<파일명>.json   파싱 결과 (레이아웃·OCR·VLM 판독, --reuse-parse 재사용 대상)
+<out>/json/<doc_id>.json    통합 결과 — 좌표 + 템플릿 라벨(gubun)  ★최종 산출물
+<out>/pages/<doc_id>_p<n>.jpg   쪽 이미지(검수용, 박스 없음)
+```
+기본 `--out`은 `out_ad`; 93건 전수조사는 `--out out_ad_full`로 만들었다.
+`.gitignore` 대상이라 새로 클론하면 비어 있다 — 위 명령을 돌려야 생긴다.
+
+### 스키마 트랙 (`run_nhdata.py`/`run_extract.py`, 별도)
 
 ```
 out/json/<doc_id>.json        전체 IR (bbox·신뢰도 포함) — 원본 위 하이라이트용
@@ -78,13 +109,14 @@ out/_timing.json              파일별 소요시간
 ```
 
 운영:
-- **초기화** = `out/` 삭제(다음 실행 때 재생성).
-- 스키마 데이터(`src/nh_parsing/schemas/*.json`)는 손으로 쓴 입력이라 산출물과 분리돼
-  패키지 안에 있다 — 설치본(휠)에서도 찾히게 하기 위함.
+- **초기화** = 해당 `out*/` 폴더 삭제(다음 실행 때 재생성).
+- 템플릿 사전(`src/nh_parsing/templates/ad_templates.json`)과 스키마 데이터
+  (`src/nh_parsing/schemas/*.json`)는 손으로 쓴 입력이라 산출물과 분리돼 패키지
+  안에 있다 — 설치본(휠)에서도 찾히게 하기 위함.
 
 ## 아키텍처 & 코드 맵
 
-### 1단계 — 파싱 (`tools/run_nhdata.py` → `pipeline.py`)
+### 파싱 (모든 트랙 공통, `pipeline.py`)
 
 | 모듈 | 역할 |
 |---|---|
@@ -107,7 +139,22 @@ out/_timing.json              파일별 소요시간
 | `config.py` | 실행 설정 (환경변수 기반 `Settings`) |
 | `vlm_cache.py` | VLM 응답 기록/재생 — 결정론적 재실행 장치 (개발 전용) |
 
-### 2단계 — STAGE_3 스키마 추출 (`tools/run_extract.py` → `extract.py`)
+### 광고물 트랙 — 템플릿 라벨링 (`tools/run_ad_label.py`, 현재 최종 경로)
+
+| 모듈 | 역할 |
+|---|---|
+| `ad_template.py` | 템플릿 판정(12종 중 1개) + 영역마다 항목명(gubun) VLM 판정(줄 범위 단위) |
+| `ad_export.py` | 파싱 결과 + 템플릿 라벨을 좌표 포함 통합 JSON으로 결합 |
+| `templates/ad_templates.json` | 농협 제공 템플릿 md에서 생성한 라벨 사전 (`tools/build_ad_templates.py`) |
+
+`kl_parser`(농협 KL 연동)가 실제로 호출하는 것도 이 경로다 —
+`kl_parser/service/parsing_service.py` → `ad_export.process_ad_file()`.
+
+### 스키마 트랙 — STAGE_3 필드 추출 (`tools/run_extract.py` → `extract.py`, 별도)
+
+> ⚠️ 광고물 파싱 결과는 이 단계를 거치지 않는다. 예금성·대출성 심의 규정이
+> 요구하는 필드를 스키마 기준으로 뽑아내는 별도 트랙으로, 코드는 유지되지만
+> 현재 개발 우선순위는 위 템플릿 라벨링 쪽에 있다.
 
 | 모듈 | 역할 |
 |---|---|
@@ -132,7 +179,12 @@ out/_timing.json              파일별 소요시간
 |---|---|
 | `rag_ingest.py` | `tools/run_ragdata.py` 전용 — 규정 원문 → RAG 청크 + 이미지 캡션 (스키마 근거 도출용) |
 
-## 새 상품군 스키마 추가
+## 새 상품군 스키마 추가 (스키마 트랙 전용)
+
+> 아래는 STAGE_3 스키마 트랙에만 해당한다. 광고물 트랙의 템플릿(12종)을
+> 갱신하려면 `nh-data/pilot-data-set/광고 템플릿(근거규정x, 필수 여부).md`를
+> 바꾸고 `uv run python tools/build_ad_templates.py`를 다시 돌리면 된다
+> (§2 [docs/etc/L-템플릿-제작과-모델-사용-지점.md](docs/etc/L-템플릿-제작과-모델-사용-지점.md) 참조).
 
 `schemas/<이름>.json` 을 새로 쓰면 STAGE_3 필드 추출 로직 자체는 건드릴 필요 없다
 (`schema_pack.py` 가 파일을 읽어 동적으로 호출그룹을 구성한다). 다만 상품군 **이름**은
@@ -147,25 +199,40 @@ out/_timing.json              파일별 소요시간
 ## 검수
 
 ```bash
-uv run python tools/make_review.py      # → out/review.html
+# 광고물 트랙 — 원본 그림 위에 라벨 상자를 얹어 눈으로 대조
+uv run python tools/make_ad_review.py           # out_ad/*.json,*.jpg 대상 → out_ad/review.html
+
+# 광고물 트랙 — 영역 단위로 접었다 펼치는 상세 열람(OCR/VLM 판독·시인성·표·라벨 한자리)
+uv run python tools/make_parse_explorer.py      # → out_ad_full/explorer.html (기본 out_ad_full 대상)
+uv run python tools/make_parse_explorer.py --only "13. 대출성상품"   # 일부 문서만
+
+# 스키마 트랙
+uv run python tools/make_review.py              # → out/review.html
 ```
 
-원본 이미지·OCR/VLM 판독 결과를 **base64 로 파일 안에 그대로 내장**한다(문서 수에 따라
-수 MB~수십 MB) — 폴더 없이 파일 하나만 보내도 그대로 열린다. `--for-print` 로 인쇄·PDF용
-(토글 전부 펼침, A4 1단) 생성도 가능하다.
+`make_ad_review.py`는 원본·판독 결과를 **base64 로 파일 안에 그대로 내장**한다(문서
+수에 따라 수 MB~수십 MB) — 폴더 없이 파일 하나만 보내도 그대로 열린다. `--for-print`
+로 인쇄·PDF용(토글 전부 펼침, A4 1단) 생성도 가능하다.
+`make_parse_explorer.py`는 그림을 `pages/` 상대경로로 걸어 가벼운 대신, 결과 폴더
+(`out_ad_full/`) 안에서 열어야 한다.
 
 ## 도구 (tools/)
 
 | 도구 | 하는 일 | 모델 호출 |
 |---|---|---|
-| `run_nhdata.py` | 파싱 — 광고물 → `out/json` · `out/llm_view` · `out/_timing.json` | **필요** |
-| `run_extract.py` | STAGE_3 — `out/llm_view` → `out/extracted` | **필요** |
+| `run_ad_label.py` | **광고물 트랙(현재 최종)** — 파싱 + 템플릿 라벨링 → `<out>/json`·`<out>/parse`·`<out>/pages` | **필요** |
+| `build_ad_templates.py` | 농협 광고 템플릿 md → 라벨 사전(`templates/ad_templates.json`) | 없음 |
+| `make_ad_review.py` | 광고물 트랙 육안 검수 화면 (`out_ad/review.html`) | 없음 |
+| `make_parse_explorer.py` | 광고물 트랙 영역 단위 상세 열람 화면 (`out_ad_full/explorer.html`) | 없음 |
+| `measure_parse_defects.py` | 광고물 트랙 결함 유형 전수 계측 (`out_ad_full/json` 대상) | 없음 |
+| `run_nhdata.py` | 스키마 트랙 파싱 — 광고물 → `out/json` · `out/llm_view` · `out/_timing.json` | **필요** |
+| `run_extract.py` | 스키마 트랙 STAGE_3 — `out/llm_view` → `out/extracted` | **필요** |
 | `run_ragdata.py` | 규정 원문 → RAG 청크 (별도 트랙) | **필요** |
 | `run_schema_source.py` | 규정 문서 → 원본 파싱 결과 (스키마 도출 근거용) | 없음 |
 | `verify_numbers.py` | 문서에 쓰는 모든 숫자를 `out/` 에서 재계산 | 없음 |
 | `evaluate.py` | 골드셋 채점 — 분류·영역검출·문장 회수 | 없음 |
 | `verify_extract.py` | 골드셋 채점 — 필드 회수 | 없음 |
-| `make_review.py` | 육안 검수 화면 `out/review.html` 생성 | 없음 |
+| `make_review.py` | 스키마 트랙 육안 검수 화면 `out/review.html` 생성 | 없음 |
 | `export_previews.py` | 검수 화면과 같은 그림을 이미지 파일로 (영역 라벨 포함) | 없음 |
 | `rebuild_views.py` | `out/json` → `out/llm_view` 재생성 (파싱은 안 다시 함) | 없음 |
 | `reclassify_absences.py` | 부재 4분류를 스키마 메타로 재계산 (스키마 수정 후 검증용) | 없음 |
@@ -180,7 +247,8 @@ uv run python -m pytest tests/ -q
 
 | 알고 싶은 것 | 문서 |
 |---|---|
-| **이 저장소가 무엇이고 어떻게 흐르나** (PR·인수인계 설명용) | ⭐ [docs/흐름과_인수인계_2026-08-06.md](docs/흐름과_인수인계_2026-08-06.md) |
+| **가장 최신 — 전체 이해 문서 묶음(A~N), 광고물 트랙 중심** | ⭐ [docs/etc/00-읽는-순서.md](docs/etc/00-읽는-순서.md) |
+| **이 저장소가 무엇이고 어떻게 흐르나** (PR·인수인계 설명용, 2026-08-06 기준) | [docs/흐름과_인수인계_2026-08-06.md](docs/흐름과_인수인계_2026-08-06.md) |
 | **실제로 무엇이 나왔나** (숫자·시간·사례) | [docs/parsing-output-report.md](docs/parsing-output-report.md) |
 | **코드가 실제로 무엇을 하나** (좌표·실값으로 끝까지) | [docs/architecture/pipeline-walkthrough.md](docs/architecture/pipeline-walkthrough.md) |
 | **인계 시 정할 것** (스키마·DB·RAG 경계) | [docs/handoff.md](docs/handoff.md) |
