@@ -36,7 +36,9 @@ def _lines(path: Path) -> list:
 
 
 def _texts(path: Path) -> list[str]:
-    return [ln.text for ln in _lines(path)]
+    # 이 파일의 기존 회귀 검증은 줄 경계·기호 보존을 대상으로 한다. PDF 공백을
+    # 정본으로 보존하기 시작해도 그 검증의 의미가 바뀌지 않도록 비교에서는 공백만 뺀다.
+    return ["".join(ln.text.split()) for ln in _lines(path)]
 
 
 def test_세로_구분선을_벡터_객체로_찾는다():
@@ -123,7 +125,7 @@ def test_글자를_하나도_잃지_않는다():
         c for i in range(tp.count_chars())
         if (c := tp.get_text_range(i, 1)) and not c.isspace()
     )
-    out = "".join(ln.text for ln in extract_digital_lines(page, PX_PER_PT))
+    out = "".join("".join(ln.text.split()) for ln in extract_digital_lines(page, PX_PER_PT))
     assert sorted(out) == sorted(src)
 
 
@@ -144,7 +146,7 @@ def test_런이_없는_페이지는_종전_방식으로_되돌아간다(monkeypa
     )
     lines = extract_digital_lines(page, PX_PER_PT)
     assert lines, "폴백이 아무것도 못 냈다"
-    assert sorted("".join(ln.text for ln in lines)) == sorted(src)
+    assert sorted("".join("".join(ln.text.split()) for ln in lines)) == sorted(src)
 
 
 def test_런과_구분선을_실제로_읽는다():

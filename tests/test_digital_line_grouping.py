@@ -36,7 +36,9 @@ _PUNCT_ONLY = re.compile(r"[.,·:%-]+")
 
 
 def _texts(path: Path) -> list[str]:
-    return [l.text for l in extract_digital_lines(pdfium.PdfDocument(str(path))[0], PX_PER_PT)]
+    # 이 회귀들은 라벨·구두점의 줄 결합을 본다. 띄어쓰기는 별도 정본 보존 시험에서
+    # 확인하므로 비교 시에만 제거한다.
+    return ["".join(l.text.split()) for l in extract_digital_lines(pdfium.PdfDocument(str(path))[0], PX_PER_PT)]
 
 
 @pytest.mark.skipif(not PDF_LOAN7.exists(), reason="샘플 PDF 없음(비공개)")

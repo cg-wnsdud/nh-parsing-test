@@ -377,10 +377,13 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None,
                     help="기본값: <--in>/explorer.html (그림을 상대경로로 걸므로 같은 폴더여야 한다)")
     ap.add_argument("--only", default=None, help="파일명(확장자 제외) 쉼표로 여러 개")
+    ap.add_argument("--recursive", action="store_true",
+                    help="<--in> 아래의 */json/*.json 을 모두 읽는다. 입력 묶음별 하위 폴더를 합쳐 볼 때 쓴다")
     args = ap.parse_args()
     out = args.out or (args.src / "explorer.html")
 
-    files = sorted((args.src / "json").glob("*.json"))
+    files = sorted(args.src.rglob("json/*.json") if args.recursive
+                   else (args.src / "json").glob("*.json"))
     if args.only:
         keys = {k.strip() for k in args.only.split(",") if k.strip()}
         files = [p for p in files if p.stem in keys]
@@ -391,12 +394,22 @@ def main() -> None:
         raise SystemExit(f"통합 JSON 이 없다: {args.src / 'json'}")
 
     docs = [json.loads(p.read_text(encoding="utf-8")) for p in files]
-    pages_rel = "pages"
+
+    # 전수 실행은 입력 묶음별로 `new-sample-data/json`, `sample-data/json` 아래에
+    # 결과를 둔다. 검수 HTML 은 그 상위에서 열기 때문에 문서마다 그림 상대경로가 다르다.
+    # 기존 단일 폴더 실행의 `pages` 경로는 그대로 유지한다.
+    def pages_rel_for(json_path: Path) -> str:
+        if not args.recursive:
+            return "pages"
+        return (json_path.parent.parent.relative_to(args.src) / "pages").as_posix()
 
     idx = "".join(
         f'<a href="#d{i}">{_esc(d["source_file"])}</a>' for i, d in enumerate(docs)
     )
-    body = "".join(_doc_html(d, pages_rel, f"d{i}") for i, d in enumerate(docs))
+    body = "".join(
+        _doc_html(d, pages_rel_for(p), f"d{i}")
+        for i, (p, d) in enumerate(zip(files, docs, strict=True))
+    )
 
     n_r = sum(len(r) for r in ([p["regions"] for d in docs for p in d["pages"]]))
     n_l = sum(d["completeness"]["lines_total"] for d in docs)

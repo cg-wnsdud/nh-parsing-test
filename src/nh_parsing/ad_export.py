@@ -17,6 +17,7 @@ line_ref 로 손수 이어 붙여야 했다. 그 이음질을 여기서 한 번�
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -110,9 +111,15 @@ def build_unified(
             regions_out.append({
                 "region_id": rid,
                 "bbox": region.get("bbox"),
+                # StructureV3가 최초로 낸 레이아웃 판단. role은 VLM이 다시 판단한
+                # 범용 역할이므로, 둘을 덮어쓰지 않고 대조 가능한 신호로 함께 남긴다.
+                "layout_label": region.get("label"),
+                "layout_score": region.get("layout_score"),
                 # 파서가 붙인 범용 역할(제목·유의사항·본문…). 템플릿 항목과 다른 어휘라
                 # 덮어쓰지 않고 나란히 둔다 — 서로 검산에 쓴다.
                 "role": region.get("role"),
+                "role_confidence": region.get("role_confidence"),
+                "role_source": region.get("role_source"),
                 # 2층: VLM 이 정한 템플릿 항목(대표값 — 영역 안 최대 줄범위 판정).
                 "gubun": meta.get("gubun"),
                 "gubun_source": meta.get("source"),
@@ -133,7 +140,9 @@ def build_unified(
                 "vlm_reading_relation": region.get("vlm_reading_relation"),
                 "lines": lines_out,
                 # 표로 인식된 영역만. 줄을 대체하지 않고 **행·열 관계만** 얹는다.
-                "table": _table_out(region.get("table"), lines_out),
+                "table": _table_out(
+                    region.get("table"), lines_out, region.get("layout_score"),
+                ),
             })
         pages_out.append({
             "page_no": pno,
@@ -207,7 +216,11 @@ def _line(
     }
 
 
-def _table_out(table: dict | None, lines: list[dict]) -> dict | None:
+def _table_out(
+    table: dict | None,
+    lines: list[dict],
+    layout_score: float | None = None,
+) -> dict | None:
     """표 격자에 **정본 줄을 좌표로 이어 붙인다.**
 
     왜 셀 텍스트로 안 끝내나. 표 안 글자에도 OCR 오류가 있다 — PaddleX 표 인식이 읽은
@@ -231,7 +244,11 @@ def _table_out(table: dict | None, lines: list[dict]) -> dict | None:
             "text": cell.get("text") or "",
             "line_refs": refs,
         })
-    return {
+    outside_refs = [
+        l["line_ref"] for l in lines
+        if l["line_ref"] not in {r for c in cells_out for r in c["line_refs"]}
+    ]
+    out = {
         "n_rows": table.get("n_rows", 0),
         "n_cols": table.get("n_cols", 0),
         "html": table.get("html") or "",
@@ -239,11 +256,104 @@ def _table_out(table: dict | None, lines: list[dict]) -> dict | None:
         "note": table.get("note"),
         # 셀에 못 닿은 정본 줄 — 있으면 격자가 표 전체를 덮지 못했다는 뜻이다.
         # 숨기지 않는다. 표 밖 캡션이 영역에 같이 들어온 경우도 여기 잡힌다.
-        "lines_outside_cells": [
-            l["line_ref"] for l in lines
-            if l["line_ref"] not in {r for c in cells_out for r in c["line_refs"]}
-        ],
+        "lines_outside_cells": outside_refs,
     }
+    # 표 HTML/셀 텍스트를 정본으로 승격하지는 않는다. 대신 셀의 좌표·참조 관계가
+    # 명백히 어긋난 경우를 표시해, 하류가 표 구조를 무비판적으로 쓰지 않게 한다.
+    out["quality"] = _table_quality(out, lines, layout_score)
+    return out
+
+
+def _table_quality(table: dict, lines: list[dict], layout_score: float | None) -> dict:
+    """표 구조의 *경고등*을 만든다. 어떤 텍스트·셀도 고치거나 삭제하지 않는다.
+
+    `trusted` 는 셀 방향과 셀-줄 연결에 뚜렷한 모순이 없다는 뜻이다. `degraded` 는
+    표 캡션/주석이 격자 밖에 있거나 일부 연결이 어긋났다는 뜻이며, `invalid` 는 행·열
+    좌표가 뒤집혔거나 셀 텍스트와 연결된 줄이 다수 충돌한 경우다. 이는 표의 진위를
+    판정하는 값이 아니라, 다음 단계가 `html`만 믿어도 되는지 판단하는 안전 신호다.
+    """
+    issues: list[str] = []
+    cells = [c for c in table.get("cells") or [] if c.get("bbox")]
+
+    if table.get("note"):
+        issues.append("grid_geometry_unavailable")
+
+    # 행 번호가 늘면 아래로, 열 번호가 늘면 오른쪽으로 가야 한다. 두 축 모두 반대로
+    # 흐르면 180도 뒤집힌 표처럼, 단순 OCR 오차보다 훨씬 강한 구조 오류다.
+    row_pairs = _cell_axis_pairs(cells, axis="row")
+    col_pairs = _cell_axis_pairs(cells, axis="col")
+    reversed_rows = _reversed_pair_count(row_pairs)
+    reversed_cols = _reversed_pair_count(col_pairs)
+    if _mostly_reversed(row_pairs, reversed_rows) and _mostly_reversed(col_pairs, reversed_cols):
+        issues.append("cell_coordinate_order_reversed")
+
+    by_ref = {line["line_ref"]: line.get("text") or "" for line in lines}
+    compared = 0
+    mismatched = 0
+    for cell in cells:
+        expected = _normalise_table_text(cell.get("text") or "")
+        actual = _normalise_table_text(" ".join(by_ref.get(ref, "") for ref in cell.get("line_refs") or []))
+        # 빈 셀/짧은 기호 셀은 비교 대상이 아니다. 표 엔진과 OCR의 줄바꿈 차이도
+        # 허용하기 위해 한쪽이 다른 쪽을 포함하면 일치로 본다.
+        if len(expected) < 4 or len(actual) < 4:
+            continue
+        compared += 1
+        if expected not in actual and actual not in expected:
+            mismatched += 1
+    if compared and mismatched:
+        issues.append(f"cell_text_reference_mismatch:{mismatched}/{compared}")
+
+    if table.get("lines_outside_cells"):
+        issues.append("lines_outside_cells")
+    if layout_score is not None and layout_score < 0.65:
+        issues.append("low_layout_score")
+
+    invalid = (
+        "grid_geometry_unavailable" in issues
+        or "cell_coordinate_order_reversed" in issues
+        or (compared >= 2 and mismatched / compared >= 0.5)
+    )
+    status = "invalid" if invalid else ("degraded" if issues else "trusted")
+    return {
+        "status": status,
+        "issues": issues,
+        "cell_text_comparison": {"compared": compared, "mismatched": mismatched},
+        "geometry": {
+            "row_pairs": len(row_pairs), "reversed_rows": reversed_rows,
+            "col_pairs": len(col_pairs), "reversed_cols": reversed_cols,
+        },
+    }
+
+
+def _cell_axis_pairs(cells: list[dict], axis: str) -> list[tuple[float, float]]:
+    """같은 열의 행쌍/같은 행의 열쌍을 (인덱스 차, 위치 차)로 만든다."""
+    other = "col" if axis == "row" else "row"
+    coordinate = 1 if axis == "row" else 0  # y 중심 / x 중심
+    pairs: list[tuple[float, float]] = []
+    for first_i, first in enumerate(cells):
+        for second in cells[first_i + 1:]:
+            if first.get(other) != second.get(other):
+                continue
+            one, two = first.get(axis), second.get(axis)
+            if one is None or two is None or one == two:
+                continue
+            first_center = (first["bbox"][coordinate] + first["bbox"][coordinate + 2]) / 2
+            second_center = (second["bbox"][coordinate] + second["bbox"][coordinate + 2]) / 2
+            pairs.append((float(two - one), second_center - first_center))
+    return pairs
+
+
+def _reversed_pair_count(pairs: list[tuple[float, float]]) -> int:
+    return sum(1 for index_delta, position_delta in pairs if index_delta * position_delta < 0)
+
+
+def _mostly_reversed(pairs: list[tuple[float, float]], count: int) -> bool:
+    # 한 쌍만으로 표 전체가 뒤집혔다고 말하지 않는다. 2쌍 이상에서 80% 이상일 때만.
+    return len(pairs) >= 2 and count / len(pairs) >= 0.8
+
+
+def _normalise_table_text(text: str) -> str:
+    return re.sub(r"[\s\W_]+", "", text, flags=re.UNICODE).lower()
 
 
 def _mostly_inside(inner: list[int], outer: list[int], min_share: float = 0.5) -> bool:

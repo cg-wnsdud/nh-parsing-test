@@ -24,8 +24,8 @@ CH_W = 10.0  # 이 테스트에서 쓰는 글자 하나의 폭(px) — 배수 �
 def _chars(words: list[str], gaps: list[float]) -> list[tuple[str, tuple[float, float, float, float]]]:
     """words 를 가로로 이어붙인 글자 목록. gaps[i] 는 words[i]-words[i+1] 사이 간격(px).
 
-    실제 extract_digital_lines 는 공백 문자 자체를 건너뛰므로(원본 참조), 여기서도
-    공백을 별도 글자로 넣지 않고 두 낱말 사이 간격 값 하나로만 표현한다.
+    실제 PDF의 공백 글리프도 현재는 보존한다. 이 보조 함수는 칸 분리 임계값만
+    검증하므로 공백을 별도 글자로 넣지 않고 두 낱말 사이 간격 값 하나로 표현한다.
     """
     out: list[tuple[str, tuple[float, float, float, float]]] = []
     x = 0.0
@@ -80,9 +80,9 @@ def test_실제_파일에서_옆칸_내용이_더는_안_붙는다():
     """
     pdf = pdfium.PdfDocument(str(PDF_DEPOSIT))
     lines = extract_digital_lines(pdf[0], 200 / 72.0)
-    texts = [l.text for l in lines]
-    assert "가입금액100만원이상조건금리(%p)" not in texts, "3칸이 다시 통짜로 합쳐졌다"
+    compact = ["".join(t.split()) for t in (l.text for l in lines)]
+    assert "가입금액100만원이상조건금리(%p)" not in compact, "3칸이 다시 통짜로 합쳐졌다"
     # 칸은 갈라지되 내용은 그대로 남아 있어야 한다(유실 금지)
-    assert any("가입금액100만원이상" == t for t in texts)
-    assert any(t == "조건" for t in texts)
-    assert any("금리" in t and "%p" in t for t in texts)
+    assert any("가입금액100만원이상" == t for t in compact)
+    assert any(t == "조건" for t in compact)
+    assert any("금리" in t and "%p" in t for t in compact)

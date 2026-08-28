@@ -479,7 +479,12 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
     chars: list[tuple[str, tuple[float, ...], tuple[float, ...], tuple, int | None]] = []
     for i in range(n):
         ch = textpage.get_text_range(i, 1)
-        if not ch or ch.isspace():
+        # PDF 텍스트 레이어 안의 일반 공백은 정본의 일부다. 예전에는 ``isspace()`` 를
+        # 통째로 건너뛰어 `공무원연금공단에서확인된`처럼 **PDFium 이 이미 읽은**
+        # 띄어쓰기까지 우리 쪽에서 지웠다. 줄바꿈(CR/LF)만 제외하고, 공백은 같은 TEXT
+        # 런의 글자로 보존한다. PDFium 공간 글리프의 높이는 0에 가까울 수 있으므로 줄
+        # 소속은 아래의 TEXT 런 기준 로직이 계속 결정한다.
+        if not ch or ch in ("\r", "\n"):
             continue
         try:
             tight = textpage.get_charbox(i)
@@ -534,7 +539,11 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
         # 3번째 원소로 시인성을 함께 실어 보낸다 — _split_by_column_gap 은 [0]·[1]만 본다.
         tight_group = [(ch, tight, atom) for ch, tight, _, atom, _ in group]
         for segment in _split_by_column_gap(tight_group):
-            text = "".join(item[0] for item in segment)
+            # 줄 안 공백은 보존하되, PDF TEXT 객체가 줄 첫머리에 넣는 장식용 공백은
+            # 내용이 아니므로 경계에서만 제거한다.
+            text = "".join(item[0] for item in segment).strip()
+            if not text.strip():
+                continue
             left = min(item[1][0] for item in segment)
             bottom = min(item[1][1] for item in segment)
             right = max(item[1][2] for item in segment)
@@ -547,7 +556,9 @@ def extract_digital_lines(page: pdfium.PdfPage, px_per_pt: float) -> list[Line]:
                 int((page_h - bottom) * px_per_pt),
             ]
             style = fold(
-                (item[2] for item in segment if len(item) > 2),
+                # 공백은 텍스트에는 남기되, 대표 글자 스타일을 정할 때는 제외한다.
+                # 공간 글리프는 0-height box를 갖는 PDF가 있어 스타일 대표값을 흐릴 수 있다.
+                (item[2] for item in segment if len(item) > 2 and not item[0].isspace()),
                 basis="fontbox",
                 source="pdf_char",
             )

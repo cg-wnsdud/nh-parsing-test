@@ -78,8 +78,17 @@ _ROLE_PROMPT = """당신은 금융상품 광고심의 보조 시스템의 화면
 - 고지문구: 준법감시인 심의필 번호, 광고 유효기간 등 규정상 필수 표기
 - 표: 표 형태 정보 / 이미지: 텍스트가 거의 없는 그림·사진 영역 / 기타
 
-판정 기준: 텍스트의 **의미**와 화면 내 위치(y_ratio: 0=최상단, 1=최하단)를 종합하세요.
+판정 기준: 텍스트의 **의미**와 화면 내 위치·크기·레이아웃 검출 정보를 종합하세요.
 특정 키워드 유무가 아니라 내용의 성격으로 판단하세요.
+
+영역마다 다음 보조 정보가 있습니다.
+- layout_label: 문서 레이아웃 모델이 본 최초 종류(text/table/image/title 등). 참고 신호이며 정답은 아닙니다.
+- layout_score: 그 최초 검출의 확신도. 낮으면 검출 경계가 틀릴 수 있습니다.
+- x_ratio, y_ratio, w_ratio, h_ratio: 화면에서의 좌우·상하 위치와 크기(0~1).
+- table: 표 격자가 검출됐을 때만 행×열 수가 표시됩니다.
+- font_pt: 디지털 PDF/HWP에서만 얻을 수 있는 글자 크기 참고값입니다. 없으면 OCR 입력이라 모르는 것입니다.
+
+보조 정보 하나만으로 역할을 정하지 말고, 텍스트와 전체 화면을 우선하여 서로 맞는지 확인하세요.
 '기타'는 최후의 수단입니다 — 내용이 조금이라도 특정 역할에 맞으면 그 역할을 쓰세요.
 첨부 이미지는 전체 화면 축소본입니다(레이아웃·강조 참고용).
 
@@ -88,6 +97,41 @@ _ROLE_PROMPT = """당신은 금융상품 광고심의 보조 시스템의 화면
 
 먼저 analysis 에 화면이 대략 어떤 내용으로 구성되는지 한두 문장으로 정리한 뒤,
 모든 region_id 에 대해 하나씩 역할을 반환하세요."""
+
+
+def _region_listing_line(region: Region, canvas_w: int, canvas_h: int) -> str:
+    """역할 VLM에 줄 하나로 전달할, 이미 가진 구조 신호의 요약.
+
+    StructureV3의 label/score는 Region에 보존돼 있었지만 역할 VLM에는 전달되지 않았다.
+    좌표 원값을 주면 토큰만 늘고 해석도 흔들리므로 캔버스 비율로 정규화한다.
+    """
+    bbox = region.bbox or []
+    if len(bbox) == 4 and canvas_w > 0 and canvas_h > 0:
+        x0, y0, x1, y1 = bbox
+        x_ratio = f"{x0 / canvas_w:.2f}~{x1 / canvas_w:.2f}"
+        y_ratio = f"{y0 / canvas_h:.2f}"
+        w_ratio = f"{(x1 - x0) / canvas_w:.2f}"
+        h_ratio = f"{(y1 - y0) / canvas_h:.2f}"
+    else:
+        x_ratio = y_ratio = w_ratio = h_ratio = "?"
+
+    score = "?" if region.layout_score is None else f"{region.layout_score:.2f}"
+    table = "없음"
+    if region.table is not None:
+        table = f"{region.table.n_rows}x{region.table.n_cols}"
+
+    sizes = [
+        line.style.size_pt for line in region.lines
+        if line.style is not None and line.style.size_pt is not None
+    ]
+    font_pt = "?" if not sizes else f"{sum(sizes) / len(sizes):.1f}"
+    excerpt = " / ".join(line.text for line in region.lines[:4])[:160]
+    return (
+        f'- region_id={region.region_id} layout_label={region.label!r} '
+        f'layout_score={score} x_ratio={x_ratio} y_ratio={y_ratio} '
+        f'w_ratio={w_ratio} h_ratio={h_ratio} table={table} font_pt={font_pt} '
+        f'lines={len(region.lines)} 텍스트: "{excerpt}"'
+    )
 
 
 def judge_region_roles(
@@ -108,11 +152,8 @@ def judge_region_roles(
     if not judgeable:
         return 0
 
-    listing_lines = []
-    for r in judgeable:
-        y_ratio = round(r.bbox[1] / canvas_h, 2) if (r.bbox and canvas_h) else "?"
-        excerpt = " / ".join(l.text for l in r.lines[:4])[:160]
-        listing_lines.append(f'- region_id={r.region_id} y_ratio={y_ratio} 텍스트: "{excerpt}"')
+    canvas_w = canvas.width if canvas is not None else 0
+    listing_lines = [_region_listing_line(r, canvas_w, canvas_h) for r in judgeable]
 
     parts: list[dict] = [
         {"type": "text", "text": _ROLE_PROMPT.format(regions="\n".join(listing_lines))}
