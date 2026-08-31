@@ -149,6 +149,22 @@ class Settings:
     lowconf_reread_min_vlm_conf: float = 0.60  # VLM 재판독 확신도 이 이상일 때만 텍스트 교체
     lowconf_reread_max_per_page: int = 12      # 페이지당 재판독 호출 상한 (비용 가드)
 
+    # ── 영역별 Reader → Judge 교차검증 ────────────────────────────
+    # 기본 off: kl_parser의 기존 정본·템플릿 결과를 배포 전에 바꾸지 않는다. shadow를
+    # 켜면 기본 파이프라인 안에서 후보와 판정 근거를 통합 JSON에 더하되 Line.text는
+    # 절대 수정하지 않는다.
+    region_reading_mode: str = os.environ.get("REGION_READING_MODE", "off").strip().lower()
+    # 이 브랜치의 Reader 경로는 StructureV3가 반환한 모든 텍스트/표 영역을 독립 판독하는
+    # 것이 기본이다. 영역별 후보를 넓은 밴드에서 다시 읽는 이전 구조와 섞지 않는다.
+    # 비용 절감용 targeted는 비교 실험 때만 명시적으로 쓴다.
+    region_reading_scope: str = os.environ.get("REGION_READING_SCOPE", "all").strip().lower()
+    region_reader_max_per_page: int = int(os.environ.get("REGION_READER_MAX_PER_PAGE", "0"))
+    # Region bbox 밖의 픽셀은 흰색으로 마스킹한다. StructureV3 bbox가 글자 끝을 약간
+    # 자르는 경우를 위해 이 폭만큼의 안전 고리는 남기고, 파란 테두리로 목표 영역을 VLM에
+    # 명시한다. 이웃 문구 혼입을 줄이기 위한 값이며 텍스트 정본에는 영향을 주지 않는다.
+    region_crop_padding_px: int = int(os.environ.get("REGION_CROP_PADDING_PX", "16"))
+    region_mask_bleed_px: int = int(os.environ.get("REGION_MASK_BLEED_PX", "2"))
+
     # ── 밴드 단위 통합 판독 (④+ 통독 + ⑧ 스윕을 한 호출로) ─────────────
     # OCR 이 본 것과 **같은 밴드**를 VLM 에도 주고, 그 안의 영역 목록을 함께 실어
     # "이 영역들을 고쳐라 + 목록에 없는 문구를 찾아라"를 한 호출로 묻는다. 예전에는

@@ -7,8 +7,9 @@ line_ref 로 손수 이어 붙여야 했다. 그 이음질을 여기서 한 번�
 
 **출력의 뼈대는 파싱 결과 쪽이다** — 쪽 → 영역 → 줄. 라벨은 그 위에 얹는 곁가지다.
 반대로(항목 → 문구 → 줄) 짜면 라벨이 안 붙은 줄을 실을 자리가 없어져, 이 프로젝트의
-기둥인 '모든 텍스트 보존'이 구조부터 깨진다. 항목별로 보고 싶을 때를 위해
-`template_items` 색인을 따로 싣는다 — 같은 사실의 역방향 보기일 뿐 원본은 줄 쪽이다.
+기둥인 '모든 텍스트 보존'이 구조부터 깨진다. 항목별 검토가 필요하면 원문을 복제한
+`template_items` 대신, 필요한 항목·기재요령·근거 줄만 담은 `review_targets`를 만든다.
+원본은 항상 줄/영역 쪽이다.
 
 `build_unified()` 는 텍스트가 하나라도 새면 **예외를 던진다.** 조용히 빠뜨리느니
 멈추는 게 낫다 — 빠진 줄은 다음 단계에서 '광고에 그 말이 없다'로 둔갑한다.
@@ -108,41 +109,47 @@ def build_unified(
                 _line(f"p{pno}/{rid}/L{i:02d}", ln, labels_by_ref, vlm_gubun_by_ref)
                 for i, ln in enumerate(region.get("lines") or [])
             ]
+            canonical_text = "\n".join(line["text"] for line in lines_out).strip()
+            reader_text = region.get("element_vlm_reading")
+            table_out = _table_out(region.get("table"), lines_out, region.get("layout_score"))
+            if table_out is not None:
+                # 표 Reader는 현재 행/열 관계를 확정하지 않는다. 이미지에서 읽힌 시각적
+                # 줄 순서만 별도 보존하고, PaddleX 격자는 여전히 grid_candidate로 취급한다.
+                table_out["reader_visual_rows"] = reader_text.splitlines() if reader_text else []
+                table_out["reader_structure_status"] = "unverified"
             regions_out.append({
                 "region_id": rid,
                 "bbox": region.get("bbox"),
-                # StructureV3가 최초로 낸 레이아웃 판단. role은 VLM이 다시 판단한
-                # 범용 역할이므로, 둘을 덮어쓰지 않고 대조 가능한 신호로 함께 남긴다.
-                "layout_label": region.get("label"),
-                "layout_score": region.get("layout_score"),
-                # 파서가 붙인 범용 역할(제목·유의사항·본문…). 템플릿 항목과 다른 어휘라
-                # 덮어쓰지 않고 나란히 둔다 — 서로 검산에 쓴다.
-                "role": region.get("role"),
-                "role_confidence": region.get("role_confidence"),
-                "role_source": region.get("role_source"),
-                # 2층: VLM 이 정한 템플릿 항목(대표값 — 영역 안 최대 줄범위 판정).
-                "gubun": meta.get("gubun"),
-                "gubun_source": meta.get("source"),
-                "gubun_confidence": meta.get("confidence"),
-                # 영역 하나에 항목이 여러 개 섞였을 때 그 내역 전부. gubun 하나로
-                # 접히면서 나머지가 사라지지 않도록 항상 싣는다(하나뿐이면 원소 1개).
-                "gubun_breakdown": meta.get("gubun_breakdown") or [],
-                # 1층: 이 영역 안에서 완전일치한 템플릿 문구들.
-                "phrase_hits": meta.get("phrase_hits") or [],
-                "phrase_share": meta.get("phrase_share", 0.0),
-                # 영역 통독 후보(§6/B안) — OCR 정본을 덮지 않고 나란히 둔다. 실측
-                # (2026-08-24, 시연 5건)으로는 33/33·19/19·31/33·42/44·10/12 영역에 있다 —
-                # 드문 값이 아니라 대부분의 영역에 붙는 값이라, 빼면 "조용한 삭제"가 된다
-                # (ir.py 의 설계 원칙 위반). 최종 채택은 여기서 하지 않는다 — 하류(심의) 몫이다.
-                "vlm_reading": region.get("vlm_reading"),
-                "vlm_reading_score": region.get("vlm_reading_score"),
-                "vlm_reading_coverage": region.get("vlm_reading_coverage"),
-                "vlm_reading_relation": region.get("vlm_reading_relation"),
+                "layout": {
+                    "label": region.get("label"),
+                    "score": region.get("layout_score"),
+                },
+                # 공간 경계만 보존한다. 파싱 단계에서 상품/이벤트 의미를 확정하지 않는다.
+                "card_no": region.get("card_no"),
+                "visibility": _visibility(region.get("bbox"), lines_out, page),
+                # lines[]가 정본의 원자 단위다. canonical은 검색/심의 편의를 위한
+                # 영역 문자열이며 Reader/Judge는 이를 바꾸지 않는 독립 관측이다.
+                "text_evidence": {
+                    "canonical": {
+                        "text": canonical_text,
+                        "sources": sorted({line["source"] for line in lines_out if line.get("source")}),
+                        "line_refs": [line["line_ref"] for line in lines_out],
+                    },
+                    "reader": {
+                        "text": reader_text,
+                        "confidence": region.get("element_vlm_confidence"),
+                    } if reader_text is not None else None,
+                    "adjudication": region.get("reading_adjudication"),
+                },
+                # 템플릿 라벨은 범용 role과 다르다. 대표값 하나로 접지 않고 줄 범위와
+                # 정형 문구 일치 근거를 모두 남긴다.
+                "template_labels": {
+                    "semantic": meta.get("gubun_breakdown") or [],
+                    "fixed_phrase_hits": meta.get("phrase_hits") or [],
+                    "phrase_share": meta.get("phrase_share", 0.0),
+                },
                 "lines": lines_out,
-                # 표로 인식된 영역만. 줄을 대체하지 않고 **행·열 관계만** 얹는다.
-                "table": _table_out(
-                    region.get("table"), lines_out, region.get("layout_score"),
-                ),
+                "table": table_out,
             })
         pages_out.append({
             "page_no": pno,
@@ -157,8 +164,11 @@ def build_unified(
                 _line(f"p{pno}/unassigned/L{i:02d}", ln, labels_by_ref, vlm_gubun_by_ref)
                 for i, ln in enumerate(page.get("unassigned_lines") or [])
             ],
+            # StructureV3 영역을 만들지 못한 페이지 문구의 후보. 정본에는 편입하지 않는다.
+            "recovery_candidates": page.get("recovery_candidates") or [],
         })
 
+    review_targets = _review_targets(_items_index(label, labels_by_ref), pages_out)
     unified = {
         "doc_id": doc.get("doc_id"),
         "source_file": doc.get("source_file"),
@@ -171,8 +181,17 @@ def build_unified(
             "confidence": doc.get("classification_confidence"),
         },
         "template": resolution,
+        "reading_evidence_contract": {
+            "version": "nh-ad-review-evidence-v2",
+            "canonical_text": "pages[].regions[].text_evidence.canonical + lines[].text",
+            "reader_judge_mode": "shadow_observation",
+            "parser_mutates_canonical_from_reader_or_judge": False,
+            "final_text_selection": "deferred_to_review",
+        },
         "pages": pages_out,
-        "template_items": _items_index(label, labels_by_ref),
+        # 다음 심의 단계가 쓰는 작업 목록. 이전 template_items의 내부 매칭 상세를
+        # 그대로 넘기지 않고, 정적 기준과 실제 좌표 근거만 정리한다.
+        "review_targets": review_targets,
         "completeness": _completeness(pages_out, label),
         "notes": doc.get("notes") or [],
     }
@@ -201,10 +220,6 @@ def _line(
         "source": ln.get("source"),
         "confidence": ln.get("confidence"),
         "style": ln.get("style"),
-        # 라인 단위 재판독 후보 — 위 region.vlm_reading 과 같은 원칙, 같은 이유로 남긴다.
-        "vlm_reading": ln.get("vlm_reading"),
-        "vlm_reading_conf": ln.get("vlm_reading_conf"),
-        "vlm_reading_stage": ln.get("vlm_reading_stage"),
         # 1층: 이 줄에 걸린 템플릿 **정형** 문구(완전일치, 결정론). 한 줄에 여러
         # 문구가 걸릴 수 있어 목록이다(실측: 유의사항이 `■` 로 붙어 한 줄에 두
         # 문구가 들어 있는 경우).
@@ -412,7 +427,7 @@ def _vlm_gubun_by_ref(label: dict) -> dict[str, list[str]]:
 
 
 def _items_index(label: dict, labels_by_ref: dict) -> list[dict]:
-    """항목 → (문구 상태 + 그 문구가 걸린 줄). 줄 쪽 사실의 역방향 보기다.
+    """항목 → (문구 상태 + 그 문구가 걸린 줄)의 내부 점검 색인.
 
     `line_refs` 는 두 층의 합집합이다 — ① `labels_by_ref`(1층, 정형 문구 완전일치)
     ② `item["line_refs"]`(2층, `ad_template.label_document` 이 이미 VLM 판정으로
@@ -432,17 +447,105 @@ def _items_index(label: dict, labels_by_ref: dict) -> list[dict]:
     return items
 
 
+def _visibility(bbox: list[int] | None, lines: list[dict], page: dict) -> dict:
+    """심의가 재계산할 수 있는 시인성 사실만 남긴다.
+
+    글자 크기·색은 PDF/HWP 디지털 텍스트에서만 얻을 수 있어 ``style_available``을 함께
+    둔다. OCR 이미지에 값을 꾸며 넣지 않고, bbox 비율과 OCR 줄 높이를 공통 근거로 쓴다.
+    """
+    canvas_w = int(page.get("canvas_w") or 0)
+    canvas_h = int(page.get("canvas_h") or 0)
+    position = None
+    if bbox and len(bbox) == 4 and canvas_w > 0 and canvas_h > 0:
+        x0, y0, x1, y1 = bbox
+        position = {
+            "x_ratio": [round(x0 / canvas_w, 4), round(x1 / canvas_w, 4)],
+            "y_ratio": [round(y0 / canvas_h, 4), round(y1 / canvas_h, 4)],
+            "area_ratio": round(max(0, x1 - x0) * max(0, y1 - y0) / (canvas_w * canvas_h), 6),
+        }
+    heights = [
+        line["bbox"][3] - line["bbox"][1]
+        for line in lines if line.get("bbox") and len(line["bbox"]) == 4
+    ]
+    styles = [line.get("style") for line in lines if line.get("style")]
+    return {
+        "position": position,
+        "line_height_px": {
+            "min": min(heights) if heights else None,
+            "max": max(heights) if heights else None,
+            "mean": round(sum(heights) / len(heights), 2) if heights else None,
+        },
+        "style_available": bool(styles),
+        "style_sources": sorted({style.get("style_source") for style in styles if style.get("style_source")}),
+    }
+
+
+def _review_targets(items: list[dict], pages: list[dict]) -> list[dict]:
+    """심의로 넘길 최소 템플릿 작업 목록을 만든다.
+
+    ``template_items``는 정형 문구 매칭의 내부 상세라 그대로 계약으로 쓰지 않는다. 여기서는
+    항목명·필수여부·기재요령·실제 line/region/card 근거만 남긴다. ``evidence_status``는
+    위반 여부가 아니라 파서가 근거를 위치시켰는지에 대한 상태다.
+    """
+    owner: dict[str, dict] = {}
+    for page in pages:
+        for region in page.get("regions") or []:
+            for line in region.get("lines") or []:
+                owner[line["line_ref"]] = {
+                    "region_id": region["region_id"],
+                    "card_no": region.get("card_no"),
+                }
+
+    targets: list[dict] = []
+    for item in items:
+        refs = sorted(set(item.get("line_refs") or []))
+        owners = [owner[ref] for ref in refs if ref in owner]
+        fixed_checks = []
+        for phrase in item.get("fixed_phrases") or []:
+            phrase_refs = sorted({ref for match in phrase.get("matches") or [] for ref in match.get("refs") or []})
+            fixed_checks.append({
+                "phrase_id": phrase.get("phrase_id"),
+                "requirement": phrase.get("requirement"),
+                "exact_match_found": bool(phrase.get("found")),
+                "line_refs": phrase_refs,
+                "prefix_coverage": phrase.get("prefix_coverage"),
+            })
+        if refs:
+            evidence_status = "located"
+        elif item.get("variable_entries"):
+            evidence_status = "not_located"
+        elif fixed_checks:
+            evidence_status = "no_exact_match"
+        else:
+            evidence_status = "not_applicable"
+        targets.append({
+            "target_id": f"template:{item.get('gubun')}",
+            "label": item.get("gubun"),
+            "requirement": item.get("requirement"),
+            "writing_rules": item.get("writing_rules") or [],
+            "evidence_status": evidence_status,
+            "evidence": {
+                "line_refs": refs,
+                "region_ids": sorted({value["region_id"] for value in owners}),
+                "card_nos": sorted({value["card_no"] for value in owners if value["card_no"] is not None}),
+                "fixed_phrase_checks": fixed_checks,
+            },
+        })
+    return targets
+
+
 def _completeness(pages: list[dict], label: dict) -> dict:
     """통합 결과 **자체를 다시 세어** 낸다 — 라벨링이 준 숫자를 베끼지 않는다."""
     lines = unified_lines(pages)
-    gubun_of_region = {
-        r["region_id"]: r["gubun"] for p in pages for r in p["regions"]
+    labels_of_region = {
+        r["region_id"]: (r.get("template_labels") or {}).get("semantic") or []
+        for p in pages for r in p["regions"]
     }
     labeled = sum(1 for l in lines if l["labels"])
     covered = 0
     for page in pages:
         for region in page["regions"]:
-            has_region_label = bool(gubun_of_region.get(region["region_id"]))
+            has_region_label = bool(labels_of_region.get(region["region_id"]))
             for line in region["lines"]:
                 if line["labels"] or has_region_label:
                     covered += 1

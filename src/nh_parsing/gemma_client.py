@@ -234,13 +234,30 @@ def _repair_trailing_escape(text: str, max_fixes: int = 8) -> dict | None:
         return None
 
 
-def image_part(image: Image.Image, box: tuple[int, int] = (896, 2400), quality: int = 85) -> dict:
-    """캔버스를 VLM 입력용 축소 이미지 파트로 변환 (비율 유지)."""
+def image_part(
+    image: Image.Image,
+    box: tuple[int, int] = (896, 2400),
+    quality: int = 85,
+    image_format: str = "JPEG",
+) -> dict:
+    """캔버스를 VLM 입력용 축소 이미지 파트로 변환한다(비율 유지).
+
+    기존 전체·밴드 호출은 JPEG 85를 유지한다. 숫자·미세 글자를 비교하는 영역 Reader와
+    Judge는 ``image_format=\"PNG\"``로 손실 압축 없이 같은 crop을 보낼 수 있다.
+    """
     img = image.copy()
     img.thumbnail(box)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
-    url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    fmt = image_format.strip().upper()
+    if fmt == "PNG":
+        img.save(buf, format="PNG")
+        mime = "image/png"
+    elif fmt in {"JPEG", "JPG"}:
+        img.save(buf, format="JPEG", quality=quality)
+        mime = "image/jpeg"
+    else:
+        raise ValueError(f"지원하지 않는 VLM 이미지 형식: {image_format}")
+    url = f"data:{mime};base64," + base64.b64encode(buf.getvalue()).decode("ascii")
     return {"type": "image_url", "image_url": {"url": url}}
 
 

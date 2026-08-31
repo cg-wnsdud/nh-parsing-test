@@ -19,11 +19,10 @@ from .canvas import CanvasPage, load_image_canvas, render_pdf_page, rgb_on_white
 from .config import SETTINGS
 from .gemma_client import classify
 from .hwp_ingest import ingest_hwp
-from .ir import AdDocument, AdPage, Line, Region
+from .ir import AdDocument, AdPage, Line, RecoveryCandidate, Region
 from .paddlex_client import LayoutBlock, request_layout_parsing
 from .regions import build_regions
 from .tiling import dedupe_lines, make_tiles, restore_coords
-from .vlm_judge import judge_region_roles
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
 HWP_EXTS = {".hwp", ".hwpx"}
@@ -199,10 +198,12 @@ def _shift_table(table: dict | None, y_offset: int) -> dict | None:
 
 
 def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
-    """VLM 이 판단 주체 (설계서 6.5): 영역 역할 판정 + 밴드 통합판독(교정+누락 회수).
+    """좌표 경계를 유지한 VLM 보강 단계.
 
-    실패 시에만 규칙/regex 폴백을 유지하고, 그 사실을 notes 에 기록한다
-    (조용한 실패 금지 원칙).
+    이 브랜치의 기본 경로는 모든 StructureV3 텍스트 영역을 독립 Reader로 읽는다.
+    따라서 이전의 ``밴드 이미지 → 여러 영역별 후보``와 역할 9종 VLM 판정은 정본
+    판독 흐름에서 제외한다. 페이지 전체 sweep만 StructureV3가 만들지 못한 문구를 찾는
+    별도 ``recovery_candidates`` 관측으로 남긴다.
     """
     all_lines = [l for r in page.regions for l in r.lines] + page.unassigned_lines
 
@@ -225,64 +226,28 @@ def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
         except Exception as exc:
             page.notes.append(f"카드-분할 실패(좌표 순서 유지): {exc}")
 
-    # 영역 역할 판정 — 섹션(의미 묶음)은 2026-08-03 제거했다(vlm_judge 상단 주석).
-    # 같이 빠진 것: 장식예시 격리(section_type 의존), 미배정 낱줄의 VLM 내용 귀속.
-    # 둘 다 흔들리는 의미 판정이었고 후속 계약에 담을 자리도 없었다.
-    # except 는 **완전 실패**(서버 죽음·JSON 깨짐)만 잡는다. VLM 이 정상 응답하면서
-    # 일부 영역을 빠뜨리면 그 영역들은 조용히 규칙 폴백 값을 유지했고 notes 에 아무것도
-    # 안 남았다 — "조용한 실패 금지" 원칙에서 벗어난 자리였다(2026-08-06 수정).
-    # 실측(2026-08-05, 글자 있는 영역 201개 전수): VLM 적용 199 · 폴백 2. 그 2 중
-    # 하나는 HWP(캔버스가 없어 애초에 안 부름)라 진짜 부분 응답은 1건이다. 규모가
-    # 작아 이건 결함 수정이 아니라 예방이다 — 다음에 늘어나면 로그로 알아챌 수 있다.
-    judgeable = sum(1 for r in page.regions if r.lines)
-    try:
-        applied = judge_region_roles(page.regions, canvas_img, page.canvas_h)
-        if applied < judgeable:
-            page.notes.append(
-                f"VLM 역할 판정 부분 응답: {judgeable}개 중 {applied}개만 판정됨 "
-                f"→ 나머지 {judgeable - applied}개는 규칙 폴백(_refine_role) 값 유지"
-            )
-    except Exception as exc:
-        page.notes.append(f"VLM 역할 판정 실패 → 규칙 폴백(_refine_role) 유지: {exc}")
-
     # 미배정 라인 귀속 — 좌표만 보는 결정론 1단계로 축소(예전 2단계 중 VLM 단 제거).
     _absorb_unassigned_into_regions(page)
 
-    # VLM 직독 폴백 1: OCR/디지털이 놓친 시각 전용 텍스트 회수 (설계서 6.4).
-    # 장식 타이포·벡터(패스) 텍스트는 어느 라우트에서도 빠질 수 있어 전 페이지 공통.
-    # 복수 관측(개선 A): 스윕은 서버측 비결정성으로 실행마다 회수 문구가 흔들린다
-    # (temperature=0 이어도 재현 — guided-decoding/배치 비결정성). 필드에 쓴 것과
-    # 같은 관측→합집합 패턴으로 여러 번 돌려 회수율을 안정화한다. 2회차에는 1회차
-    # 결과를 이미 있는 것으로 넘겨 새 문구만 받으므로(자연 합집합) 중복이 없다.
+    # 페이지 sweep은 Region Reader의 대체물이 아니다. Reader는 StructureV3가 이미 만든
+    # 영역만 읽을 수 있으므로, StructureV3/OCR이 아예 놓친 장식·벡터 텍스트를 찾을 때만
+    # 한 번 호출한다. 결과는 정본 Line이나 미배정 Line에 섞지 않고 별도 후보로 남긴다.
     if canvas_img is not None:
-        # 밴드 1장 = ④+ 교정 + 밴드 스윕을 한 호출로(_merged_band_read). 통짜 스윕만
-        # 따로 남긴다 — 밴드가 원래 못 잡는 대형 장식 타이포용(002 '행운의 777 이벤트').
-        from .vlm_direct import reread_low_confidence_lines, sweep_missing_lines
+        from .vlm_direct import sweep_missing_lines
 
-        swept = _merged_band_read(page, canvas_img, all_lines)
         try:
-            new_lines, notes = sweep_missing_lines(
-                all_lines + swept, canvas_img, page.canvas_w, page.canvas_h, banded=False,
+            discovered, notes = sweep_missing_lines(
+                all_lines, canvas_img, page.canvas_w, page.canvas_h, banded=False,
             )
-            page.notes.extend(f"스윕(통짜): {n}" for n in notes)
-            swept.extend(new_lines)
-        except Exception as exc:
-            page.notes.append(f"통짜 스윕 실패(원 결과 유지): {exc}")
-        if swept:
-            swept = _resolve_sweep_duplicates(page, swept, canvas_img)
-        if swept:
-            page.unassigned_lines.extend(swept)
-            page.notes.append(
-                "VLM 스윕 회수 문구 " + ", ".join(f"'{l.text[:30]}'" for l in swept)
+            page.notes.extend(f"페이지 누락문구 탐색: {n}" for n in notes)
+            page.recovery_candidates.extend(
+                RecoveryCandidate(text=line.text, bbox=line.bbox, confidence=line.confidence)
+                for line in discovered
             )
-        all_lines = [l for r in page.regions for l in r.lines] + page.unassigned_lines
-
-        # 저신뢰 OCR 라인 크롭 재판독 (2b): 심의 관련 영역의 낮은 신뢰도 라인을
-        # 고해상 재판독으로 교정한다. 예시/장식·이미지 영역은 제외(무관·비용).
-        try:
-            page.notes.extend(reread_low_confidence_lines(page.regions, canvas_img))
+            if discovered:
+                page.notes.append(f"페이지 누락문구 후보 {len(discovered)}개 (정본 미편입)")
         except Exception as exc:
-            page.notes.append(f"저신뢰 라인 재판독 실패(원값 유지): {exc}")
+            page.notes.append(f"페이지 누락문구 탐색 실패(정본 유지): {exc}")
 
     _note_layout_gaps(page)
 
@@ -290,8 +255,31 @@ def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:
     # 읽기 순서 국소 재정렬: 전역 정렬이 긴 페이지에서 시각적 줄을 조각내는 문제
     # (001 단어 섞임 실측)를 영역 범위 재정렬로 교정한다.
     _finalize_reading_order(page)
-    # 정본이 확정된 **뒤에** 후보 점수·관계 딱지를 매긴다 (아래 함수 주석의 실측 참조).
-    _score_reading_candidates(page)
+    # Reader → Judge 교차검증은 정본 줄 순서가 확정된 뒤 수행한다. 기본 scope=all에서는
+    # StructureV3가 만든 모든 텍스트/표 영역이 한 번씩 독립 crop으로 읽힌다.
+    # shadow에서는 Region.lines/템플릿 입력을 절대 바꾸지 않는다.
+    if SETTINGS.region_reading_mode == "shadow":
+        if canvas_img is None:
+            page.notes.append("영역별 Reader/Judge shadow: 캔버스 없음 — 건너뜀")
+        else:
+            try:
+                from .reading_adjudication import adjudicate_regions_shadow
+
+                stats = adjudicate_regions_shadow(page.regions, canvas_img)
+                page.notes.append(
+                    "영역별 Reader/Judge shadow: "
+                    f"선별 {stats['eligible']} / 요청 {stats['requested']} / "
+                    f"일치 {stats['agreed']} / 정본선택 {stats['judge_selected']} / "
+                    f"불확실 {stats['uncertain']} / Reader실패 {stats['reader_failed']} / "
+                    f"Judge실패 {stats['judge_failed']}"
+                )
+            except Exception as exc:
+                page.notes.append(f"영역별 Reader/Judge shadow 단계 실패(정본 유지): {exc}")
+    elif SETTINGS.region_reading_mode not in {"", "off"}:
+        page.notes.append(
+            f"알 수 없는 REGION_READING_MODE={SETTINGS.region_reading_mode!r} — "
+            "영역별 Reader/Judge를 실행하지 않음"
+        )
 
 
 _OVERFLOW_MIN_LEN_RATIO = 3.0   # 후보가 자기 정본보다 이 배수 이상 길 때만 의심

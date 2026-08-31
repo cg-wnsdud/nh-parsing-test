@@ -3,8 +3,8 @@
 
 `tools/make_ad_review.py` 와 목적이 다르다. 그쪽은 **라벨이 잘 붙었나**를 그림 위
 상자로 보는 검수용이고, 이건 **한 영역에서 무슨 일이 있었나**를 보는 열람용이다:
-영역마다 OCR/디지털 정본 · VLM 판독 후보 · 시인성(글자 크기·굵기·색) · 라벨을
-한자리에 모아 접었다 펼친다.
+영역마다 OCR/디지털 정본 · 밴드 VLM 후보 · Reader/Judge shadow 근거 · 시인성
+(글자 크기·굵기·색) · 라벨을 한자리에 모아 접었다 펼친다.
 
 영역 순서는 **통합 JSON 에 실린 순서 그대로**다(레이아웃 검출 순서). 다음 단계
 (벡터DB·RDB 엔진)가 이 파일을 읽으면 이 순서로 보게 되므로, 화면도 같은 순서여야
@@ -108,6 +108,7 @@ code,.mono { font:12px/1.5 "Consolas",monospace; }
 .chip.ok   { background:#e6f4ec; color:#1f6f45; }
 .chip.good { background:#e6f4ec; color:#1f6f45; }
 .chip.bad  { background:#fdeee6; color:var(--bad); font-weight:600; }
+.chip.shadow { background:#e8eefc; color:#1d4ed8; font-weight:600; }
 .tag { display:inline-block; width:15px; text-align:center; color:#fff; font-size:10px;
        font-weight:700; border-radius:2px; }
 
@@ -167,7 +168,7 @@ def _boxes(page: dict) -> str:
         b = r.get("bbox")
         if not b:
             continue
-        cls = " lab" if r.get("gubun") else ""
+        cls = " lab" if (r.get("template_labels") or {}).get("semantic") else ""
         style = (f"left:{b[0]/w:.3%};top:{b[1]/h:.3%};"
                  f"width:{(b[2]-b[0])/w:.3%};height:{(b[3]-b[1])/h:.3%}")
         out.append(f'<div class="box{cls}" data-rid="{_esc(r["region_id"])}" '
@@ -261,6 +262,49 @@ def _region_vlm(r: dict) -> str:
     )
 
 
+def _reader_judge(r: dict) -> str:
+    """목표 영역만 마스킹한 Reader/Judge shadow 결과를 정본과 나란히 보여 준다."""
+    evidence = r.get("text_evidence") or {}
+    adj = evidence.get("adjudication") or {}
+    reader = ((evidence.get("reader") or {}).get("text") or "").strip()
+    if not adj and not reader:
+        return ""
+    canonical = ((evidence.get("canonical") or {}).get("text") or "").strip()
+    status = adj.get("status") or "Reader 결과만 있음"
+    reasons = ", ".join(str(value) for value in adj.get("selection_reasons") or []) or "—"
+    crop = adj.get("crop_bbox")
+    target = adj.get("target_bbox")
+    excluded = ", ".join(adj.get("excluded_overlap_region_ids") or []) or "없음"
+    meta = (
+        f'<span class="chip shadow">{_esc(status)}</span> '
+        f'<span class="chip">선별: {_esc(reasons)}</span> '
+        f'<span class="chip">Reader 확신 {_esc(adj.get("reader_confidence") or (evidence.get("reader") or {}).get("confidence"))}</span>'
+    )
+    judge = ""
+    if adj:
+        judge = (
+            '<div class="blkhd">Judge 판정</div>'
+            f'<pre class="txt">decision={_esc(adj.get("judge_decision"))}\n'
+            f'confidence={_esc(adj.get("confidence"))}\n'
+            f'reason={_esc(adj.get("reason") or adj.get("error"))}\n'
+            f'crop={_esc(crop)}\n'
+            f'target_in_crop={_esc(target)}\n'
+            f'excluded_overlap_regions={_esc(excluded)}\n'
+            f'policy={_esc(adj.get("crop_policy"))}</pre>'
+        )
+    return (
+        '<div class="blk"><div class="blkhd">영역 Reader/Judge shadow ' + meta + '</div>'
+        '<p class="kv">파란 테두리 안만 남기고 바깥 픽셀을 마스킹한 crop으로 비교합니다. '
+        '아래 후보는 정본을 자동 변경하지 않습니다.</p>'
+        '<div class="two">'
+        '<div><div class="blkhd">정본</div>'
+        f'<pre class="txt">{_esc(canonical) or "(없음)"}</pre></div>'
+        '<div><div class="blkhd">독립 Reader</div>'
+        f'<pre class="txt">{_esc(reader) or "(빈 응답)"}</pre></div>'
+        '</div>' + judge + '</div>'
+    )
+
+
 def _table_block(t: dict | None) -> str:
     if not t:
         return ""
@@ -271,15 +315,19 @@ def _table_block(t: dict | None) -> str:
         meta.append(_esc(note))
     if outside:
         meta.append(f"셀 밖 줄 {len(outside)}개")
+    visual_rows = t.get("reader_visual_rows") or []
+    reader = ("<div class=\"blkhd\">Reader 시각적 행 순서 (구조 미확정)</div>"
+              f"<pre class=\"txt\">{_esc(chr(10).join(visual_rows))}</pre>" if visual_rows else "")
     return (
         f'<div class="blk"><div class="blkhd">표 격자 — {t.get("n_rows")}행 '
         f'{t.get("n_cols")}열{" · " + " · ".join(meta) if meta else ""}</div>'
-        f'<div class="lines">{t.get("html") or ""}</div></div>'
+        f'<div class="lines">{t.get("html") or ""}</div>{reader}</div>'
     )
 
 
 def _phrases(r: dict) -> str:
-    hits = r.get("phrase_hits") or []
+    labels = r.get("template_labels") or {}
+    hits = labels.get("fixed_phrase_hits") or []
     if not hits:
         return ""
     chips = " ".join(
@@ -298,35 +346,60 @@ def _region_html(seq: int, r: dict) -> str:
         f'{SOURCE_META[s][0]}</span>'
         for s in ("digital", "ocr", "vlm_sweep") if s in srcs
     )
-    gubun = r.get("gubun")
+    semantic = (r.get("template_labels") or {}).get("semantic") or []
+    gubun = ", ".join(str(item.get("gubun")) for item in semantic if item.get("gubun"))
     gchip = (f'<span class="chip gubun">{_esc(gubun)}</span>' if gubun
-             else '<span class="chip none">라벨 없음</span>')
+              else '<span class="chip none">라벨 없음</span>')
     extra = ""
     if r.get("table"):
         extra += f'<span class="chip tbl">표 {r["table"].get("n_rows")}×{r["table"].get("n_cols")}</span>'
-    if (r.get("vlm_reading") or "").strip():
-        _, grade = RELATION.get(r.get("vlm_reading_relation") or "same", ("", "ok"))
-        extra += f'<span class="chip {grade}">VLM 후보</span>'
+    evidence = r.get("text_evidence") or {}
+    if evidence.get("adjudication") or evidence.get("reader"):
+        status = (evidence.get("adjudication") or {}).get("status") or "Reader"
+        extra += f'<span class="chip shadow">shadow { _esc(status) }</span>'
 
     body = (
         _lines_table(lines) if lines else '<p class="kv">글자가 안 붙은 검출 상자</p>'
-    ) + _line_rereads(lines) + _region_vlm(r) + _table_block(r.get("table")) + _phrases(r)
+    ) + _reader_judge(r) + _table_block(r.get("table")) + _phrases(r)
 
     return (
         f'<details class="rgn" data-rid="{_esc(r["region_id"])}">'
         f'<summary><span class="seq">{seq:02d}</span>'
         f'<span class="rid">{_esc(r["region_id"])}</span>'
-        f'<span class="role">{_esc(r.get("role"))}</span>{gchip}{extra}'
+        f'<span class="role">{_esc((r.get("layout") or {}).get("label"))}</span>{gchip}{extra}'
         f'<span class="chip">{len(lines)}줄</span>{src_chips}</summary>'
         f'<div class="rgnbody">{body}</div></details>'
+    )
+
+
+def _review_targets_block(targets: list[dict]) -> str:
+    """다음 심의 단계로 넘길 템플릿 작업 목록을, 원본 영역과 분리해 보여 준다."""
+    if not targets:
+        return '<div class="blk"><div class="blkhd">Review targets</div><p class="kv">템플릿 판단불가 또는 대상 없음</p></div>'
+    rows = "".join(
+        '<tr>'
+        f'<td>{_esc(target.get("label"))}</td>'
+        f'<td>{_esc(target.get("requirement"))}</td>'
+        f'<td>{_esc(target.get("evidence_status"))}</td>'
+        f'<td class="mono">{_esc(", ".join(target.get("evidence", {}).get("region_ids") or []))}</td>'
+        f'<td class="mono">{_esc(target.get("evidence", {}).get("card_nos"))}</td>'
+        '</tr>'
+        for target in targets
+    )
+    return (
+        '<div class="blk"><div class="blkhd">Review targets — 심의용 항목·근거 연결</div>'
+        '<p class="kv">위반 여부가 아니라 파서가 위치시킨 근거 상태입니다.</p>'
+        '<div class="lines"><table class="ln"><thead><tr><th>항목</th><th>필수</th>'
+        '<th>근거 상태</th><th>영역</th><th>카드</th></tr></thead><tbody>'
+        + rows + '</tbody></table></div></div>'
     )
 
 
 def _doc_html(doc: dict, pages_rel: str, anchor: str) -> str:
     cls, tpl, comp = doc["classification"], doc["template"], doc["completeness"]
     regions = [r for p in doc["pages"] for r in p["regions"]]
-    n_lab = sum(1 for r in regions if r.get("gubun"))
-    n_cand = sum(1 for r in regions if (r.get("vlm_reading") or "").strip())
+    n_lab = sum(1 for r in regions if (r.get("template_labels") or {}).get("semantic"))
+    n_shadow = sum(1 for r in regions if (r.get("text_evidence") or {}).get("adjudication"))
 
     canvases = []
     for page in doc["pages"]:
@@ -354,6 +427,16 @@ def _doc_html(doc: dict, pages_rel: str, anchor: str) -> str:
                 f'<div class="rgnbody"><div class="unassigned">{_lines_table(un)}</div>'
                 '</div></details>'
             )
+        recovered = page.get("recovery_candidates") or []
+        if recovered:
+            blocks.append(
+                '<details class="rgn"><summary><span class="seq">?</span>'
+                '<span class="rid">페이지 누락문구 후보</span>'
+                '<span class="role">정본 미편입</span>'
+                f'<span class="chip">{len(recovered)}개</span></summary>'
+                f'<div class="rgnbody"><pre class="txt">{_esc(chr(10).join(str(item.get("text") or "") for item in recovered))}</pre>'
+                '</div></details>'
+            )
 
     return (
         f'<details class="doc" id="{_esc(anchor)}">'
@@ -361,12 +444,12 @@ def _doc_html(doc: dict, pages_rel: str, anchor: str) -> str:
         f'<span class="kv">분류 <b>{_esc(cls["product_group"])}</b> / {_esc(cls["ad_type"])}</span>'
         f'<span class="kv">템플릿 <b>{_esc(tpl["template_id"] or "판단불가")}</b></span>'
         f'<span class="kv">영역 <b>{len(regions)}</b> · 줄 <b>{comp["lines_total"]}</b> · '
-        f'라벨영역 <b>{n_lab}</b> · VLM후보 <b>{n_cand}</b></span></summary>'
+        f'라벨영역 <b>{n_lab}</b> · Reader/Judge <b>{n_shadow}</b></span></summary>'
         f'<div class="docbody"><div class="cols">'
         f'<div class="pagewrap">{"".join(canvases)}'
         '<div class="legend">초록 상자 = 템플릿 항목이 붙은 영역 · 회색 = 안 붙음<br>'
         '오른쪽 영역을 펼치면 그 상자를 짚어 줍니다</div></div>'
-        f'<div>{"".join(blocks)}</div>'
+        f'<div>{_review_targets_block(doc.get("review_targets") or [])}{"".join(blocks)}</div>'
         f'</div></div></details>'
     )
 
@@ -413,8 +496,8 @@ def main() -> None:
 
     n_r = sum(len(r) for r in ([p["regions"] for d in docs for p in d["pages"]]))
     n_l = sum(d["completeness"]["lines_total"] for d in docs)
-    n_cand = sum(1 for d in docs for p in d["pages"] for r in p["regions"]
-                 if (r.get("vlm_reading") or "").strip())
+    n_shadow = sum(1 for d in docs for p in d["pages"] for r in p["regions"]
+                   if (r.get("text_evidence") or {}).get("adjudication"))
     n_tbl = sum(1 for d in docs for p in d["pages"] for r in p["regions"] if r.get("table"))
 
     out.write_text(
@@ -423,10 +506,10 @@ def main() -> None:
         "<title>영역별 파싱 상세</title>"
         f"<style>{CSS}</style>"
         f"<h1>영역별 파싱 상세 — {len(docs)}건</h1>"
-        f'<p class="sub">영역 {n_r} · 줄 {n_l} · VLM 통독 후보가 붙은 영역 {n_cand} · 표 격자 {n_tbl}</p>'
+        f'<p class="sub">영역 {n_r} · 줄 {n_l} · Reader/Judge shadow {n_shadow} · 표 격자 {n_tbl}</p>'
         '<p class="sub">영역 순서와 배열은 <b>통합 JSON 에 실린 것 그대로</b>입니다 — 다음 단계'
         '(벡터DB·RDB 엔진)가 읽는 순서와 같습니다. 문서를 펼치고, 영역을 다시 펼치면 '
-        '그 영역의 정본·VLM 후보·시인성·라벨이 한자리에 나옵니다.</p>'
+        '그 영역의 정본·밴드 VLM·Reader/Judge 후보·시인성·라벨이 한자리에 나옵니다.</p>'
         '<p class="sub">출처 배지 <span class="tag" style="background:#059669">D</span> = '
         '드래그로 잡히는 디지털 텍스트 · <span class="tag" style="background:#2563eb">O</span> = '
         'OCR 이 픽셀에서 읽음 · <span class="tag" style="background:#db2777">S</span> = '

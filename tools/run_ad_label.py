@@ -74,14 +74,17 @@ def run_one(path: Path, out_dir: Path, pack: dict, reuse_parse: bool = False) ->
     vlm_s = sum(s["seconds"] for s in STATS.values())
     vlm_calls = int(sum(s["calls"] for s in STATS.values()))
     vlm_cached = int(sum(s["cached"] for s in STATS.values()))
-    vlm_labeled = sum(1 for p in unified["pages"] for r in p["regions"] if r["gubun"])
+    semantic_labeled = sum(
+        1 for p in unified["pages"] for r in p["regions"]
+        if (r.get("template_labels") or {}).get("semantic")
+    )
     return {
         "file": path.name,
         "vlm_s": vlm_s, "vlm_calls": vlm_calls, "vlm_cached": vlm_cached,
         "template": unified["template"]["template_id"] or "판단불가",
         "note": unified["template"]["note"],
         "regions": regions,
-        "vlm_labeled": vlm_labeled,
+        "semantic_labeled": semantic_labeled,
         "lines": c["lines_total"],
         "covered": c["lines_covered"],
         "elapsed": time.time() - started,
@@ -122,7 +125,7 @@ def main() -> None:
             continue
         rows.append(row)
         print(f"  템플릿: {row['template']}  ({row['note']})")
-        print(f"  영역 {row['regions']} / VLM라벨 {row['vlm_labeled']} / "
+        print(f"  영역 {row['regions']} / 템플릿라벨 {row['semantic_labeled']} / "
               f"줄 {row['lines']} / 라벨닿음 {row['covered']} / {row['elapsed']:.0f}초 "
               f"(VLM {row['vlm_s']:.0f}초 {row['vlm_calls']}회, 캐시 {row['vlm_cached']})")
         # 단계별 내역. 합계만 보면 "모델이 느리다"와 "타임아웃 나서 재시도했다"를
@@ -130,12 +133,12 @@ def main() -> None:
         print("  " + stats_table().replace("\n", "\n  "))
 
     print(f"\n{'=' * 112}")
-    print(f'{"파일":<32}{"템플릿":<26}{"영역":>5}{"VLM라벨":>8}{"줄":>5}{"라벨닿음":>9}'
+    print(f'{"파일":<32}{"템플릿":<26}{"영역":>5}{"템플릿라벨":>10}{"줄":>5}{"라벨닿음":>9}'
           f'{"총초":>7}{"VLM초":>7}{"그외초":>7}{"호출":>5}{"캐시":>5}')
     print("-" * 112)
     for r in rows:
         print(f'{r["file"][:31]:<32}{r["template"][:25]:<26}{r["regions"]:>5}'
-              f'{r["vlm_labeled"]:>8}{r["lines"]:>5}{r["covered"]:>9}{r["elapsed"]:>7.0f}'
+               f'{r["semantic_labeled"]:>10}{r["lines"]:>5}{r["covered"]:>9}{r["elapsed"]:>7.0f}'
               f'{r["vlm_s"]:>7.0f}{r["elapsed"] - r["vlm_s"]:>7.0f}'
               f'{r["vlm_calls"]:>5}{r["vlm_cached"]:>5}')
     tot_l = sum(r["lines"] for r in rows)

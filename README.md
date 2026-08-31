@@ -8,12 +8,13 @@
   -> triage: structured / scan_like / hybrid 판정         (디지털 텍스트 신뢰도 기반)
   -> 캔버스 정규화 (렌더 · 필요 시 밀도 기반 분할·타일링)
   -> PaddleX PP-StructureV3 레이아웃 + OCR
+  -> 카드/공통영역 공간 경계 + 읽기순서 정리
   -> VLM 문서 분류 (상품군 · 광고유형)
-  -> 밴드 단위 VLM 통합판독 (OCR 교정 + 미검출 문구 스윕)
-  -> (선택) 저신뢰 라인 재판독 · 카드-분할 · 미배정 블록 진단
-  -> OCR 정본 vs VLM 후보 판정 (잘림/생략/불일치 라벨)
-  -> 템플릿 항목명(gubun) 라벨링 — 정형 문구 완전일치(1층) + VLM 판정(2층)
-  -> 통합 JSON(좌표 + 라벨) — 광고물 트랙의 최종 산출물
+  -> 모든 StructureV3 텍스트·표 영역을 마스킹 Reader로 독립 판독
+  -> OCR 정본과 Reader가 다를 때만 Judge 비교 (정본 불변)
+  -> 페이지 sweep으로 StructureV3 미검출 문구 후보만 별도 탐색
+  -> 템플릿 항목 라벨링 — 정형 문구 완전일치(1층) + VLM 줄범위 판정(2층)
+  -> review_targets(필수여부·기재요령·좌표 근거) + 통합 JSON
 ```
 
 **광고물 트랙은 스키마 기반 필드 추출(STAGE_3)을 거치지 않는다** — 종점은
@@ -80,6 +81,30 @@ uv run python tools/make_parse_explorer.py                 # 결과 열람 → o
 `VLM_CACHE=r`(기록)/`=p`(재생) 환경변수로 모델 호출 없이 결정론적 재실행이 가능하다
 (개발 전용, 응답을 그대로 재생하므로 실제 처리 시간이 아니다).
 
+### 영역 Reader/Judge shadow 검증 (기본 파이프라인 안에서 선택 실행)
+
+`kl_parser`가 호출하는 `ad_export.process_ad_file()`와 위 `run_ad_label.py`는 모두
+같은 `pipeline.process_file()`을 사용한다. 아래 환경변수를 켜면 별도 후처리 도구 없이
+그 기본 경로의 마지막에 Reader/Judge 교차검증이 들어간다.
+
+```powershell
+$env:REGION_READING_MODE = "shadow"
+$env:REGION_READING_SCOPE = "all"   # 기본 all | 비용 비교용 targeted
+uv run python tools/run_ad_label.py --input <파일> --out out_reader_judge
+```
+
+- `all`은 StructureV3가 반환한 텍스트·표 영역을 빠짐없이 Reader에 보낸다. `targeted`는
+  표·저신뢰 OCR만 대상으로 하는 비용 비교용 모드다.
+- Reader 입력은 목표 bbox 밖을 마스킹하고 파란 테두리를 표시한다. 목표 bbox가 다른
+  StructureV3 텍스트 영역을 품으면 그 하위 영역도 마스킹하고 제외한 `region_id`를 기록한다.
+- Reader/Judge 결과는 통합 JSON의 `region.text_evidence.reader`,
+  `region.text_evidence.adjudication`에 들어간다. `lines[].text` 정본과 템플릿 라벨 입력은
+  절대 변경하지 않는다. 넓은 밴드의 영역별 VLM 후보는 이 경로에서 쓰지 않는다.
+- 페이지 sweep은 StructureV3가 놓친 문구만 `page.recovery_candidates`에 별도 기록하며,
+  OCR 정본이나 미배정 줄에 자동 편입하지 않는다.
+- `tools/make_parse_explorer.py --in <out>`로 만든 `explorer.html`에서 정본·Reader/Judge·
+  카드 경계·표 격자·review_targets를 함께 확인할 수 있다.
+
 **스키마 기반 필드 추출(STAGE_3, 별도 트랙)**을 시험하려면:
 ```bash
 uv run python tools/run_nhdata.py        # 파싱 → out/json, out/llm_view
@@ -120,7 +145,7 @@ out/_timing.json              파일별 소요시간
 
 | 모듈 | 역할 |
 |---|---|
-| `pipeline.py` | 전체 라우팅·조립 — 파일별 트랙 진입점, 밴드 통합판독, 미배정 귀속 |
+| `pipeline.py` | 전체 라우팅·조립 — 입력 전처리, 카드 경계, 페이지 누락문구 후보 탐색, 전 영역 Reader 호출 |
 | `triage.py` | PDF 페이지 단위 structured/scan_like/hybrid 판정 + 디지털 라인 추출 |
 | `canvas.py` | 입력 정규화 (이미지/PDF → 캔버스, scan_like 는 네이티브 DPI 렌더) |
 | `bands.py` | 글자밀도 기반 분할 — 타일링·스윕·카드 개수 판정의 공통 primitive |
@@ -128,10 +153,9 @@ out/_timing.json              파일별 소요시간
 | `paddlex_client.py` | PP-StructureV3 호출 (레이아웃 + OCR) |
 | `regions.py` | 레이아웃 블록 → 영역(Region) 조립 |
 | `gemma_client.py` | VLM 공용 호출(chat_json) + 분류 + 호출 비용 계측 |
-| `vlm_judge.py` | 영역 역할 판정 |
 | `cards.py` | 카드-분할 — 개수는 밀도(코드), 배정은 VLM |
-| `vlm_direct.py` | 밴드 통합판독, 스윕, 저신뢰 재판독 |
-| `truncation.py` | OCR 정본 vs VLM 후보의 관계 판정 (잘림/생략/회수/불일치) |
+| `reading_adjudication.py` | StructureV3 영역 마스킹 Reader + 불일치 Judge (정본 불변) |
+| `vlm_direct.py` | 페이지 전체 누락문구 탐색(sweep, 정본 미편입) |
 | `layout_gap.py` | 레이아웃이 통째로 놓친 블록 진단 (감지만, 자동 승격 없음) |
 | `field_judge.py` | `check_field_consistency` — 값이 원문에 실재하는지 검산 |
 | `hwp_ingest.py` | 사내 파서(document-processor)로 HWP 디지털 추출 |
@@ -144,7 +168,7 @@ out/_timing.json              파일별 소요시간
 | 모듈 | 역할 |
 |---|---|
 | `ad_template.py` | 템플릿 판정(12종 중 1개) + 영역마다 항목명(gubun) VLM 판정(줄 범위 단위) |
-| `ad_export.py` | 파싱 결과 + 템플릿 라벨을 좌표 포함 통합 JSON으로 결합 |
+| `ad_export.py` | 원문 근거·Reader/Judge·표·템플릿 라벨을 `review_targets` 중심 통합 JSON으로 결합 |
 | `templates/ad_templates.json` | 농협 제공 템플릿 md에서 생성한 라벨 사전 (`tools/build_ad_templates.py`) |
 
 `kl_parser`(농협 KL 연동)가 실제로 호출하는 것도 이 경로다 —

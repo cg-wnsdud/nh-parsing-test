@@ -110,6 +110,48 @@ class RegionTable(BaseModel):
     note: Optional[str] = None
 
 
+class ReadingAdjudication(BaseModel):
+    """영역별 OCR/PDF 정본과 독립 VLM 판독의 shadow 교차검증 기록.
+
+    ``proposed_text``는 검수용 제안이며 Region.lines를 바꾸지 않는다. ambiguous·실패는
+    None으로 남겨 하류가 VLM 문자열 하나를 확정 정답으로 오인하지 못하게 한다.
+    """
+
+    mode: Literal["shadow"] = "shadow"
+    crop_bbox: list[int]
+    target_bbox: list[int]
+    crop_policy: Literal["masked_outside_region"] = "masked_outside_region"
+    # 목표 bbox가 다른 StructureV3 텍스트 영역을 통째로 품은 경우, 그 하위 영역은
+    # Reader 입력에서 별도로 마스킹한다. 빈 배열은 bbox 밖 마스킹만 적용했다는 뜻이다.
+    excluded_overlap_region_ids: list[str] = Field(default_factory=list)
+    selection_reasons: list[str] = Field(default_factory=list)
+    canonical_source: Literal["digital", "ocr", "hybrid"]
+    reader_text: Optional[str] = None
+    reader_confidence: Optional[float] = None
+    relation: Optional[str] = None
+    status: Literal["reader_failed", "agreed", "judge_selected", "uncertain", "judge_failed"]
+    judge_decision: Optional[Literal["candidate_a", "candidate_b", "merge", "uncertain"]] = None
+    proposed_text: Optional[str] = None
+    proposed_source: Optional[Literal["canonical", "element_vlm", "merged"]] = None
+    confidence: Optional[float] = None
+    reason: Optional[str] = None
+    error: Optional[str] = None
+
+
+class RecoveryCandidate(BaseModel):
+    """StructureV3가 만들지 못한 문구를 페이지 sweep이 발견했을 때의 관측값.
+
+    이 값은 기존 ``Line`` 이 아니다. 영역/라인 OCR 정본에 섞으면 VLM의 근사 bbox와
+    문자열이 원문 사실처럼 승격된다. 다음 단계는 필요하면 별도 검수 대상으로만 사용한다.
+    """
+
+    text: str
+    bbox: Optional[list[int]] = None
+    confidence: Optional[float] = None
+    source: Literal["page_sweep"] = "page_sweep"
+    status: Literal["unverified"] = "unverified"
+
+
 class Region(BaseModel):
     region_id: str
     bbox: Optional[list[int]] = None
@@ -149,6 +191,11 @@ class Region(BaseModel):
     # 순서를 못 봐서 '뒤가 잘린 판독'이 정밀도 만점을 받는다 — 그 사각을 메우는 라벨.
     # same | tail_cut | head_drop | expanded | diverged
     vlm_reading_relation: Optional[str] = None
+    # 개별 영역만 마스킹 crop으로 읽은 독립 VLM 관측. 밴드 통독 후보와 출처가 달라
+    # 서로 덮지 않고 비교한다.
+    element_vlm_reading: Optional[str] = None
+    element_vlm_confidence: Optional[float] = None
+    reading_adjudication: Optional[ReadingAdjudication] = None
 
     @property
     def text(self) -> str:
@@ -178,6 +225,9 @@ class AdPage(BaseModel):
     triage: Optional[dict] = None   # PDF 페이지 triage 근거 (감사 추적용)
     regions: list[Region] = Field(default_factory=list)
     unassigned_lines: list[Line] = Field(default_factory=list)
+    # OCR/디지털 정본과 분리된 페이지 전체 누락문구 탐색 결과. StructureV3 영역이 없어서
+    # Region Reader가 볼 수 없는 장식·벡터 텍스트의 후보이며 자동으로 정본에 합치지 않는다.
+    recovery_candidates: list[RecoveryCandidate] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 

@@ -771,6 +771,9 @@ def label_document(
                 "gubun": g,
                 "requirement": item["requirement"],
                 "match_mode": item["match_mode"],
+                # 농협 원본 템플릿의 기재요령. 파서는 위반 여부를 내리지 않지만, 이후
+                # 심의 단계가 어떤 항목을 어떤 기준으로 확인해야 하는지 알 수 있게 보존한다.
+                "writing_rules": item.get("writing_rules") or [],
                 "fixed_phrases": fixed,
                 # 변수형은 값을 아직 안 뽑는다(그 결정은 그대로다) — 다만 VLM 이 "이
                 # 줄들이 그 항목이다"라고 판정한 위치는 이제 여기 line_refs 로 남는다.

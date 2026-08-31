@@ -99,15 +99,18 @@ def test_좌표와_라벨이_한_줄에_같이_있다(pack: dict) -> None:
     assert line["bbox"] == [0, 0, 1, 1]
     assert [l["gubun"] for l in line["labels"]] == ["회사명"]
     region = u["pages"][0]["regions"][0]
-    assert (region["gubun"], region["gubun_source"]) == ("회사명", "vlm")
-    assert region["role"] == "본문"                        # 파서 역할도 나란히 남는다
+    assert region["template_labels"]["semantic"] == [{
+        "gubun": "회사명", "confidence": 0.9, "line_from": 0, "line_to": 0,
+    }]
+    assert region["text_evidence"]["canonical"]["text"] == "NH농협은행"
+    assert region["visibility"]["position"]["area_ratio"] > 0
 
 
 def test_판단불가여도_통합_결과는_나온다(pack: dict) -> None:
     doc = _doc(["아무 문구"], unassigned=["낱줄"])
     u = _build(doc, None, pack)
     assert u["template"]["status"] == "판단불가"
-    assert u["template_items"] == []
+    assert u["review_targets"] == []
     assert u["completeness"]["lines_total"] == 2
     assert all(not l["labels"] for l in unified_lines(u["pages"]))
 
@@ -122,13 +125,8 @@ def test_완전성은_통합_결과를_다시_세어_낸다(pack: dict) -> None:
     assert c["lines_covered"] == 1
 
 
-def test_vlm_통독_후보가_조용히_사라지지_않는다(pack: dict) -> None:
-    """실측(2026-08-24): 시연 5건 중 영역의 대부분(33/33·19/19 등)에 이 값이 있다.
-
-    ir.py 의 설계 원칙 — "정본(OCR)과 후보(vlm_reading)를 둘 다 남길 뿐 조용히
-    대체하지 않는다" — 을 통합 단계에서도 지켜야 한다. 처음 만들 때 이 필드들을
-    빠뜨렸었다(text·bbox·source·confidence·style 만 옮기고 후보를 안 옮김).
-    """
+def test_기존_밴드_통독_후보는_최종계약에_싣지_않는다(pack: dict) -> None:
+    """전 영역 Reader가 기본이므로 넓은 밴드 후보는 정본/심의 계약에서 제외한다."""
     doc = _doc(["아무 문구"])
     doc["pages"][0]["regions"][0].update({
         "vlm_reading": "영역 통독 후보", "vlm_reading_score": 0.8,
@@ -140,11 +138,45 @@ def test_vlm_통독_후보가_조용히_사라지지_않는다(pack: dict) -> No
     })
     u = _build(doc, "예금성상품-적립식", pack)
     region = u["pages"][0]["regions"][0]
-    assert region["vlm_reading"] == "영역 통독 후보"
-    assert region["vlm_reading_relation"] == "tail_cut"
+    assert "vlm_reading" not in region
     line = region["lines"][0]
-    assert line["vlm_reading"] == "줄 재판독 후보"
-    assert line["vlm_reading_stage"] == "lowconf_reread"
+    assert "vlm_reading" not in line
+
+
+def test_영역_reader_judge_근거와_카드경계도_통합출력에_보존한다(pack: dict) -> None:
+    doc = _doc(["정본 문구"])
+    doc["pages"][0]["regions"][0].update({
+        "card_no": 1,
+        "element_vlm_reading": "Reader 후보",
+        "element_vlm_confidence": 0.91,
+        "reading_adjudication": {
+            "mode": "shadow",
+            "crop_bbox": [0, 0, 100, 100],
+            "target_bbox": [10, 10, 90, 90],
+            "crop_policy": "masked_outside_region",
+            "excluded_overlap_region_ids": ["p1_r001"],
+            "selection_reasons": ["numeric_difference"],
+            "canonical_source": "ocr",
+            "reader_text": "Reader 후보",
+            "reader_confidence": 0.91,
+            "relation": "diverged",
+            "status": "uncertain",
+            "judge_decision": "candidate_a",
+            "proposed_text": None,
+            "proposed_source": None,
+            "confidence": 0.8,
+            "reason": "보수정책",
+            "error": None,
+        },
+    })
+
+    u = _build(doc, "예금성상품-적립식", pack)
+    region = u["pages"][0]["regions"][0]
+    assert region["card_no"] == 1
+    assert region["text_evidence"]["reader"]["text"] == "Reader 후보"
+    assert region["text_evidence"]["adjudication"]["crop_policy"] == "masked_outside_region"
+    assert region["text_evidence"]["adjudication"]["excluded_overlap_region_ids"] == ["p1_r001"]
+    assert u["reading_evidence_contract"]["parser_mutates_canonical_from_reader_or_judge"] is False
 
 
 def test_영역_라벨이_있으면_그_안의_줄도_닿은_것으로_센다(pack: dict) -> None:
@@ -155,3 +187,28 @@ def test_영역_라벨이_있으면_그_안의_줄도_닿은_것으로_센다(pa
                                  "line_from": 0, "line_to": 1}]})
     assert u["completeness"]["labeled"] == 0
     assert u["completeness"]["lines_covered"] == 2
+
+
+def test_review_targets는_심의용_정적기준과_좌표근거만_전달한다(pack: dict) -> None:
+    doc = _doc(["NH농협은행"])
+    u = _build(doc, "예금성상품-적립식", pack,
+               vlm={"p1_r000": [{"gubun": "회사명", "confidence": 0.9,
+                                  "line_from": 0, "line_to": 0}]})
+
+    target = next(item for item in u["review_targets"] if item["label"] == "회사명")
+    assert target["evidence_status"] == "located"
+    assert target["evidence"]["region_ids"] == ["p1_r000"]
+    assert target["evidence"]["line_refs"] == ["p1/p1_r000/L00"]
+    assert "template_items" not in u
+
+
+def test_페이지_sweep_후보는_정본_줄과_분리된다(pack: dict) -> None:
+    doc = _doc(["OCR 정본"])
+    doc["pages"][0]["recovery_candidates"] = [{
+        "text": "장식 문구", "bbox": [10, 10, 50, 30], "confidence": 0.7,
+        "source": "page_sweep", "status": "unverified",
+    }]
+    u = _build(doc, "예금성상품-적립식", pack)
+    page = u["pages"][0]
+    assert page["recovery_candidates"][0]["text"] == "장식 문구"
+    assert [line["text"] for line in unified_lines(u["pages"])] == ["OCR 정본"]
