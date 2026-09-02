@@ -29,7 +29,7 @@ nh_parsing (프로젝트 루트의 src/nh_parsing)
 | 트랙 | 요청 | 입력 | 결과 | 주 용도 |
 |---|---|---|---|---|
 | 규정문서 | `POST /parsing` | HWP/HWPX/PDF 등 기준 문서 | `_hrc.jsonl`, `_hrc.json`, 선택적 `_img.zip` | KL 색인·검색용 지식 생성 |
-| 광고물 | `POST /ad/parsing` | 광고 PDF/PNG/JPG | `_parsed.json`, `ad_summary.json`, 선택적 `_img.zip` | 광고의 문구·좌표·표·라벨 보존 |
+| 광고물 | `POST /ad/parsing` | 광고 PDF/PNG/JPG | `_parsed.json`, `_review_input.json`, `ad_summary.json`, 선택적 `_img.zip` | 근거 보존 + 다음 심의 단계 인계 |
 
 규정문서와 광고물은 역할이 다르다.
 
@@ -148,17 +148,20 @@ nh_parsing.kl_export.export_kl_files()      KL 규격 파일로 변환
 ### 광고물 파싱 (`parse_ad`)
 
 ```text
-nh_parsing.ad_export.process_ad_file()      파싱 + 템플릿 판정 + 라벨링을 한 번에
+nh_parsing.ad_export.process_ad_file_outputs()  파싱 + 템플릿 판정 + 라벨링을 한 번에
         ↓
 작업 폴더에 남는 것
-├─ <원본파일명>_parsed.json   좌표·표·라벨을 담은 통합 결과
+├─ <원본파일명>_parsed.json   evidence-v4: 좌표·파서 기본 텍스트·VLM 판독/비교·카드·라벨 근거 원본
+├─ <원본파일명>_review_input.json  템플릿 필드값 + 미배정 광고문구 인계 결과
 ├─ ad_summary.json            분류·템플릿·완결성만 뽑은 짧은 요약
 ├─ image/<이름>_p1.jpg …      쪽 이미지 (박스를 그려 넣지 않은 원본)
 └─ genaikl.status             DONE
 ```
 
 박스를 이미지에 그리지 않는다. 좌표는 이미 `_parsed.json`에 있으므로, 어떻게 그릴지는
-받는 쪽이 정하게 둔다.
+받는 쪽이 정하게 둔다. `_review_input.json`의 `template_fields[]`와
+`unmapped_ad_copy[]`는 파서 기본 줄을 나누지만, 각 값은 다시 `_parsed.json`의 좌표 근거를
+가리킨다. 표는 PaddleX 셀 격자 대신 StructureV3 영역 + 표 전용 VLM 관측으로 남긴다.
 
 ### 결과 ZIP 구성
 
@@ -172,6 +175,7 @@ nh_parsing.ad_export.process_ad_file()      파싱 + 템플릿 판정 + 라벨�
 
 광고물 ZIP
 ├─ <원본파일명>_parsed.json
+├─ <원본파일명>_review_input.json
 ├─ ad_summary.json
 └─ <원본파일명>_img.zip     image/ 에 파일이 있을 때만
 ```

@@ -58,7 +58,7 @@ def test_모든_줄이_제자리에_그대로_실린다(pack: dict) -> None:
     """뼈대가 파싱 결과(쪽→영역→줄)라 라벨이 없어도 실릴 자리가 있다."""
     doc = _doc(["NH농협은행"], ["홍보 문구"], unassigned=["영역에 못 붙은 낱줄"])
     u = _build(doc, "예금성상품-적립식", pack)
-    texts = [l["text"] for l in unified_lines(u["pages"])]
+    texts = [l["parser_text"] for l in unified_lines(u["pages"])]
     assert texts == ["NH농협은행", "홍보 문구", "영역에 못 붙은 낱줄"]
     assert u["completeness"]["lines_total"] == 3
     assert u["pages"][0]["unassigned_lines"][0]["bbox"] == [0, 0, 1, 1]
@@ -102,7 +102,9 @@ def test_좌표와_라벨이_한_줄에_같이_있다(pack: dict) -> None:
     assert region["template_labels"]["semantic"] == [{
         "gubun": "회사명", "confidence": 0.9, "line_from": 0, "line_to": 0,
     }]
-    assert region["text_evidence"]["canonical"]["text"] == "NH농협은행"
+    assert region["text_evidence"]["parser_primary_text"]["text"] == "NH농협은행"
+    assert region["lines"][0]["text_source"] == "ocr"
+    assert region["lines"][0]["ocr_confidence"] == 0.9
     assert region["visibility"]["position"]["area_ratio"] > 0
 
 
@@ -173,10 +175,12 @@ def test_영역_reader_judge_근거와_카드경계도_통합출력에_보존한
     u = _build(doc, "예금성상품-적립식", pack)
     region = u["pages"][0]["regions"][0]
     assert region["card_no"] == 1
-    assert region["text_evidence"]["reader"]["text"] == "Reader 후보"
-    assert region["text_evidence"]["adjudication"]["crop_policy"] == "masked_outside_region"
-    assert region["text_evidence"]["adjudication"]["excluded_overlap_region_ids"] == ["p1_r001"]
-    assert u["reading_evidence_contract"]["parser_mutates_canonical_from_reader_or_judge"] is False
+    assert region["text_evidence"]["vlm_region_reading"]["text"] == "Reader 후보"
+    comparison = region["text_evidence"]["parser_vlm_comparison"]
+    assert comparison["comparison_status"] == "needs_human_review"
+    assert comparison["crop_policy"] == "masked_outside_region"
+    assert comparison["excluded_overlap_region_ids"] == ["p1_r001"]
+    assert u["reading_evidence_contract"]["parser_mutates_primary_text_from_vlm"] is False
 
 
 def test_영역_라벨이_있으면_그_안의_줄도_닿은_것으로_센다(pack: dict) -> None:
@@ -211,4 +215,4 @@ def test_페이지_sweep_후보는_정본_줄과_분리된다(pack: dict) -> Non
     u = _build(doc, "예금성상품-적립식", pack)
     page = u["pages"][0]
     assert page["recovery_candidates"][0]["text"] == "장식 문구"
-    assert [line["text"] for line in unified_lines(u["pages"])] == ["OCR 정본"]
+    assert [line["parser_text"] for line in unified_lines(u["pages"])] == ["OCR 정본"]

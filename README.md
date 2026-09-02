@@ -14,7 +14,7 @@
   -> OCR 정본과 Reader가 다를 때만 Judge 비교 (정본 불변)
   -> 페이지 sweep으로 StructureV3 미검출 문구 후보만 별도 탐색
   -> 템플릿 항목 라벨링 — 정형 문구 완전일치(1층) + VLM 줄범위 판정(2층)
-  -> review_targets(필수여부·기재요령·좌표 근거) + 통합 JSON
+  -> evidence-v4(감사 원본) + ad-review-input-v2(다음 단계 인계 JSON)
 ```
 
 **광고물 트랙은 스키마 기반 필드 추출(STAGE_3)을 거치지 않는다** — 종점은
@@ -81,11 +81,11 @@ uv run python tools/make_parse_explorer.py                 # 결과 열람 → o
 `VLM_CACHE=r`(기록)/`=p`(재생) 환경변수로 모델 호출 없이 결정론적 재실행이 가능하다
 (개발 전용, 응답을 그대로 재생하므로 실제 처리 시간이 아니다).
 
-### 영역 Reader/Judge shadow 검증 (기본 파이프라인 안에서 선택 실행)
+### 영역 VLM 판독/비교 shadow 검증 (기본 파이프라인 안에서 선택 실행)
 
 `kl_parser`가 호출하는 `ad_export.process_ad_file()`와 위 `run_ad_label.py`는 모두
 같은 `pipeline.process_file()`을 사용한다. 아래 환경변수를 켜면 별도 후처리 도구 없이
-그 기본 경로의 마지막에 Reader/Judge 교차검증이 들어간다.
+그 기본 경로의 마지막에 VLM 판독/비교 교차검증이 들어간다.
 
 ```powershell
 $env:REGION_READING_MODE = "shadow"
@@ -93,17 +93,19 @@ $env:REGION_READING_SCOPE = "all"   # 기본 all | 비용 비교용 targeted
 uv run python tools/run_ad_label.py --input <파일> --out out_reader_judge
 ```
 
-- `all`은 StructureV3가 반환한 텍스트·표 영역을 빠짐없이 Reader에 보낸다. `targeted`는
+- `all`은 StructureV3가 반환한 텍스트·표 영역을 빠짐없이 VLM 판독에 보낸다. `targeted`는
   표·저신뢰 OCR만 대상으로 하는 비용 비교용 모드다.
-- Reader 입력은 목표 bbox 밖을 마스킹하고 파란 테두리를 표시한다. 목표 bbox가 다른
+- VLM 판독 입력은 목표 bbox 밖을 마스킹하고 파란 테두리를 표시한다. 목표 bbox가 다른
   StructureV3 텍스트 영역을 품으면 그 하위 영역도 마스킹하고 제외한 `region_id`를 기록한다.
-- Reader/Judge 결과는 통합 JSON의 `region.text_evidence.reader`,
-  `region.text_evidence.adjudication`에 들어간다. `lines[].text` 정본과 템플릿 라벨 입력은
-  절대 변경하지 않는다. 넓은 밴드의 영역별 VLM 후보는 이 경로에서 쓰지 않는다.
+- VLM 판독/비교 결과는 evidence JSON의 `region.text_evidence.vlm_region_reading`,
+  `region.text_evidence.parser_vlm_comparison`에 들어간다. `lines[].parser_text` 파서 기본값과
+  템플릿 라벨 입력은 절대 변경하지 않는다. 넓은 밴드의 영역별 VLM 후보는 이 경로에서 쓰지 않는다.
+- 표는 StructureV3가 찾은 영역 bbox만 사용한다. PaddleX HTML·행/열·셀 좌표는 최종
+  계약에서 제외하며, 표 전용 VLM이 낸 `rows`는 파서 기본값을 바꾸지 않는 관측값으로 남긴다.
 - 페이지 sweep은 StructureV3가 놓친 문구만 `page.recovery_candidates`에 별도 기록하며,
-  OCR 정본이나 미배정 줄에 자동 편입하지 않는다.
-- `tools/make_parse_explorer.py --in <out>`로 만든 `explorer.html`에서 정본·Reader/Judge·
-  카드 경계·표 격자·review_targets를 함께 확인할 수 있다.
+  OCR/디지털 파서 기본값이나 미배정 줄에 자동 편입하지 않는다.
+- `tools/make_parse_explorer.py --in <out>`로 만든 `explorer.html`에서 파서 기본 텍스트·VLM 비교·
+  카드 경계·VLM 표 관측·review_targets를 함께 확인할 수 있다.
 
 **스키마 기반 필드 추출(STAGE_3, 별도 트랙)**을 시험하려면:
 ```bash
@@ -118,9 +120,15 @@ uv run python tools/run_extract.py       # STAGE_3 필드 추출 → out/extract
 
 ```
 <out>/parse/<파일명>.json   파싱 결과 (레이아웃·OCR·VLM 판독, --reuse-parse 재사용 대상)
-<out>/json/<doc_id>.json    통합 결과 — 좌표 + 템플릿 라벨(gubun)  ★최종 산출물
+<out>/json/<doc_id>.json    evidence-v4 — 좌표·파서 기본 텍스트·VLM 판독/비교·시인성·카드 근거 원본
+<out>/review_input/<doc_id>.json  ad-review-input-v2 — 템플릿 필드값 + 미배정 광고문구  ★다음 단계 인계
 <out>/pages/<doc_id>_p<n>.jpg   쪽 이미지(검수용, 박스 없음)
 ```
+
+두 JSON은 같은 문서의 서로 다른 목적을 갖는다. `json/`은 감사·재검수·화면 하이라이트를
+위한 원본이며, `review_input/`은 `template_fields[]`와 `unmapped_ad_copy[]`가 파서 기본
+줄을 빠짐없이 나눠 다음 심의/RAG/RDB 단계가 평면적으로 소비할 수 있게 만든 투영본이다.
+페이지 sweep 후보는 어느 쪽에도 파서 기본 문구로 섞이지 않고 `unverified_recovery_candidates[]`에 남는다.
 기본 `--out`은 `out_ad`; 93건 전수조사는 `--out out_ad_full`로 만들었다.
 `.gitignore` 대상이라 새로 클론하면 비어 있다 — 위 명령을 돌려야 생긴다.
 
@@ -145,7 +153,7 @@ out/_timing.json              파일별 소요시간
 
 | 모듈 | 역할 |
 |---|---|
-| `pipeline.py` | 전체 라우팅·조립 — 입력 전처리, 카드 경계, 페이지 누락문구 후보 탐색, 전 영역 Reader 호출 |
+| `pipeline.py` | 전체 라우팅·조립 — 입력 전처리, 카드 경계, 페이지 누락문구 후보 탐색, 전 영역 VLM 판독 호출 |
 | `triage.py` | PDF 페이지 단위 structured/scan_like/hybrid 판정 + 디지털 라인 추출 |
 | `canvas.py` | 입력 정규화 (이미지/PDF → 캔버스, scan_like 는 네이티브 DPI 렌더) |
 | `bands.py` | 글자밀도 기반 분할 — 타일링·스윕·카드 개수 판정의 공통 primitive |
@@ -154,7 +162,7 @@ out/_timing.json              파일별 소요시간
 | `regions.py` | 레이아웃 블록 → 영역(Region) 조립 |
 | `gemma_client.py` | VLM 공용 호출(chat_json) + 분류 + 호출 비용 계측 |
 | `cards.py` | 카드-분할 — 개수는 밀도(코드), 배정은 VLM |
-| `reading_adjudication.py` | StructureV3 영역 마스킹 Reader + 불일치 Judge (정본 불변) |
+| `reading_adjudication.py` | StructureV3 영역 마스킹 VLM 판독 + 불일치 Judge (파서 기본값 불변) |
 | `vlm_direct.py` | 페이지 전체 누락문구 탐색(sweep, 정본 미편입) |
 | `layout_gap.py` | 레이아웃이 통째로 놓친 블록 진단 (감지만, 자동 승격 없음) |
 | `field_judge.py` | `check_field_consistency` — 값이 원문에 실재하는지 검산 |
@@ -168,7 +176,7 @@ out/_timing.json              파일별 소요시간
 | 모듈 | 역할 |
 |---|---|
 | `ad_template.py` | 템플릿 판정(12종 중 1개) + 영역마다 항목명(gubun) VLM 판정(줄 범위 단위) |
-| `ad_export.py` | 원문 근거·Reader/Judge·표·템플릿 라벨을 `review_targets` 중심 통합 JSON으로 결합 |
+| `ad_export.py` | 원문 근거·VLM 판독/비교·표·템플릿 라벨을 `review_targets` 중심 통합 JSON으로 결합 |
 | `templates/ad_templates.json` | 농협 제공 템플릿 md에서 생성한 라벨 사전 (`tools/build_ad_templates.py`) |
 
 `kl_parser`(농협 KL 연동)가 실제로 호출하는 것도 이 경로다 —
@@ -244,7 +252,8 @@ uv run python tools/make_review.py              # → out/review.html
 
 | 도구 | 하는 일 | 모델 호출 |
 |---|---|---|
-| `run_ad_label.py` | **광고물 트랙(현재 최종)** — 파싱 + 템플릿 라벨링 → `<out>/json`·`<out>/parse`·`<out>/pages` | **필요** |
+| `run_ad_label.py` | **광고물 트랙(현재 최종)** — 파싱 + 템플릿 라벨링 → evidence `<out>/json` + 인계 `<out>/review_input` | **필요** |
+| `build_ad_review_input.py` | 기존 evidence JSON → ad-review-input 재생성 (OCR/VLM 호출 없음) | 없음 |
 | `build_ad_templates.py` | 농협 광고 템플릿 md → 라벨 사전(`templates/ad_templates.json`) | 없음 |
 | `make_ad_review.py` | 광고물 트랙 육안 검수 화면 (`out_ad/review.html`) | 없음 |
 | `make_parse_explorer.py` | 광고물 트랙 영역 단위 상세 열람 화면 (`out_ad_full/explorer.html`) | 없음 |
@@ -271,6 +280,7 @@ uv run python -m pytest tests/ -q
 
 | 알고 싶은 것 | 문서 |
 |---|---|
+| **현재 파서의 단계·두 JSON·HyundaiHS 이후 단계 비교** (처음 보는 사람용, 2026-08-31) | ⭐ [docs/광고물_파싱파이프라인_현재구조_및_다음단계_2026-08-31.md](docs/광고물_파싱파이프라인_현재구조_및_다음단계_2026-08-31.md) |
 | **가장 최신 — 전체 이해 문서 묶음(A~N), 광고물 트랙 중심** | ⭐ [docs/etc/00-읽는-순서.md](docs/etc/00-읽는-순서.md) |
 | **이 저장소가 무엇이고 어떻게 흐르나** (PR·인수인계 설명용, 2026-08-06 기준) | [docs/흐름과_인수인계_2026-08-06.md](docs/흐름과_인수인계_2026-08-06.md) |
 | **실제로 무엇이 나왔나** (숫자·시간·사례) | [docs/parsing-output-report.md](docs/parsing-output-report.md) |

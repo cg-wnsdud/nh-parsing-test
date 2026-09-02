@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw
 
 from .config import SETTINGS
 from .gemma_client import chat_json, image_part
-from .ir import ReadingAdjudication, Region
+from .ir import ReadingAdjudication, Region, TableVlmReading
 from .truncation import DIVERGED, SAME, classify_reading, norm, numbers_differ
 
 
@@ -44,6 +44,37 @@ _READER_PROMPT = """첨부 이미지는 광고 문서의 레이아웃 영역 하
 - 자연스럽게 고쳐 쓰거나 보이지 않는 내용을 보완하지 마세요.
 - confidence는 0~1 사이 숫자입니다. 글자를 확인할 수 없으면 text를 빈 문자열로 두세요.
 - analysis에는 영역의 구성만 한 문장으로 짧게 적으세요."""
+
+_TABLE_READER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "analysis": {"type": "string"},
+        "text": {"type": "string"},
+        "rows": {
+            "type": "array",
+            "items": {"type": "array", "items": {"type": "string"}},
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "structure_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+    "required": ["analysis", "text", "rows", "confidence", "structure_confidence"],
+    "additionalProperties": False,
+}
+
+_TABLE_READER_PROMPT = """첨부 이미지는 광고 문서의 표 영역 하나입니다.
+
+파란 테두리 안의 표만 픽셀을 보고 전사하세요. 테두리 바깥의 흰색 영역은 다른
+레이아웃 영역이므로 읽거나 추측하지 마세요. 다른 OCR 결과나 정답 후보는 제공되지
+않았습니다.
+
+- text에는 보이는 모든 표 문구를 위에서 아래, 왼쪽에서 오른쪽 순으로 전사하세요.
+- rows에는 보이는 행을 위에서 아래 순서로 넣고, 각 행의 셀은 왼쪽에서 오른쪽 순서로
+  문자열 배열에 넣으세요.
+- 셀 경계가 확실하지 않으면 추측해 열을 만들지 말고 그 행 전체를 셀 하나로 넣으세요.
+- 숫자, 소수점, %, %p, 통화기호, 괄호를 보이는 그대로 보존하세요.
+- confidence는 글자 판독, structure_confidence는 행/셀 관계를 실제 픽셀로 구분한
+  자신감입니다. 읽을 수 없으면 text와 rows를 비우세요.
+- analysis에는 표의 구성만 한 문장으로 짧게 적으세요."""
 
 _JUDGE_SCHEMA = {
     "type": "object",
@@ -202,6 +233,11 @@ def _canonical_source(region: Region) -> Literal["digital", "ocr", "hybrid"]:
     return "hybrid"
 
 
+def _is_table_region(region: Region) -> bool:
+    """PaddleX 격자가 없어도 StructureV3 table 영역이면 표 Reader를 쓴다."""
+    return region.label.casefold() == "table" or region.table is not None
+
+
 def selection_reasons(region: Region, scope: str | None = None) -> list[str]:
     """StructureV3 텍스트 영역을 Reader에 보낼지와 그 근거를 판정한다.
 
@@ -220,7 +256,7 @@ def selection_reasons(region: Region, scope: str | None = None) -> list[str]:
         )
 
     reasons: list[str] = []
-    if region.table is not None or region.label.casefold() == "table":
+    if _is_table_region(region):
         reasons.append("table_structure")
     if any(
         line.source == "ocr" and line.confidence is not None
@@ -231,7 +267,44 @@ def selection_reasons(region: Region, scope: str | None = None) -> list[str]:
     return reasons
 
 
-def _read(crop: Image.Image) -> tuple[str, float | None]:
+def _read(
+    crop: Image.Image,
+    *,
+    table: bool = False,
+) -> tuple[str, float | None, TableVlmReading | None]:
+    """일반 영역 또는 표 영역을 독립 판독한다.
+
+    표에서는 PaddleX HTML/셀 결과를 전혀 참고하지 않는다. 같은 StructureV3 bbox의
+    이미지와 표 전용 JSON 계약만 VLM에 전달한다.
+    """
+    if table:
+        data = chat_json(
+            [
+                {"type": "text", "text": _TABLE_READER_PROMPT},
+                image_part(crop, box=(1600, 2400), image_format="PNG"),
+            ],
+            schema_name="table_region_reader",
+            schema=_TABLE_READER_SCHEMA,
+            max_tokens=3000,
+        )
+        rows = [
+            [str(cell).strip() for cell in row]
+            for row in (data.get("rows") or [])
+            if isinstance(row, list)
+        ]
+        text = str(data.get("text") or "").strip()
+        if not text and rows:
+            text = "\n".join("\t".join(row) for row in rows).strip()
+        confidence = _confidence_01(data.get("confidence"))
+        structure_confidence = _confidence_01(data.get("structure_confidence"))
+        return text, confidence, TableVlmReading(
+            text=text,
+            rows=rows,
+            confidence=confidence,
+            structure_confidence=structure_confidence,
+            status="observed" if text else "unreadable",
+        )
+
     data = chat_json(
         [
             {"type": "text", "text": _READER_PROMPT},
@@ -241,7 +314,7 @@ def _read(crop: Image.Image) -> tuple[str, float | None]:
         schema=_READER_SCHEMA,
         max_tokens=2400,
     )
-    return str(data.get("text") or "").strip(), _confidence_01(data.get("confidence"))
+    return str(data.get("text") or "").strip(), _confidence_01(data.get("confidence")), None
 
 
 def _anonymous_candidates(region_id: str, canonical: str, reader: str) -> tuple[str, str, dict[str, str]]:
@@ -357,7 +430,9 @@ def adjudicate_regions_shadow(
             "canonical_source": source,
         }
         try:
-            reader_text, reader_confidence = _read(masked.image)
+            reader_text, reader_confidence, table_reading = _read(
+                masked.image, table=_is_table_region(region),
+            )
         except Exception as exc:  # noqa: BLE001 - one region must not stop a document
             stats["reader_failed"] += 1
             region.reading_adjudication = ReadingAdjudication(
@@ -368,6 +443,8 @@ def adjudicate_regions_shadow(
 
         region.element_vlm_reading = reader_text or None
         region.element_vlm_confidence = reader_confidence
+        if table_reading is not None:
+            region.table_vlm_reading = table_reading
         if not reader_text:
             stats["reader_failed"] += 1
             region.reading_adjudication = ReadingAdjudication(

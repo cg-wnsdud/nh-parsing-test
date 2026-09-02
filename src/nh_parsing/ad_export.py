@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""광고 파싱 결과 + 템플릿 라벨을 **하나의 JSON** 으로 합친다.
+"""광고 파싱 결과 + 템플릿 라벨을 근거 JSON으로 합친다.
 
 왜 합치나. 지금까지 둘은 따로 났다 — 좌표는 파싱 결과(`out/json`)에, 라벨은 라벨링
 결과(`out_label`)에. 하류(심의)는 "이 문구가 화면 어디에 있나"를 물으므로 두 파일을
@@ -13,6 +13,10 @@ line_ref 로 손수 이어 붙여야 했다. 그 이음질을 여기서 한 번�
 
 `build_unified()` 는 텍스트가 하나라도 새면 **예외를 던진다.** 조용히 빠뜨리느니
 멈추는 게 낫다 — 빠진 줄은 다음 단계에서 '광고에 그 말이 없다'로 둔갑한다.
+
+이 파일의 결과는 evidence-v4(감사 원본)다. 다음 단계가 바로 소비하는 필드 중심
+`ad-review-input-v2`는 ``ad_review_input.build_ad_review_input``이 이 결과에서 별도로
+만든다. 두 출력을 섞으면 좌표 근거와 단순 필드 값 중 하나가 반드시 흐려진다.
 """
 
 from __future__ import annotations
@@ -72,6 +76,23 @@ def label_parsed_ad(doc: dict, filename: str, canvases: dict, pack: dict | None 
     return build_unified(doc, resolution.as_dict(), label)
 
 
+def label_parsed_ad_outputs(
+    doc: dict,
+    filename: str,
+    canvases: dict,
+    pack: dict | None = None,
+) -> tuple[dict, dict]:
+    """파싱 후 공통 단계의 두 최종 산출물을 함께 만든다.
+
+    첫 값은 evidence-v4 감사 원본, 두 번째 값은 그것만을 입력으로 만든
+    ad-review-input-v2이다. 두 번째 생성은 모델 호출이 없고 파서 기본 텍스트를 바꾸지 않는다.
+    """
+    from .ad_review_input import build_ad_review_input
+
+    evidence = label_parsed_ad(doc, filename, canvases, pack)
+    return evidence, build_ad_review_input(evidence)
+
+
 def process_ad_file(path: Path, pack: dict | None = None) -> tuple[dict, dict]:
     """파일 하나를 파싱부터 통합까지 전부 처리한다 (기본 진입점 — 매번 새로 파싱).
 
@@ -82,6 +103,16 @@ def process_ad_file(path: Path, pack: dict | None = None) -> tuple[dict, dict]:
     doc = json.loads(process_file(path).model_dump_json())
     canvases = page_canvases(path)
     return label_parsed_ad(doc, path.name, canvases, pack), canvases
+
+
+def process_ad_file_outputs(path: Path, pack: dict | None = None) -> tuple[dict, dict, dict]:
+    """광고 파일 하나를 두 최종 JSON과 페이지 캔버스로 처리한다."""
+    from .pipeline import process_file
+
+    doc = json.loads(process_file(path).model_dump_json())
+    canvases = page_canvases(path)
+    evidence, review_input = label_parsed_ad_outputs(doc, path.name, canvases, pack)
+    return evidence, review_input, canvases
 
 
 def build_unified(
@@ -109,14 +140,9 @@ def build_unified(
                 _line(f"p{pno}/{rid}/L{i:02d}", ln, labels_by_ref, vlm_gubun_by_ref)
                 for i, ln in enumerate(region.get("lines") or [])
             ]
-            canonical_text = "\n".join(line["text"] for line in lines_out).strip()
-            reader_text = region.get("element_vlm_reading")
-            table_out = _table_out(region.get("table"), lines_out, region.get("layout_score"))
-            if table_out is not None:
-                # 표 Reader는 현재 행/열 관계를 확정하지 않는다. 이미지에서 읽힌 시각적
-                # 줄 순서만 별도 보존하고, PaddleX 격자는 여전히 grid_candidate로 취급한다.
-                table_out["reader_visual_rows"] = reader_text.splitlines() if reader_text else []
-                table_out["reader_structure_status"] = "unverified"
+            parser_primary_text = "\n".join(line["parser_text"] for line in lines_out).strip()
+            vlm_region_text = region.get("element_vlm_reading")
+            table_out = _table_evidence(region, lines_out)
             regions_out.append({
                 "region_id": rid,
                 "bbox": region.get("bbox"),
@@ -127,19 +153,23 @@ def build_unified(
                 # 공간 경계만 보존한다. 파싱 단계에서 상품/이벤트 의미를 확정하지 않는다.
                 "card_no": region.get("card_no"),
                 "visibility": _visibility(region.get("bbox"), lines_out, page),
-                # lines[]가 정본의 원자 단위다. canonical은 검색/심의 편의를 위한
-                # 영역 문자열이며 Reader/Judge는 이를 바꾸지 않는 독립 관측이다.
+                # lines[]가 파서 기본 텍스트의 원자 단위다. 영역 문자열은 검색/심의
+                # 편의용이며 VLM 판독·비교는 이 값을 바꾸지 않는 독립 관측이다.
                 "text_evidence": {
-                    "canonical": {
-                        "text": canonical_text,
-                        "sources": sorted({line["source"] for line in lines_out if line.get("source")}),
+                    "parser_primary_text": {
+                        "text": parser_primary_text,
+                        "text_sources": sorted({
+                            line["text_source"] for line in lines_out if line.get("text_source")
+                        }),
                         "line_refs": [line["line_ref"] for line in lines_out],
                     },
-                    "reader": {
-                        "text": reader_text,
+                    "vlm_region_reading": {
+                        "text": vlm_region_text,
                         "confidence": region.get("element_vlm_confidence"),
-                    } if reader_text is not None else None,
-                    "adjudication": region.get("reading_adjudication"),
+                    } if vlm_region_text is not None else None,
+                    "parser_vlm_comparison": _vlm_comparison_evidence(
+                        region.get("reading_adjudication"),
+                    ),
                 },
                 # 템플릿 라벨은 범용 role과 다르다. 대표값 하나로 접지 않고 줄 범위와
                 # 정형 문구 일치 근거를 모두 남긴다.
@@ -182,11 +212,16 @@ def build_unified(
         },
         "template": resolution,
         "reading_evidence_contract": {
-            "version": "nh-ad-review-evidence-v2",
-            "canonical_text": "pages[].regions[].text_evidence.canonical + lines[].text",
-            "reader_judge_mode": "shadow_observation",
-            "parser_mutates_canonical_from_reader_or_judge": False,
+            "version": "nh-ad-review-evidence-v4",
+            "parser_primary_text": (
+                "pages[].regions[].text_evidence.parser_primary_text + lines[].parser_text"
+            ),
+            "parser_primary_text_sources": ["digital", "ocr", "hybrid"],
+            "vlm_region_reading_mode": "shadow_observation",
+            "parser_mutates_primary_text_from_vlm": False,
             "final_text_selection": "deferred_to_review",
+            "table_structure": "structurev3_bbox + vlm_table_reading_observation",
+            "paddlex_table_grid_used": False,
         },
         "pages": pages_out,
         # 다음 심의 단계가 쓰는 작업 목록. 이전 template_items의 내부 매칭 상세를
@@ -215,10 +250,12 @@ def _line(
 ) -> dict:
     return {
         "line_ref": ref,
-        "text": ln.get("text") or "",
+        # parser_text는 한 줄의 기본값이다. OCR만을 뜻하지 않으며 text_source를
+        # 함께 봐야 디지털 PDF 텍스트인지 OCR인지 알 수 있다.
+        "parser_text": ln.get("text") or "",
         "bbox": ln.get("bbox"),
-        "source": ln.get("source"),
-        "confidence": ln.get("confidence"),
+        "text_source": ln.get("source"),
+        "ocr_confidence": ln.get("confidence"),
         "style": ln.get("style"),
         # 1층: 이 줄에 걸린 템플릿 **정형** 문구(완전일치, 결정론). 한 줄에 여러
         # 문구가 걸릴 수 있어 목록이다(실측: 유의사항이 `■` 로 붙어 한 줄에 두
@@ -231,12 +268,108 @@ def _line(
     }
 
 
+_COMPARISON_STATUS = {
+    "reader_failed": "vlm_reading_failed",
+    "agreed": "parser_and_vlm_agree",
+    "judge_selected": "judge_selected_parser_primary_text",
+    "uncertain": "needs_human_review",
+    "judge_failed": "vlm_judge_failed",
+}
+_PROPOSED_TEXT_SOURCE = {
+    "canonical": "parser_primary_text",
+    "element_vlm": "vlm_region_reading",
+    "merged": "merged_candidate",
+}
+
+
+def _vlm_comparison_evidence(reading: dict | None) -> dict | None:
+    """내부 Reader/Judge 용어를 소비자용 VLM 비교 계약으로 바꾼다.
+
+    내부 구현의 ``canonical``/``reader`` 명명은 공개 JSON에 새지 않는다. 파서가
+    보존한 기본 텍스트와 이미지 기반 VLM 판독을 명확히 구분해, 하류가 OCR 결과와
+    VLM 후보를 한 값으로 오인하지 못하게 한다.
+    """
+    if not reading:
+        return None
+    proposed_source = reading.get("proposed_source")
+    status = str(reading.get("status") or "")
+    # judge_selected는 현재 shadow 정책에서 파서 기본 텍스트만 자동 유지 대상으로
+    # 남긴다. 혹시 정책이 바뀌어 다른 출처가 기록되더라도 상태를 거짓으로 쓰지 않는다.
+    if status == "judge_selected" and proposed_source not in {None, "canonical"}:
+        public_status = "judge_selected_vlm_candidate_requires_review"
+    else:
+        public_status = _COMPARISON_STATUS.get(status, "needs_human_review")
+    return {
+        "mode": reading.get("mode") or "shadow",
+        "comparison_status": public_status,
+        "crop_bbox": reading.get("crop_bbox"),
+        "target_bbox": reading.get("target_bbox"),
+        "crop_policy": reading.get("crop_policy"),
+        "excluded_overlap_region_ids": reading.get("excluded_overlap_region_ids") or [],
+        "selection_reasons": reading.get("selection_reasons") or [],
+        "parser_primary_text_source": reading.get("canonical_source"),
+        "vlm_region_text": reading.get("reader_text"),
+        "vlm_region_confidence": reading.get("reader_confidence"),
+        "comparison_relation": reading.get("relation"),
+        "judge": {
+            "decision": reading.get("judge_decision"),
+            "selected_text": reading.get("proposed_text"),
+            "selected_text_source": _PROPOSED_TEXT_SOURCE.get(proposed_source, proposed_source),
+            "confidence": reading.get("confidence"),
+            "reason": reading.get("reason"),
+            "error": reading.get("error"),
+        },
+    }
+
+
+def _table_evidence(region: dict, lines: list[dict]) -> dict | None:
+    """표 영역의 위치는 StructureV3, 행/셀 관측은 VLM으로만 남긴다.
+
+    PaddleX의 HTML, 셀 텍스트, 셀 bbox는 결과에 복사하지 않는다. 이 값들은 실행마다
+    맞기도 틀리기도 하는 격자 후보라 심의 근거 계약에 넣으면 안 된다. 표에 속한 OCR
+    파서 기본 줄은 다른 영역과 똑같이 ``lines``/``text_evidence.parser_primary_text``에
+    보존한다.
+    """
+    is_table = str(region.get("label") or "").casefold() == "table" or region.get("table") is not None
+    if not is_table:
+        return None
+
+    observation = region.get("table_vlm_reading") or {}
+    reader_text = region.get("element_vlm_reading")
+    rows = observation.get("rows") or []
+    text = observation.get("text") or reader_text or ""
+    if observation:
+        status = observation.get("status") or ("observed" if text else "unreadable")
+        source = "table_region_reader"
+    elif reader_text:
+        # v2 결과를 변환할 때의 호환 표기다. 새 파이프라인에서는 table_vlm_reading이
+        # 채워진다. 기존 일반 Reader의 줄바꿈을 셀 구조로 오인하지 않는다.
+        status = "legacy_text_only"
+        source = "legacy_region_reader"
+    else:
+        status = "not_run"
+        source = "table_region_reader"
+    return {
+        "detected_by": "structurev3",
+        "paddlex_grid_used": False,
+        "parser_primary_line_refs": [line["line_ref"] for line in lines],
+        "vlm_table_reading": {
+            "source": source.replace("reader", "reading"),
+            "status": status,
+            "text": text or None,
+            "rows": rows,
+            "confidence": observation.get("confidence", region.get("element_vlm_confidence")),
+            "structure_confidence": observation.get("structure_confidence"),
+        },
+    }
+
+
 def _table_out(
     table: dict | None,
     lines: list[dict],
     layout_score: float | None = None,
 ) -> dict | None:
-    """표 격자에 **정본 줄을 좌표로 이어 붙인다.**
+    """[호환용/비활성] 이전 PaddleX 표 격자에 정본 줄을 좌표로 이어 붙인다.
 
     왜 셀 텍스트로 안 끝내나. 표 안 글자에도 OCR 오류가 있다 — PaddleX 표 인식이 읽은
     값과 정본(디지털 텍스트/OCR 라인)이 다를 수 있고, 디지털 텍스트가 대개 더 정확하다.
@@ -244,6 +377,9 @@ def _table_out(
     하류는 둘 중 무엇을 쓸지 고를 수 있다 — 여기서 대신 고르지 않는다.
 
     셀 좌표가 없으면(격자 note 참조) `line_refs` 는 빈 목록이 된다. 행·열 관계는 남는다.
+
+    현재 evidence-v4와 ad-review-input-v2는 이 함수를 호출하지 않는다. 표 구조의
+    신뢰 원천은 StructureV3 영역 bbox + table_region_reader VLM 관측이다.
     """
     if not table:
         return None
@@ -578,7 +714,7 @@ def _verify(doc: dict, unified: dict, label: dict) -> None:
             + list(page.get("unassigned_lines") or [])
         )
     )
-    after = Counter(l["text"] for l in unified_lines(unified["pages"]))
+    after = Counter(l["parser_text"] for l in unified_lines(unified["pages"]))
     if before != after:
         lost = before - after
         extra = after - before

@@ -298,8 +298,10 @@ def request_layout_parsing(image: Image.Image) -> PaddleXPageResult:
             )
         )
     _attach_det_scores(result.blocks, det_blocks)
-    # 표 격자를 블록에 붙인다 — `det_blocks` 를 섞기 **전에** (그쪽엔 block_content 가 없다).
-    _attach_tables(result.blocks, pruned.get("table_res_list"), width, height)
+    # `table_res_list`의 HTML/셀 좌표는 광고 파이프라인에서 사용하지 않는다. 표인지에
+    # 대한 영역 bbox는 StructureV3 block label로 충분하며, 행/셀 관계는 같은 bbox를
+    # 전달받은 table_region_reader VLM이 관측한다. 불안정한 PaddleX 격자를 Region에
+    # 붙이면 이후 출력에 다시 정본처럼 섞일 위험이 있어 여기서 차단한다.
     result.blocks.extend(det_blocks)
     return result
 

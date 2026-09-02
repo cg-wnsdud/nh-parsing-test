@@ -2,7 +2,8 @@
 """광고물 트랙 왕복 시험 — `POST /ad/parsing` → 폴링 → zip.
 
 `roundtrip.py`(규정문서 트랙)와 **통신 규격 검사는 같고 산출물 검사만 다르다.**
-규정문서는 `_hrc.jsonl`(KL 색인용)이고 광고물은 `_parsed.json`(통합 결과)이다.
+규정문서는 `_hrc.jsonl`(KL 색인용)이고 광고물은 `_parsed.json`(근거 원본)과
+`_review_input.json`(다음 단계 인계)이다.
 
 여기서 한 가지를 더 본다: **진입점을 거친 결과가 직접 실행 결과와 같은가.**
 진입점은 얇은 껍데기여야 하므로 내용이 달라지면 그 자체가 결함이다. 같은 파일의
@@ -88,8 +89,14 @@ def _compare_with_direct(unified: dict, problems: list[str]) -> None:
         out = []
         for p in d["pages"]:
             for r in p["regions"]:
-                out += [(l["text"], tuple(l["bbox"] or ()), l.get("source")) for l in r["lines"]]
-            out += [(l["text"], tuple(l["bbox"] or ()), l.get("source"))
+                out += [(
+                    l.get("parser_text", l.get("text")), tuple(l["bbox"] or ()),
+                    l.get("text_source", l.get("source")),
+                ) for l in r["lines"]]
+            out += [(
+                l.get("parser_text", l.get("text")), tuple(l["bbox"] or ()),
+                l.get("text_source", l.get("source")),
+            )
                     for l in p["unassigned_lines"]]
         return out
 
@@ -192,8 +199,11 @@ def main() -> int:
 
     problems = []
     parsed = [n for n in names if n.endswith("_parsed.json")]
+    review_inputs = [n for n in names if n.endswith("_review_input.json")]
     if not parsed:
         problems.append("`_parsed.json`(통합 결과)이 없다")
+    if not review_inputs:
+        problems.append("`_review_input.json`(템플릿 필드·미배정 문구 인계)이 없다")
     if any("/" in n or "\\" in n for n in names):
         problems.append("zip 안에 경로가 있다 — 규격은 '경로 없이 파일만'")
 
@@ -206,6 +216,19 @@ def main() -> int:
         if c["lines_total"] != c["labeling_lines_total"]:
             problems.append(f"줄 수 불일치: {c['lines_total']} vs {c['labeling_lines_total']}")
         _compare_with_direct(unified, problems)
+
+    if review_inputs:
+        review_input = json.loads((out / review_inputs[0]).read_text(encoding="utf-8"))
+        summary = review_input.get("summary") or {}
+        total = summary.get("parser_primary_line_total")
+        partitioned = (summary.get("template_assigned_parser_primary_line_count") or 0) + (
+            summary.get("unmapped_ad_copy_parser_primary_line_count") or 0
+        )
+        if total != partitioned:
+            problems.append(f"review_input 정본 줄 분할 불일치: {total} vs {partitioned}")
+        print(f"인계 결과: 템플릿필드 {summary.get('template_field_count')} · "
+               f"템플릿배정줄 {summary.get('template_assigned_parser_primary_line_count')} · "
+               f"미배정문구줄 {summary.get('unmapped_ad_copy_parser_primary_line_count')}")
 
     for p in problems:
         print(f"  ✗ {p}")

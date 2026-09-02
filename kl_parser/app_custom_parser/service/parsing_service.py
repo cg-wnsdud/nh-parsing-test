@@ -51,16 +51,19 @@ def _parse_document(work: Path, img_dir: Path, src: Path, option) -> None:
 
 
 def parse_ad(work_dir: str, img_dir: str, file_path: str, option=None) -> None:
-    """광고를 좌표·라벨을 보존한 통합 JSON으로 변환한다."""
+    """광고를 evidence JSON과 다음 단계용 review-input JSON으로 변환한다."""
     work = Path(work_dir)
     try:
         write_parse_status(work_dir, PARSING)
-        from nh_parsing.ad_export import process_ad_file
+        from nh_parsing.ad_export import process_ad_file_outputs
 
         src = Path(file_path)
-        unified, canvases = process_ad_file(src)
+        unified, review_input, canvases = process_ad_file_outputs(src)
         out = work / f"{src.name}_parsed.json"
         out.write_text(json.dumps(unified, ensure_ascii=False, indent=2), encoding="utf-8")
+        (work / f"{src.name}_review_input.json").write_text(
+            json.dumps(review_input, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
 
         # 박스는 이미지에 그리지 않고 JSON 좌표로 보존한다. main.py가 페이지 이미지를 ZIP으로 묶는다.
         img_path = Path(img_dir)
@@ -73,6 +76,7 @@ def parse_ad(work_dir: str, img_dir: str, file_path: str, option=None) -> None:
                 "doc_id": unified["doc_id"], "file_type": unified["file_type"],
                 "classification": unified["classification"], "template": unified["template"],
                 "pages": len(unified["pages"]), "completeness": unified["completeness"],
+                "review_input_summary": review_input["summary"],
                 "notes": unified["notes"],
             }, ensure_ascii=False, indent=2), encoding="utf-8",
         )

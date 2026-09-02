@@ -3,7 +3,7 @@
 
 `tools/make_ad_review.py` 와 목적이 다르다. 그쪽은 **라벨이 잘 붙었나**를 그림 위
 상자로 보는 검수용이고, 이건 **한 영역에서 무슨 일이 있었나**를 보는 열람용이다:
-영역마다 OCR/디지털 정본 · 밴드 VLM 후보 · Reader/Judge shadow 근거 · 시인성
+영역마다 OCR/디지털 파서 기본 텍스트 · 밴드 VLM 후보 · VLM 비교 shadow 근거 · 시인성
 (글자 크기·굵기·색) · 라벨을 한자리에 모아 접었다 펼친다.
 
 영역 순서는 **통합 JSON 에 실린 순서 그대로**다(레이아웃 검출 순서). 다음 단계
@@ -39,9 +39,9 @@ SOURCE_META = {
 RELATION = {
     "same":      ("표기 차이", "ok"),
     "head_drop": ("앞 항목명 생략", "ok"),
-    "expanded":  ("정본보다 많이 읽음", "good"),
+    "expanded":  ("파서 기본값보다 많이 읽음", "good"),
     "tail_cut":  ("뒷부분 잘림", "bad"),
-    "diverged":  ("정본과 불일치", "bad"),
+    "diverged":  ("파서 기본값과 불일치", "bad"),
     "overflow":  ("다른 영역을 삼킴", "bad"),
 }
 
@@ -133,9 +133,6 @@ pre.txt { margin:0; padding:7px 9px; background:var(--soft); border-radius:4px;
 @media (max-width:760px) { .two { grid-template-columns:1fr; } }
 .two > div > .blkhd { margin-bottom:3px; }
 
-table.grid { border-collapse:collapse; font-size:12px; }
-table.grid td { border:1px solid #c9c6d0; padding:3px 6px; }
-
 .unassigned { border:1px dashed var(--warn); border-radius:5px; padding:8px 10px;
               background:#fffaf2; }
 .legend { font-size:12px; color:var(--dim); margin-top:8px; line-height:1.9; }
@@ -203,11 +200,12 @@ def _style_cell(style: dict | None) -> str:
 def _lines_table(lines: list[dict]) -> str:
     rows = []
     for ln in lines:
-        abbr, color, _ = SOURCE_META.get(ln.get("source"), ("?", "#888", ""))
-        conf = ln.get("confidence")
+        text_source = ln.get("text_source", ln.get("source"))
+        abbr, color, _ = SOURCE_META.get(text_source, ("?", "#888", ""))
+        conf = ln.get("ocr_confidence", ln.get("confidence"))
         rows.append(
             f'<tr><td class="c"><span class="tag" style="background:{color}">{abbr}</span></td>'
-            f'<td>{_esc(ln.get("text")) or "&nbsp;"}</td>'
+            f'<td>{_esc(ln.get("parser_text", ln.get("text"))) or "&nbsp;"}</td>'
             f'<td class="n">{f"{conf:.3f}" if isinstance(conf, (int, float)) else "—"}</td>'
             f'<td>{_style_cell(ln.get("style"))}</td>'
             f'<td class="n">{_esc(ln.get("bbox"))}</td></tr>'
@@ -215,7 +213,7 @@ def _lines_table(lines: list[dict]) -> str:
     return (
         '<div class="lines"><table class="ln"><thead><tr>'
         '<th title="O=OCR · D=디지털 텍스트 · S=VLM 회수">출처</th><th>텍스트</th>'
-        '<th title="OCR 확신도. 디지털은 추정이 아니라 정본이라 값이 없다">확신</th>'
+        '<th title="OCR 확신도. 디지털 텍스트에는 OCR 값이 없다">OCR 확신</th>'
         '<th title="글자 크기·굵기·색. 드래그로 잡히는 디지털 텍스트에서만 나온다 — '
         'OCR·VLM 글자의 시인성 수집은 아직 미구현">시인성</th>'
         '<th>bbox</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>'
@@ -242,7 +240,7 @@ def _line_rereads(lines: list[dict]) -> str:
 
 
 def _region_vlm(r: dict) -> str:
-    """영역 통독 후보 — 정본을 덮지 않고 나란히 둔다(B안)."""
+    """영역 통독 후보 — 파서 기본 텍스트를 덮지 않고 나란히 둔다(B안)."""
     cand = (r.get("vlm_reading") or "").strip()
     if not cand:
         return ""
@@ -254,7 +252,7 @@ def _region_vlm(r: dict) -> str:
         f'<span class="chip">정밀도 {_esc(r.get("vlm_reading_score"))} · '
         f'커버리지 {_esc(r.get("vlm_reading_coverage"))}</span></div>'
         '<div class="two">'
-        '<div><div class="blkhd">정본 (기록·재현의 기준)</div>'
+        '<div><div class="blkhd">파서 기본 텍스트 (기록·재현의 기준)</div>'
         f'<pre class="txt">{_esc(ocr_txt) or "(없음)"}</pre></div>'
         '<div><div class="blkhd">VLM 후보 (다음 단계가 고를 수 있음)</div>'
         f'<pre class="txt">{_esc(cand)}</pre></div>'
@@ -263,44 +261,53 @@ def _region_vlm(r: dict) -> str:
 
 
 def _reader_judge(r: dict) -> str:
-    """목표 영역만 마스킹한 Reader/Judge shadow 결과를 정본과 나란히 보여 준다."""
+    """목표 영역만 마스킹한 VLM 판독·비교 결과를 파서 기본값과 나란히 보여 준다."""
     evidence = r.get("text_evidence") or {}
-    adj = evidence.get("adjudication") or {}
-    reader = ((evidence.get("reader") or {}).get("text") or "").strip()
-    if not adj and not reader:
+    comparison = evidence.get("parser_vlm_comparison") or evidence.get("adjudication") or {}
+    vlm = evidence.get("vlm_region_reading") or evidence.get("reader") or {}
+    vlm_text = (vlm.get("text") or comparison.get("vlm_region_text") or "").strip()
+    if not comparison and not vlm_text:
         return ""
-    canonical = ((evidence.get("canonical") or {}).get("text") or "").strip()
-    status = adj.get("status") or "Reader 결과만 있음"
-    reasons = ", ".join(str(value) for value in adj.get("selection_reasons") or []) or "—"
-    crop = adj.get("crop_bbox")
-    target = adj.get("target_bbox")
-    excluded = ", ".join(adj.get("excluded_overlap_region_ids") or []) or "없음"
+    primary = (
+        (evidence.get("parser_primary_text") or evidence.get("canonical") or {}).get("text") or ""
+    ).strip()
+    status = comparison.get("comparison_status") or comparison.get("status") or "VLM 판독 결과만 있음"
+    reasons = ", ".join(str(value) for value in comparison.get("selection_reasons") or []) or "—"
+    crop = comparison.get("crop_bbox")
+    target = comparison.get("target_bbox")
+    excluded = ", ".join(comparison.get("excluded_overlap_region_ids") or []) or "없음"
+    vlm_confidence = (
+        vlm.get("confidence")
+        if vlm.get("confidence") is not None
+        else comparison.get("vlm_region_confidence", comparison.get("reader_confidence"))
+    )
     meta = (
         f'<span class="chip shadow">{_esc(status)}</span> '
         f'<span class="chip">선별: {_esc(reasons)}</span> '
-        f'<span class="chip">Reader 확신 {_esc(adj.get("reader_confidence") or (evidence.get("reader") or {}).get("confidence"))}</span>'
+        f'<span class="chip">VLM 판독 확신 {_esc(vlm_confidence)}</span>'
     )
     judge = ""
-    if adj:
+    if comparison:
+        judge_data = comparison.get("judge") or comparison
         judge = (
-            '<div class="blkhd">Judge 판정</div>'
-            f'<pre class="txt">decision={_esc(adj.get("judge_decision"))}\n'
-            f'confidence={_esc(adj.get("confidence"))}\n'
-            f'reason={_esc(adj.get("reason") or adj.get("error"))}\n'
+            '<div class="blkhd">VLM 비교 Judge 기록</div>'
+            f'<pre class="txt">decision={_esc(judge_data.get("decision", judge_data.get("judge_decision")))}\n'
+            f'confidence={_esc(judge_data.get("confidence"))}\n'
+            f'reason={_esc(judge_data.get("reason") or judge_data.get("error"))}\n'
             f'crop={_esc(crop)}\n'
             f'target_in_crop={_esc(target)}\n'
             f'excluded_overlap_regions={_esc(excluded)}\n'
-            f'policy={_esc(adj.get("crop_policy"))}</pre>'
+            f'policy={_esc(comparison.get("crop_policy"))}</pre>'
         )
     return (
-        '<div class="blk"><div class="blkhd">영역 Reader/Judge shadow ' + meta + '</div>'
+        '<div class="blk"><div class="blkhd">영역 VLM 판독 / 파서 텍스트 비교 (shadow) ' + meta + '</div>'
         '<p class="kv">파란 테두리 안만 남기고 바깥 픽셀을 마스킹한 crop으로 비교합니다. '
-        '아래 후보는 정본을 자동 변경하지 않습니다.</p>'
+        '아래 VLM 결과는 파서 기본 텍스트를 자동 변경하지 않습니다.</p>'
         '<div class="two">'
-        '<div><div class="blkhd">정본</div>'
-        f'<pre class="txt">{_esc(canonical) or "(없음)"}</pre></div>'
-        '<div><div class="blkhd">독립 Reader</div>'
-        f'<pre class="txt">{_esc(reader) or "(빈 응답)"}</pre></div>'
+        '<div><div class="blkhd">파서 기본 텍스트 (OCR/디지털 출처는 줄 표 참조)</div>'
+        f'<pre class="txt">{_esc(primary) or "(없음)"}</pre></div>'
+        '<div><div class="blkhd">VLM 영역 판독</div>'
+        f'<pre class="txt">{_esc(vlm_text) or "(빈 응답)"}</pre></div>'
         '</div>' + judge + '</div>'
     )
 
@@ -308,20 +315,34 @@ def _reader_judge(r: dict) -> str:
 def _table_block(t: dict | None) -> str:
     if not t:
         return ""
-    note = t.get("note")
-    outside = t.get("lines_outside_cells")
-    meta = []
-    if note:
-        meta.append(_esc(note))
-    if outside:
-        meta.append(f"셀 밖 줄 {len(outside)}개")
-    visual_rows = t.get("reader_visual_rows") or []
-    reader = ("<div class=\"blkhd\">Reader 시각적 행 순서 (구조 미확정)</div>"
-              f"<pre class=\"txt\">{_esc(chr(10).join(visual_rows))}</pre>" if visual_rows else "")
+    reader = t.get("vlm_table_reading") or t.get("reader") or {}
+    # v2 결과를 열 때도 PaddleX HTML/셀을 다시 보여 주지 않는다. 당시의 일반 VLM 판독
+    # 문자열은 legacy text-only 관측으로만 표시한다.
+    if not reader:
+        visual_rows = t.get("reader_visual_rows") or []
+        reader = {
+            "source": "legacy_region_reading",
+            "status": "legacy_text_only" if visual_rows else "not_run",
+            "text": "\n".join(visual_rows),
+            "rows": [],
+        }
+    rows = reader.get("rows") or []
+    rows_text = "\n".join(" | ".join(str(cell) for cell in row) for row in rows)
+    text = reader.get("text") or ""
+    meta = (
+        f'<span class="chip">{_esc(reader.get("source"))}</span> '
+        f'<span class="chip shadow">{_esc(reader.get("status"))}</span> '
+        f'<span class="chip">글자 확신 {_esc(reader.get("confidence"))}</span> '
+        f'<span class="chip">구조 확신 {_esc(reader.get("structure_confidence"))}</span>'
+    )
     return (
-        f'<div class="blk"><div class="blkhd">표 격자 — {t.get("n_rows")}행 '
-        f'{t.get("n_cols")}열{" · " + " · ".join(meta) if meta else ""}</div>'
-        f'<div class="lines">{t.get("html") or ""}</div>{reader}</div>'
+        '<div class="blk"><div class="blkhd">표 — StructureV3 영역 + VLM 표 판독</div>'
+        '<p class="kv">PaddleX HTML·셀·행열 격자는 사용하지 않습니다. 아래 결과는 같은 '
+        '표 영역 crop을 표 전용 VLM이 판독한 관측이며 파서 기본 텍스트를 자동 변경하지 않습니다.</p>'
+        f'<div>{meta}</div><div class="two">'
+        f'<div><div class="blkhd">VLM 표 판독 텍스트</div><pre class="txt">{_esc(text) or "(미판독)"}</pre></div>'
+        f'<div><div class="blkhd">VLM 표 행 관측</div><pre class="txt">{_esc(rows_text) or "(구조 미확정)"}</pre></div>'
+        '</div></div>'
     )
 
 
@@ -340,7 +361,7 @@ def _phrases(r: dict) -> str:
 
 def _region_html(seq: int, r: dict) -> str:
     lines = r.get("lines") or []
-    srcs = {l.get("source") for l in lines}
+    srcs = {l.get("text_source", l.get("source")) for l in lines}
     src_chips = " ".join(
         f'<span class="tag" style="background:{SOURCE_META[s][1]}" title="{SOURCE_META[s][2]}">'
         f'{SOURCE_META[s][0]}</span>'
@@ -352,10 +373,12 @@ def _region_html(seq: int, r: dict) -> str:
               else '<span class="chip none">라벨 없음</span>')
     extra = ""
     if r.get("table"):
-        extra += f'<span class="chip tbl">표 {r["table"].get("n_rows")}×{r["table"].get("n_cols")}</span>'
+        extra += '<span class="chip tbl">표 · StructureV3</span>'
     evidence = r.get("text_evidence") or {}
-    if evidence.get("adjudication") or evidence.get("reader"):
-        status = (evidence.get("adjudication") or {}).get("status") or "Reader"
+    if (evidence.get("parser_vlm_comparison") or evidence.get("adjudication")
+            or evidence.get("vlm_region_reading") or evidence.get("reader")):
+        comparison = evidence.get("parser_vlm_comparison") or evidence.get("adjudication") or {}
+        status = comparison.get("comparison_status") or comparison.get("status") or "VLM 판독"
         extra += f'<span class="chip shadow">shadow { _esc(status) }</span>'
 
     body = (
@@ -399,7 +422,11 @@ def _doc_html(doc: dict, pages_rel: str, anchor: str) -> str:
     cls, tpl, comp = doc["classification"], doc["template"], doc["completeness"]
     regions = [r for p in doc["pages"] for r in p["regions"]]
     n_lab = sum(1 for r in regions if (r.get("template_labels") or {}).get("semantic"))
-    n_shadow = sum(1 for r in regions if (r.get("text_evidence") or {}).get("adjudication"))
+    n_shadow = sum(
+        1 for r in regions
+        if ((r.get("text_evidence") or {}).get("parser_vlm_comparison")
+            or (r.get("text_evidence") or {}).get("adjudication"))
+    )
 
     canvases = []
     for page in doc["pages"]:
@@ -432,7 +459,7 @@ def _doc_html(doc: dict, pages_rel: str, anchor: str) -> str:
             blocks.append(
                 '<details class="rgn"><summary><span class="seq">?</span>'
                 '<span class="rid">페이지 누락문구 후보</span>'
-                '<span class="role">정본 미편입</span>'
+                '<span class="role">파서 기본 텍스트 미편입</span>'
                 f'<span class="chip">{len(recovered)}개</span></summary>'
                 f'<div class="rgnbody"><pre class="txt">{_esc(chr(10).join(str(item.get("text") or "") for item in recovered))}</pre>'
                 '</div></details>'
@@ -444,7 +471,7 @@ def _doc_html(doc: dict, pages_rel: str, anchor: str) -> str:
         f'<span class="kv">분류 <b>{_esc(cls["product_group"])}</b> / {_esc(cls["ad_type"])}</span>'
         f'<span class="kv">템플릿 <b>{_esc(tpl["template_id"] or "판단불가")}</b></span>'
         f'<span class="kv">영역 <b>{len(regions)}</b> · 줄 <b>{comp["lines_total"]}</b> · '
-        f'라벨영역 <b>{n_lab}</b> · Reader/Judge <b>{n_shadow}</b></span></summary>'
+        f'라벨영역 <b>{n_lab}</b> · VLM 비교 <b>{n_shadow}</b></span></summary>'
         f'<div class="docbody"><div class="cols">'
         f'<div class="pagewrap">{"".join(canvases)}'
         '<div class="legend">초록 상자 = 템플릿 항목이 붙은 영역 · 회색 = 안 붙음<br>'
@@ -496,8 +523,11 @@ def main() -> None:
 
     n_r = sum(len(r) for r in ([p["regions"] for d in docs for p in d["pages"]]))
     n_l = sum(d["completeness"]["lines_total"] for d in docs)
-    n_shadow = sum(1 for d in docs for p in d["pages"] for r in p["regions"]
-                   if (r.get("text_evidence") or {}).get("adjudication"))
+    n_shadow = sum(
+        1 for d in docs for p in d["pages"] for r in p["regions"]
+        if ((r.get("text_evidence") or {}).get("parser_vlm_comparison")
+            or (r.get("text_evidence") or {}).get("adjudication"))
+    )
     n_tbl = sum(1 for d in docs for p in d["pages"] for r in p["regions"] if r.get("table"))
 
     out.write_text(
@@ -506,10 +536,10 @@ def main() -> None:
         "<title>영역별 파싱 상세</title>"
         f"<style>{CSS}</style>"
         f"<h1>영역별 파싱 상세 — {len(docs)}건</h1>"
-        f'<p class="sub">영역 {n_r} · 줄 {n_l} · Reader/Judge shadow {n_shadow} · 표 격자 {n_tbl}</p>'
+        f'<p class="sub">영역 {n_r} · 줄 {n_l} · VLM 비교 shadow {n_shadow} · StructureV3 표 영역 {n_tbl}</p>'
         '<p class="sub">영역 순서와 배열은 <b>통합 JSON 에 실린 것 그대로</b>입니다 — 다음 단계'
         '(벡터DB·RDB 엔진)가 읽는 순서와 같습니다. 문서를 펼치고, 영역을 다시 펼치면 '
-        '그 영역의 정본·밴드 VLM·Reader/Judge 후보·시인성·라벨이 한자리에 나옵니다.</p>'
+        '그 영역의 파서 기본 텍스트·VLM 비교 관측·시인성·라벨이 한자리에 나옵니다.</p>'
         '<p class="sub">출처 배지 <span class="tag" style="background:#059669">D</span> = '
         '드래그로 잡히는 디지털 텍스트 · <span class="tag" style="background:#2563eb">O</span> = '
         'OCR 이 픽셀에서 읽음 · <span class="tag" style="background:#db2777">S</span> = '

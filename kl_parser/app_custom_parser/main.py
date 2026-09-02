@@ -39,7 +39,7 @@ KEEP_WORK_DIR = os.getenv("KEEP_WORK_DIR", "") not in ("", "0", "false", "False"
 # ZIP에 넣을 호출자용 산출물. kl_parser_notes.json은 검수용 내부 파일이라 제외한다.
 _RESULT_SUFFIXES = (
     "_hrc.jsonl", "_hrc.json", "doc_data.json",  # 규정문서
-    "_parsed.json", "ad_summary.json",            # 광고물
+    "_parsed.json", "_review_input.json", "ad_summary.json",  # 광고물
 )
 
 app = FastAPI(title="NH KL Custom Parser (CGInside)", version="0.1.0")

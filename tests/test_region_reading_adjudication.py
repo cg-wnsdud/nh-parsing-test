@@ -114,6 +114,30 @@ def test_reader_합의는_judge를_생략하고_정본을_보존한다(monkeypat
     assert region.reading_adjudication.selection_reasons == ["all_structure_text_regions"]
 
 
+def test_표영역은_paddlex_격자없이_표전용_reader로_관측한다(monkeypatch):
+    _settings(monkeypatch, scope="all")
+    calls = []
+
+    def fake_chat(messages, **kwargs):
+        calls.append(kwargs)
+        return {
+            "analysis": "2행 2열 표", "text": "상품\t금리\nA\t3%",
+            "rows": [["상품", "금리"], ["A", "3%"]],
+            "confidence": 0.93, "structure_confidence": 0.89,
+        }
+
+    monkeypatch.setattr(ra, "chat_json", fake_chat)
+    region = _region(text="상품 금리 A 3%", table=True)
+
+    stats = ra.adjudicate_regions_shadow([region], Image.new("RGB", (120, 80), "white"))
+
+    assert stats["requested"] == 1
+    assert calls[0]["schema_name"] == "table_region_reader"
+    assert region.table_vlm_reading is not None
+    assert region.table_vlm_reading.rows == [["상품", "금리"], ["A", "3%"]]
+    assert region.element_vlm_reading == "상품\t금리\nA\t3%"
+
+
 def test_vlm_선호_judge도_shadow에서는_정본을_바꾸지_않는다(monkeypatch):
     _settings(monkeypatch, scope="all")
     replies = iter([

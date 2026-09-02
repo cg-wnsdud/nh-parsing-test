@@ -138,6 +138,21 @@ class ReadingAdjudication(BaseModel):
     error: Optional[str] = None
 
 
+class TableVlmReading(BaseModel):
+    """StructureV3가 찾은 표 영역을 VLM이 픽셀만 보고 읽은 관측값.
+
+    PaddleX의 HTML/셀 좌표는 광고 파이프라인의 표 정본으로 쓰지 않는다. 표 영역을
+    찾는 역할은 StructureV3에만 맡기고, 행/셀 관계는 이 관측값으로만 보존한다. 이 역시
+    OCR 정본을 바꾸지 않는 shadow 근거다.
+    """
+
+    text: str = ""
+    rows: list[list[str]] = Field(default_factory=list)
+    confidence: Optional[float] = None
+    structure_confidence: Optional[float] = None
+    status: Literal["observed", "unreadable"] = "observed"
+
+
 class RecoveryCandidate(BaseModel):
     """StructureV3가 만들지 못한 문구를 페이지 sweep이 발견했을 때의 관측값.
 
@@ -195,6 +210,9 @@ class Region(BaseModel):
     # 서로 덮지 않고 비교한다.
     element_vlm_reading: Optional[str] = None
     element_vlm_confidence: Optional[float] = None
+    # 표일 때만 채운다. PaddleX 격자와 달리 VLM이 같은 영역 crop을 직접 보고 낸
+    # 행/셀 관측이며, 정본 Line.text를 덮어쓰지 않는다.
+    table_vlm_reading: Optional[TableVlmReading] = None
     reading_adjudication: Optional[ReadingAdjudication] = None
 
     @property
