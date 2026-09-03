@@ -5,8 +5,8 @@
       → resolve_template    12종 중 하나 (못 정하면 VLM 결선투표 1회)
       → label_regions_vlm   영역마다 템플릿 항목명 (쪽당 1회)
       → label_document      정형 문구 대조(1층) + 영역 라벨(2층) 합치기
-      → evidence-v4         좌표·파서 기본 텍스트·VLM 판독 근거를 보존하는 감사 JSON
-      → ad-review-input-v2  템플릿 필드/미배정 광고문구를 나눈 인계 JSON
+      → evidence-v6         좌표·파서 기본 텍스트·VLM/Judge 근거를 보존하는 감사 JSON
+      → ad-review-input-v5  라벨별 심의 문구/미배정 광고문구/P1 줄 참조 인계 JSON
 
 산출: `<out>/json/<doc_id>.json` (통합) · `<out>/pages/<doc_id>_p{n}.jpg` (검수 화면용
 원본 축소본 — 파이프라인 미리보기와 달리 **박스를 그리지 않는다.** 박스는 검수 화면이
@@ -83,16 +83,25 @@ def run_one(path: Path, out_dir: Path, pack: dict, reuse_parse: bool = False) ->
         1 for p in unified["pages"] for r in p["regions"]
         if (r.get("template_labels") or {}).get("semantic")
     )
+    template = unified["template"]
+    if template.get("selection_mode") == "per_card":
+        card_templates = [
+            f"카드{(entry.get('scope') or {}).get('card_no')}:{(entry.get('template') or {}).get('template_id') or '판단불가'}"
+            for entry in template.get("scopes") or []
+        ]
+        template_display = ", ".join(card_templates) or "카드별 판단불가"
+    else:
+        template_display = template.get("template_id") or "판단불가"
     return {
         "file": path.name,
         "vlm_s": vlm_s, "vlm_calls": vlm_calls, "vlm_cached": vlm_cached,
-        "template": unified["template"]["template_id"] or "판단불가",
-        "note": unified["template"]["note"],
+        "template": template_display,
+        "note": template.get("note"),
         "regions": regions,
         "semantic_labeled": semantic_labeled,
         "lines": c["lines_total"],
         "covered": c["lines_covered"],
-        "template_fields": review_input["summary"]["template_field_count"],
+        "labelled_groups": review_input["summary"]["labelled_group_count"],
         "unmapped_copy": review_input["summary"]["unmapped_ad_copy_parser_primary_line_count"],
         "elapsed": time.time() - started,
     }
@@ -133,7 +142,7 @@ def main() -> None:
         rows.append(row)
         print(f"  템플릿: {row['template']}  ({row['note']})")
         print(f"  영역 {row['regions']} / 템플릿라벨 {row['semantic_labeled']} / "
-              f"줄 {row['lines']} / 템플릿필드 {row['template_fields']} / "
+              f"줄 {row['lines']} / 라벨묶음 {row['labelled_groups']} / "
               f"미배정문구줄 {row['unmapped_copy']} / {row['elapsed']:.0f}초 "
               f"(VLM {row['vlm_s']:.0f}초 {row['vlm_calls']}회, 캐시 {row['vlm_cached']})")
         # 단계별 내역. 합계만 보면 "모델이 느리다"와 "타임아웃 나서 재시도했다"를
@@ -141,12 +150,12 @@ def main() -> None:
         print("  " + stats_table().replace("\n", "\n  "))
 
     print(f"\n{'=' * 112}")
-    print(f'{"파일":<32}{"템플릿":<26}{"영역":>5}{"템플릿라벨":>10}{"줄":>5}{"템플릿필드":>12}{"미배정줄":>9}'
+    print(f'{"파일":<32}{"템플릿":<26}{"영역":>5}{"템플릿라벨":>10}{"줄":>5}{"라벨묶음":>12}{"미배정줄":>9}'
           f'{"총초":>7}{"VLM초":>7}{"그외초":>7}{"호출":>5}{"캐시":>5}')
     print("-" * 112)
     for r in rows:
         print(f'{r["file"][:31]:<32}{r["template"][:25]:<26}{r["regions"]:>5}'
-               f'{r["semantic_labeled"]:>10}{r["lines"]:>5}{r["template_fields"]:>12}'
+               f'{r["semantic_labeled"]:>10}{r["lines"]:>5}{r["labelled_groups"]:>12}'
                f'{r["unmapped_copy"]:>9}{r["elapsed"]:>7.0f}'
               f'{r["vlm_s"]:>7.0f}{r["elapsed"] - r["vlm_s"]:>7.0f}'
               f'{r["vlm_calls"]:>5}{r["vlm_cached"]:>5}')

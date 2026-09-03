@@ -220,6 +220,53 @@ def test_두_층은_우열을_가리지_않고_나란히_실린다(pack: dict) -
     assert reg["phrase_share"] < 0.5     # 영역의 일부일 뿐이라는 것도 값으로 남는다
 
 
+def test_명시표제는_vlm_한줄밀림을_교정한다(pack: dict) -> None:
+    """VLM 재투표 없이 `가입기간:` 등 자기표시 줄만 안전하게 고정한다."""
+    doc = _doc([
+        "상품 유의사항",
+        "·가입대상:개인(1인1계좌)",
+        "·판매한도:3만좌(판매한도 소진 시 판매종료)",
+        "·가입방법:영업점,비대면(NH올원뱅크)",
+        "·가입기간:12개월",
+        "·가입금액: 1만원 이상~매월 최대30만원 이하",
+        "·기본이자율:2.3%(기준,세전)",
+    ])
+    # 002 예금성에서 실제로 관측된 한 줄씩 앞당겨진 응답이다.
+    bad = {"p1_r000": [
+        {"gubun": "유의사항", "confidence": 1.0, "line_from": 0, "line_to": 0},
+        {"gubun": "가입대상", "confidence": 1.0, "line_from": 1, "line_to": 1},
+        {"gubun": "가입기간", "confidence": 1.0, "line_from": 3, "line_to": 3},
+        {"gubun": "가입금액", "confidence": 1.0, "line_from": 4, "line_to": 4},
+        {"gubun": "금리", "confidence": 1.0, "line_from": 5, "line_to": 5},
+    ]}
+    result = AT.label_document(
+        doc, "예금성상품-적립식", pack, vlm_labels=bad,
+        apply_explicit_line_guard=True,
+    )
+    refs = {item["gubun"]: item["line_refs"] for item in result["items"]}
+    assert refs["가입기간"] == ["p1/p1_r000/L04"]
+    assert refs["가입금액"] == ["p1/p1_r000/L05"]
+    assert refs["금리"] == ["p1/p1_r000/L06"]
+    assert "p1/p1_r000/L03" not in {ref for values in refs.values() for ref in values}
+    assert any("명시표제 안전장치" in note for note in doc["notes"])
+
+
+def test_심의필_앵커가_있으면_전화번호는_심의번호에서_제외한다(pack: dict) -> None:
+    doc = _doc(["문의: (1661-3000)", "준법감시인 심의필 2026-0000", "(2026.01.01.~2026.12.31.)"])
+    result = AT.label_document(
+        doc, "예금성상품-적립식", pack,
+        vlm_labels={"p1_r000": [
+            {"gubun": "심의번호", "confidence": 0.9, "line_from": 0, "line_to": 2},
+            {"gubun": "심의번호", "confidence": 0.9, "line_from": 1, "line_to": 2},
+        ]},
+        apply_explicit_line_guard=True,
+    )
+    review = next(item for item in result["items"] if item["gubun"] == "심의번호")
+    assert review["line_refs"] == ["p1/p1_r000/L01", "p1/p1_r000/L02"]
+    semantic = result["region_labels"][0]["gubun_breakdown"]
+    assert semantic == [{"gubun": "심의번호", "confidence": 0.9, "line_from": 1, "line_to": 2}]
+
+
 # ───────────────────── 영역 라벨링 호출 (2층) ─────────────────────
 
 def _fake_vlm(monkeypatch, responses: list[dict]) -> list[list[str]]:

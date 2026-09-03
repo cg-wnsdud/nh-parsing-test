@@ -151,17 +151,19 @@ nh_parsing.kl_export.export_kl_files()      KL 규격 파일로 변환
 nh_parsing.ad_export.process_ad_file_outputs()  파싱 + 템플릿 판정 + 라벨링을 한 번에
         ↓
 작업 폴더에 남는 것
-├─ <원본파일명>_parsed.json   evidence-v4: 좌표·파서 기본 텍스트·VLM 판독/비교·카드·라벨 근거 원본
-├─ <원본파일명>_review_input.json  템플릿 필드값 + 미배정 광고문구 인계 결과
+├─ <원본파일명>_parsed.json   P1/evidence-v6: 좌표·파서 기본 텍스트·VLM/Judge·카드·카드별 템플릿·라벨 근거 원본
+├─ <원본파일명>_review_input.json  P2/ad-review-input-v5: 라벨별 심의 문구 + 미배정 광고문구 + P1 줄 참조
 ├─ ad_summary.json            분류·템플릿·완결성만 뽑은 짧은 요약
 ├─ image/<이름>_p1.jpg …      쪽 이미지 (박스를 그려 넣지 않은 원본)
 └─ genaikl.status             DONE
 ```
 
 박스를 이미지에 그리지 않는다. 좌표는 이미 `_parsed.json`에 있으므로, 어떻게 그릴지는
-받는 쪽이 정하게 둔다. `_review_input.json`의 `template_fields[]`와
-`unmapped_ad_copy[]`는 파서 기본 줄을 나누지만, 각 값은 다시 `_parsed.json`의 좌표 근거를
-가리킨다. 표는 PaddleX 셀 격자 대신 StructureV3 영역 + 표 전용 VLM 관측으로 남긴다.
+받는 쪽이 정하게 둔다. `_review_input.json`의 `labelled_ad_copy[]`와
+`unmapped_ad_copy[]`는 파서 기본 줄을 빠짐없이 나누며, 각 review view는 `_parsed.json`의
+`line_refs`로 좌표 근거를 가리킨다. P2는 Judge가 고른 VLM 문구를 영역 전체가 하나의 view일
+때만 시험적으로 사용한다. 표는 PaddleX 셀 격자 대신 StructureV3 영역 + 표 전용 VLM 관측으로
+P1에 남긴다.
 
 ### 결과 ZIP 구성
 

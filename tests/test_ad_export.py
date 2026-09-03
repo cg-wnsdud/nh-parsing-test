@@ -11,9 +11,11 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from nh_parsing import ad_template as AT
-from nh_parsing.ad_export import build_unified, unified_lines
+from nh_parsing.ad_export import _items_index, _labels_by_ref, build_unified, label_parsed_ad, unified_lines
+from nh_parsing.ad_review_input import build_ad_review_input
 
 PACK = Path(__file__).resolve().parent.parent / "src/nh_parsing/templates/ad_templates.json"
 
@@ -62,6 +64,79 @@ def test_모든_줄이_제자리에_그대로_실린다(pack: dict) -> None:
     assert texts == ["NH농협은행", "홍보 문구", "영역에 못 붙은 낱줄"]
     assert u["completeness"]["lines_total"] == 3
     assert u["pages"][0]["unassigned_lines"][0]["bbox"] == [0, 0, 1, 1]
+
+
+def test_다상품_카드는_템플릿과_라벨을_카드별로_분리한다(monkeypatch, pack: dict) -> None:
+    """입출식·적립식 통합처럼 카드가 둘이면 문서 템플릿 하나로 접으면 안 된다."""
+    doc = _doc(["NH올원e통장"], ["NH올원e적금"], ["NH농협은행"])
+    regions = doc["pages"][0]["regions"]
+    regions[0]["card_no"] = 1
+    regions[1]["card_no"] = 2
+    regions[2]["card_no"] = 0
+
+    def choose_template(scope_doc, resolution, **_kwargs):
+        text = " ".join(
+            line["text"]
+            for page in scope_doc["pages"] for region in page["regions"]
+            for line in region["lines"]
+        )
+        template_id = "예금성상품-입출식" if "통장" in text else "예금성상품-적립식"
+        return AT.Resolution(template_id, "확정", ["test: card text"], "카드별 시험")
+
+    def label_card_regions(scope_doc, template_id, **_kwargs):
+        region = scope_doc["pages"][0]["regions"][0]
+        return {region["region_id"]: [{
+            "gubun": "상품명", "confidence": 0.9, "line_from": 0, "line_to": 0,
+        }]}
+
+    monkeypatch.setattr(AT, "resolve_template_vlm", choose_template)
+    monkeypatch.setattr(AT, "label_regions_vlm", label_card_regions)
+
+    evidence = label_parsed_ad(
+        doc, "1. 예금성상품(입출식·적립식 통합).pdf", {1: Image.new("RGB", (800, 1000), "white")}, pack,
+    )
+    scopes = evidence["template"]["scopes"]
+    assert evidence["template"]["selection_mode"] == "per_card"
+    assert [(item["scope"]["card_no"], item["template"]["template_id"]) for item in scopes] == [
+        (1, "예금성상품-입출식"),
+        (2, "예금성상품-적립식"),
+    ]
+    assert all("template_selection_votes" not in item for item in scopes)
+    assert evidence["pages"][0]["regions"][0]["template_labels"]["template_scope"]["scope_id"] == "p1:card1"
+    assert evidence["pages"][0]["regions"][1]["template_labels"]["template_scope"]["scope_id"] == "p1:card2"
+    assert evidence["pages"][0]["regions"][2]["template_labels"]["template_scope"] is None
+
+    review = build_ad_review_input(evidence)
+    product_fields = [item for item in review["labelled_ad_copy"] if item["label"] == "상품명"]
+    assert [(item["template_scope"]["scope"]["card_no"], item["template_scope"]["template_id"])
+            for item in product_fields] == [
+        (1, "예금성상품-입출식"),
+        (2, "예금성상품-적립식"),
+    ]
+    assert [item["text_views"][0]["review_text"] for item in product_fields] == [
+        "NH올원e통장", "NH올원e적금",
+    ]
+    assert review["unmapped_ad_copy"][0]["scope"] == {"page_no": 1, "card_no": 0}
+    assert review["unmapped_ad_copy"][0]["review_text"] == "NH농협은행"
+
+
+def test_다상품_공통_라벨명은_다른_카드의_정형문구를_가로채지_않는다() -> None:
+    """두 템플릿에 같은 `회사명` 항목이 있어도 scope별 근거는 분리해야 한다."""
+    card1 = {"scope_id": "p1:card1", "scope": {"page_no": 1, "card_no": 1},
+             "template_id": "예금성상품-입출식"}
+    card2 = {"scope_id": "p1:card2", "scope": {"page_no": 1, "card_no": 2},
+             "template_id": "예금성상품-적립식"}
+    label = {
+        "items": [
+            {"gubun": "회사명", "template_scope": card1, "line_refs": [],
+             "fixed_phrases": [{"phrase_id": "company-card1", "found": True, "matches": [{"refs": ["p1/p1_r001/L00"]}]}]},
+            {"gubun": "회사명", "template_scope": card2, "line_refs": [],
+             "fixed_phrases": [{"phrase_id": "company-card2", "found": True, "matches": [{"refs": ["p1/p1_r002/L00"]}]}]},
+        ]
+    }
+    indexed = _items_index(label, _labels_by_ref(label))
+    assert indexed[0]["line_refs"] == ["p1/p1_r001/L00"]
+    assert indexed[1]["line_refs"] == ["p1/p1_r002/L00"]
 
 
 def test_줄_수가_라벨링과_어긋나면_멈춘다(pack: dict) -> None:

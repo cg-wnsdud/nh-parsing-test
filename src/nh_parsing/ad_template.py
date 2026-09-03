@@ -700,11 +700,199 @@ def _label_chunk(chunk, page, template_id, defs, schema, canvas, doc) -> dict:
     return {"verdicts": verdicts, "missing": [r for r in asked if r not in answered]}
 
 
+# VLM은 문장의 뜻을 읽는 주체지만, ``가입기간:``처럼 스스로 항목명을 밝힌 줄까지
+# 한 줄 밀려 다른 항목으로 가리키는 경우가 있었다. 이는 재투표할 문제가 아니다. 아래
+# 표는 그러한 *명시 표제*만 다루는 안전장치이며, 일반적인 의미 판정에는 관여하지 않는다.
+_EXPLICIT_LINE_LABEL_ALIASES: dict[str, tuple[str, ...]] = {
+    "가입대상": ("가입대상", "가입자격"),
+    "가입금액": ("가입금액", "납입금액", "월납입금액"),
+    "가입기간": ("가입기간", "예치기간"),
+    "금리": ("금리", "기본금리", "기본이자율", "적용금리", "이자율"),
+    "우대금리": ("우대금리", "우대이자율"),
+    "예상수취이자": ("예상수취이자", "예상이자", "만기시예상수취이자금액"),
+    "중도해지이율": ("중도해지이율", "중도해지이자율"),
+    "만기후이율": ("만기후이율", "만기후이자율"),
+    "이자지급시기": ("이자지급시기", "이자지급방법"),
+    "이자지급제한": ("이자지급제한",),
+    "예금자보호": ("예금자보호",),
+    "유의사항": ("유의사항", "상품유의사항", "이벤트유의사항"),
+    "심의번호": ("심의번호", "준법감시인심의필", "심의필"),
+    "대출대상": ("대출대상", "대출자격"),
+    "대출한도": ("대출한도",),
+    "대출기간": ("대출기간",),
+    "상환방법": ("상환방법",),
+    "대출금리": ("대출금리", "기준금리"),
+    "부대비용": ("부대비용",),
+    "채권보전": ("채권보전",),
+}
+
+# 현재 제공된 템플릿에는 없지만, 위 항목들과 같은 줄에 섞여 VLM 범위가 한 칸씩 밀리는
+# 대표 표제다. 이 줄은 임의의 템플릿 항목으로 승격하지 않고 미배정으로 남긴다.
+_NON_TEMPLATE_LINE_PREFIXES = ("가입방법", "판매한도")
+
+
+def _explicit_line_directive(text: str, available_gubuns: set[str]) -> str | None:
+    """명시 표제가 지시하는 템플릿 항목(또는 미배정)을 돌려준다.
+
+    ``None``은 표제가 없다는 뜻으로 VLM 판정을 그대로 존중한다. 따라서 이 함수는
+    '뜻이 비슷한 문장'이나 표의 숫자 행을 규칙으로 재분류하지 않는다.
+    """
+    value = normalize(text)
+    matches = [
+        gubun
+        for gubun, aliases in _EXPLICIT_LINE_LABEL_ALIASES.items()
+        if gubun in available_gubuns and any(value.startswith(alias) for alias in aliases)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches and any(value.startswith(prefix) for prefix in _NON_TEMPLATE_LINE_PREFIXES):
+        return _ABSTAIN
+    return None
+
+
+def _remove_verdict_line(verdicts: list[dict], line_no: int, *, except_gubun: str | None = None) -> list[dict]:
+    """한 줄만 범위에서 빼되, 나머지 VLM 판정 범위는 보존한다."""
+    trimmed: list[dict] = []
+    for verdict in verdicts:
+        if verdict.get("gubun") == except_gubun:
+            trimmed.append(dict(verdict))
+            continue
+        lo, hi = int(verdict.get("line_from", 0)), int(verdict.get("line_to", 0))
+        if hi < lo:
+            lo, hi = hi, lo
+        if line_no < lo or line_no > hi:
+            trimmed.append(dict(verdict))
+        elif lo < line_no:
+            trimmed.append({**verdict, "line_from": lo, "line_to": line_no - 1})
+        if line_no < hi:
+            trimmed.append({**verdict, "line_from": line_no + 1, "line_to": hi})
+    return trimmed
+
+
+def _has_verdict_for_line(verdicts: list[dict], gubun: str, line_no: int) -> bool:
+    return any(
+        verdict.get("gubun") == gubun
+        and min(int(verdict.get("line_from", 0)), int(verdict.get("line_to", 0))) <= line_no
+        <= max(int(verdict.get("line_from", 0)), int(verdict.get("line_to", 0)))
+        for verdict in verdicts
+    )
+
+
+def _dedupe_verdicts(verdicts: list[dict]) -> list[dict]:
+    """모델이 같은 범위를 반복 반환해도 P1 의미 범위는 한 번만 남긴다."""
+    unique: list[dict] = []
+    seen: set[tuple] = set()
+    for verdict in verdicts:
+        key = (
+            verdict.get("gubun"),
+            int(verdict.get("line_from", 0)),
+            int(verdict.get("line_to", 0)),
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(verdict)
+    return unique
+
+
+def _is_review_number_date_continuation(text: str) -> bool:
+    """심의필 바로 다음 줄에 단독 표기된 유효기간은 심의번호 근거로 함께 남긴다."""
+    return bool(re.search(r"\d{4}.*~", normalize(text)))
+
+
+def _remove_gubun_line(verdicts: list[dict], gubun: str, line_no: int) -> list[dict]:
+    """다른 항목의 겹침은 건드리지 않고 지정 라벨에서만 한 줄을 뺀다."""
+    retained: list[dict] = []
+    for verdict in verdicts:
+        if verdict.get("gubun") != gubun:
+            retained.append(dict(verdict))
+            continue
+        lo, hi = int(verdict.get("line_from", 0)), int(verdict.get("line_to", 0))
+        if hi < lo:
+            lo, hi = hi, lo
+        if line_no < lo or line_no > hi:
+            retained.append(dict(verdict))
+        elif lo < line_no:
+            retained.append({**verdict, "line_from": lo, "line_to": line_no - 1})
+        if line_no < hi:
+            retained.append({**verdict, "line_from": line_no + 1, "line_to": hi})
+    return retained
+
+
+def _guard_explicit_line_labels(doc: dict, template: dict, vlm_labels: dict[str, list[dict]] | None) -> dict[str, list[dict]]:
+    """명시 표제와 충돌하는 VLM 줄 범위만 국소적으로 바로잡는다.
+
+    한 번의 VLM 응답을 다시 투표하거나 재시도하지 않는다. 예를 들어 ``가입방법``을
+    ``가입기간``으로 준 경우에는 전자를 미배정으로, ``가입기간:12개월``은 가입기간으로
+    고정한다. 수정 내역은 P1 ``notes``에 남긴다.
+    """
+    guarded = {rid: [dict(verdict) for verdict in verdicts] for rid, verdicts in (vlm_labels or {}).items()}
+    available = {item["gubun"] for item in template["items"]}
+    corrections: list[str] = []
+
+    for page in doc.get("pages") or []:
+        for region in page.get("regions") or []:
+            rid = region.get("region_id")
+            if not rid:
+                continue
+            verdicts = guarded.get(rid, [])
+            directives: dict[int, str] = {}
+            for line_no, line in enumerate(region.get("lines") or []):
+                directive = _explicit_line_directive(str(line.get("text") or ""), available)
+                if directive is None:
+                    continue
+                directives[line_no] = directive
+                before = [(v.get("gubun"), v.get("line_from"), v.get("line_to")) for v in verdicts]
+                if directive == _ABSTAIN:
+                    verdicts = _remove_verdict_line(verdicts, line_no)
+                else:
+                    verdicts = _remove_verdict_line(verdicts, line_no, except_gubun=directive)
+                    if not _has_verdict_for_line(verdicts, directive, line_no):
+                        verdicts.append({
+                            "gubun": directive,
+                            "confidence": 1.0,
+                            "line_from": line_no,
+                            "line_to": line_no,
+                        })
+                after = [(v.get("gubun"), v.get("line_from"), v.get("line_to")) for v in verdicts]
+                if after != before:
+                    corrections.append(f"{rid}/L{line_no:02d}→{directive}")
+
+            # `준법감시인 심의필`처럼 라벨을 직접 밝힌 줄이 같은 영역에 있으면, 전화번호
+            # 같은 이웃 줄을 심의번호로 함께 잡을 근거가 없다. 단, 바로 뒤 유효기간 줄은
+            # 심의필의 일부이므로 남긴다.
+            review_number_lines = {
+                line_no for line_no, directive in directives.items() if directive == "심의번호"
+            }
+            if review_number_lines:
+                for line_no, line in enumerate(region.get("lines") or []):
+                    if line_no in review_number_lines or _is_review_number_date_continuation(str(line.get("text") or "")):
+                        continue
+                    before = [(v.get("gubun"), v.get("line_from"), v.get("line_to")) for v in verdicts]
+                    verdicts = _remove_gubun_line(verdicts, "심의번호", line_no)
+                    after = [(v.get("gubun"), v.get("line_from"), v.get("line_to")) for v in verdicts]
+                    if after != before:
+                        corrections.append(f"{rid}/L{line_no:02d}→심의번호 제외")
+            verdicts = _dedupe_verdicts(verdicts)
+            if verdicts:
+                guarded[rid] = verdicts
+            else:
+                guarded.pop(rid, None)
+
+    if corrections:
+        doc.setdefault("notes", []).append(
+            "템플릿 라벨 명시표제 안전장치 적용: " + ", ".join(corrections[:12])
+            + ("…" if len(corrections) > 12 else "")
+        )
+    return guarded
+
+
 def label_document(
     doc: dict,
     template_id: str | None,
     pack: dict | None = None,
     vlm_labels: dict[str, list[dict]] | None = None,
+    *,
+    apply_explicit_line_guard: bool = False,
 ) -> dict:
     """파싱 결과에 템플릿 라벨을 붙이고 **모든 줄을 실어** 돌려준다.
 
@@ -716,6 +904,8 @@ def label_document(
     목록에 여러 개가 온다(2026-08-26 이전에는 영역당 값 1개였다 — VLM 이 앞 4줄만
     보고 영역 전체를 그 항목으로 오태깅했다. 25번·3.예금성 문서 실측). 없으면
     1층만으로 돈다 — VLM 없이도 결정론적으로 재현되는 부분이 그대로 나온다.
+    실파이프라인은 ``apply_explicit_line_guard=True``로 명시 표제 안전장치를 켠다.
+    직접 주입하는 테스트/이관 호출은 원래 판정을 보존하도록 기본값을 끈다.
     """
     pack = pack or load_pack()
     lines = collect_lines(doc)
@@ -724,6 +914,8 @@ def label_document(
     items_out: list[dict] = []
     if template_id:
         tpl = pack["templates"][template_id]
+        if apply_explicit_line_guard:
+            vlm_labels = _guard_explicit_line_labels(doc, tpl, vlm_labels)
         targets = _phrase_targets(pack, template_id)
         streams = _streams(lines)
         found_by_gubun: dict[str, list[dict]] = {}

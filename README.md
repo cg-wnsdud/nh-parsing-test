@@ -14,7 +14,7 @@
   -> OCR 정본과 Reader가 다를 때만 Judge 비교 (정본 불변)
   -> 페이지 sweep으로 StructureV3 미검출 문구 후보만 별도 탐색
   -> 템플릿 항목 라벨링 — 정형 문구 완전일치(1층) + VLM 줄범위 판정(2층)
-  -> evidence-v4(감사 원본) + ad-review-input-v2(다음 단계 인계 JSON)
+  -> evidence-v6(P1 감사 원본) + ad-review-input-v5(P2 최소 심의 전달 JSON)
 ```
 
 **광고물 트랙은 스키마 기반 필드 추출(STAGE_3)을 거치지 않는다** — 종점은
@@ -97,9 +97,11 @@ uv run python tools/run_ad_label.py --input <파일> --out out_reader_judge
   표·저신뢰 OCR만 대상으로 하는 비용 비교용 모드다.
 - VLM 판독 입력은 목표 bbox 밖을 마스킹하고 파란 테두리를 표시한다. 목표 bbox가 다른
   StructureV3 텍스트 영역을 품으면 그 하위 영역도 마스킹하고 제외한 `region_id`를 기록한다.
-- VLM 판독/비교 결과는 evidence JSON의 `region.text_evidence.vlm_region_reading`,
-  `region.text_evidence.parser_vlm_comparison`에 들어간다. `lines[].parser_text` 파서 기본값과
-  템플릿 라벨 입력은 절대 변경하지 않는다. 넓은 밴드의 영역별 VLM 후보는 이 경로에서 쓰지 않는다.
+- VLM 판독/비교 결과는 P1의 `region.text_evidence.vlm_region_reading`,
+  `region.text_evidence.parser_vlm_comparison`, `region.text_evidence.p2_text_selection`에 들어간다.
+  `lines[].parser_text` 파서 기본값과 템플릿 라벨 입력은 절대 변경하지 않는다. P2는 Judge가
+  VLM을 선택했더라도 한 review view가 StructureV3 영역의 모든 줄을 포함할 때만 그 문구를
+  시험적으로 사용한다. 넓은 밴드의 영역별 VLM 후보는 이 경로에서 쓰지 않는다.
 - 표는 StructureV3가 찾은 영역 bbox만 사용한다. PaddleX HTML·행/열·셀 좌표는 최종
   계약에서 제외하며, 표 전용 VLM이 낸 `rows`는 파서 기본값을 바꾸지 않는 관측값으로 남긴다.
 - 페이지 sweep은 StructureV3가 놓친 문구만 `page.recovery_candidates`에 별도 기록하며,
@@ -120,13 +122,13 @@ uv run python tools/run_extract.py       # STAGE_3 필드 추출 → out/extract
 
 ```
 <out>/parse/<파일명>.json   파싱 결과 (레이아웃·OCR·VLM 판독, --reuse-parse 재사용 대상)
-<out>/json/<doc_id>.json    evidence-v4 — 좌표·파서 기본 텍스트·VLM 판독/비교·시인성·카드 근거 원본
-<out>/review_input/<doc_id>.json  ad-review-input-v2 — 템플릿 필드값 + 미배정 광고문구  ★다음 단계 인계
+<out>/json/<doc_id>.json    evidence-v6(P1) — 좌표·파서 기본 텍스트·VLM/Judge·시인성·카드·카드별 템플릿 근거 원본
+<out>/review_input/<doc_id>.json  ad-review-input-v5(P2) — 라벨별 심의 문구 + 미배정 광고문구 + P1 줄 참조  ★다음 단계 인계
 <out>/pages/<doc_id>_p<n>.jpg   쪽 이미지(검수용, 박스 없음)
 ```
 
 두 JSON은 같은 문서의 서로 다른 목적을 갖는다. `json/`은 감사·재검수·화면 하이라이트를
-위한 원본이며, `review_input/`은 `template_fields[]`와 `unmapped_ad_copy[]`가 파서 기본
+위한 원본이며, `review_input/`은 `labelled_ad_copy[]`와 `unmapped_ad_copy[]`가 파서 기본
 줄을 빠짐없이 나눠 다음 심의/RAG/RDB 단계가 평면적으로 소비할 수 있게 만든 투영본이다.
 페이지 sweep 후보는 어느 쪽에도 파서 기본 문구로 섞이지 않고 `unverified_recovery_candidates[]`에 남는다.
 기본 `--out`은 `out_ad`; 93건 전수조사는 `--out out_ad_full`로 만들었다.

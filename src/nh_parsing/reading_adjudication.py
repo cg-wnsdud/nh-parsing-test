@@ -502,6 +502,11 @@ def adjudicate_regions_shadow(
                 relation=relation,
                 status="uncertain",
                 judge_decision=decision if decision in {"candidate_a", "candidate_b", "merge", "uncertain"} else "uncertain",
+                # shadow 정책 때문에 Region.lines에는 반영하지 않는다. 그래도 Judge가
+                # 실제로 A/B 중 무엇을 픽셀 기준으로 골랐는지는 P1 근거에 남겨야 P2가
+                # 범위가 정확히 일치하는 경우에만 제한적으로 시험할 수 있다.
+                proposed_text=proposed or None,
+                proposed_source=proposed_source,
                 confidence=confidence,
                 reason=(reason + " / " if reason else "") + "보수정책: " + policy_reason,
             )

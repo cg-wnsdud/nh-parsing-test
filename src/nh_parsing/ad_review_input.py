@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
-"""evidence JSON을 다음 심의/RAG 단계용 필드 중심 JSON으로 투영한다.
+"""P1 evidence를 최소 심의 전달용 ``review_text``로 투영한다.
 
-``nh-ad-review-evidence-v4``는 좌표, 파서 기본 텍스트, VLM 판독 관측을 빠짐없이
-보존하는 감사 원본이다. 그 구조를 하류가 매번 pages→regions→lines로 풀지 않도록 이 모듈은
-두 개의 서로 배타적인 문구 목록을 만든다.
+P1(``nh-ad-review-evidence-v6``)은 파서 기본 문구, 영역 전체 VLM 판독, Judge 근거와
+bbox를 모두 보존하는 감사 원본이다. P2는 심의가 읽을 라벨별 문구와 미배정 문구, 그리고
+P1로 돌아갈 ``line_refs``만 전달한다. 템플릿의 requirement/writing rules 및 정형문구
+매칭 진단은 템플릿 팩/P1의 책임이므로 P2에 반복하지 않는다.
 
-* ``template_fields``: 선택된 광고 템플릿의 라벨에 배정된 파서 기본 문구
-* ``unmapped_ad_copy``: 어떤 템플릿 라벨에도 배정되지 않은 파서 기본 문구
-
-각 필드 값과 일반 문구는 원본 evidence의 line_ref/bbox/card/VLM 비교 상태를 가리킨다.
-따라서 이 출력은 편의용 요약일 뿐, VLM 결과나 새 문장을 파서 기본값으로 승격하지
-않는다. 페이지 sweep 회수 후보는 파서 기본 문구와 섞지 않고 별도 목록으로 남긴다.
+VLM Judge가 고른 문구는 **그 view가 StructureV3 영역의 모든 파서 줄을 포함할 때만**
+시험적으로 쓴다. 영역 일부에 해당하는 라벨에는 VLM 전체 문구를 잘라 넣지 않고 파서
+기본 줄만 쓴다. 페이지 sweep 회수 후보는 확정 문구와 섞지 않고 별도 목록으로 남긴다.
 """
 
 from __future__ import annotations
@@ -19,21 +17,20 @@ from collections import defaultdict
 from typing import Any
 
 
-CONTRACT_VERSION = "nh-ad-review-input-v2"
+CONTRACT_VERSION = "nh-ad-review-input-v5"
 
 
 def build_ad_review_input(evidence: dict[str, Any]) -> dict[str, Any]:
-    """근거 JSON 하나를 다음 단계 소비용 두-목록 계약으로 바꾼다.
+    """근거 JSON 하나를 라벨/미배정 심의 문구 계약으로 바꾼다.
 
-    ``review_targets[].evidence.line_refs``가 현재 템플릿 라벨 배정의 유일한 원천이다.
-    라벨을 다시 추론하거나 VLM 텍스트를 새 값으로 쓰지 않아, 이 투영 자체가 VLM
-    결과를 흔들지 않는다.
+    ``review_targets[].evidence.line_refs``가 템플릿 라벨 배정의 유일한 원천이다. 이
+    함수는 라벨을 다시 추론하지 않는다. 다만 P1의 Judge 선택이 영역 전체 범위와 정확히
+    일치하면 해당 view의 단일 ``review_text``로 사용한다.
     """
     _require_evidence_contract(evidence)
     line_index, ordered_refs, recovery_candidates = _line_index(evidence)
 
     refs_by_target: dict[str, list[str]] = {}
-    targets_by_ref: dict[str, list[str]] = defaultdict(list)
     for target in evidence.get("review_targets") or []:
         target_id = str(target.get("target_id") or "")
         refs = _unique_in_document_order(
@@ -43,28 +40,24 @@ def build_ad_review_input(evidence: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             raise ValueError(f"review_target {target_id!r}가 없는 line_ref를 가리킨다: {sorted(unknown)!r}")
         refs_by_target[target_id] = refs
-        for ref in refs:
-            targets_by_ref[ref].append(target_id)
 
-    template_fields = [
-        _template_field(target, refs_by_target.get(str(target.get("target_id") or ""), []), line_index)
+    labelled_ad_copy = [
+        _labelled_ad_copy(target, refs_by_target.get(str(target.get("target_id") or ""), []), line_index)
         for target in evidence.get("review_targets") or []
     ]
     assigned_refs = {ref for refs in refs_by_target.values() for ref in refs}
-    unmapped_ad_copy = _unmapped_copy(
+    unmapped_ad_copy = _unmapped_review_text_views(
         [ref for ref in ordered_refs if ref not in assigned_refs], line_index,
     )
-    _verify_partition(ordered_refs, template_fields, unmapped_ad_copy)
+    _verify_partition(ordered_refs, labelled_ad_copy, unmapped_ad_copy)
 
     return {
         "contract": {
             "version": CONTRACT_VERSION,
             "source_evidence_contract": (evidence.get("reading_evidence_contract") or {}).get("version"),
-            "parser_primary_text_policy": (
-                "template_fields + unmapped_ad_copy partition parser primary lines"
-            ),
-            "vlm_observation_policy": "observation_only; never replaces parser primary text",
-            "table_policy": "structurev3 region bbox + VLM table observation; PaddleX grid excluded",
+            "text_partition": "labelled_ad_copy + unmapped_ad_copy partition P1 parser primary lines",
+            "p1_reference": "every transmitted text keeps P1 line_refs; bbox/VLM/Judge detail remains in P1",
+            "template_rules": "resolve requirement and writing rules from the configured template pack using document.template and label",
         },
         "document": {
             "doc_id": evidence.get("doc_id"),
@@ -73,23 +66,15 @@ def build_ad_review_input(evidence: dict[str, Any]) -> dict[str, Any]:
             "classification": evidence.get("classification") or {},
             "template": evidence.get("template") or {},
         },
-        "template_fields": template_fields,
+        "labelled_ad_copy": labelled_ad_copy,
         "unmapped_ad_copy": unmapped_ad_copy,
         "unverified_recovery_candidates": recovery_candidates,
         "summary": {
             "parser_primary_line_total": len(ordered_refs),
-            "template_assigned_parser_primary_line_count": len(assigned_refs),
+            "labelled_parser_primary_line_count": len(assigned_refs),
             "unmapped_ad_copy_parser_primary_line_count": len(ordered_refs) - len(assigned_refs),
-            "template_field_count": len(template_fields),
-            "located_template_field_count": sum(
-                1 for field in template_fields if field["evidence_status"] == "located"
-            ),
-            "unmapped_ad_copy_count": len(unmapped_ad_copy),
-            "table_region_count": len({
-                (entry["page_no"], entry["region_id"])
-                for entry in line_index.values()
-                if entry.get("table") is not None and entry.get("region_id") is not None
-            }),
+            "labelled_group_count": len(labelled_ad_copy),
+            "unmapped_ad_copy_view_count": len(unmapped_ad_copy),
             "recovery_candidate_count": len(recovery_candidates),
         },
     }
@@ -130,13 +115,9 @@ def _line_index(evidence: dict[str, Any]) -> tuple[dict[str, dict], list[str], l
                 "line": line,
                 "page_no": page_no,
                 "region_id": None,
-                "region_bbox": None,
                 "card_no": None,
-                "layout": None,
-                "visibility": None,
-                "vlm_region_reading": None,
-                "table": None,
-                "is_unassigned": True,
+                "region_line_refs": [],
+                "p2_text_selection": None,
             }
             ordered.append(ref)
         for candidate in page.get("recovery_candidates") or []:
@@ -146,164 +127,88 @@ def _line_index(evidence: dict[str, Any]) -> tuple[dict[str, dict], list[str], l
 
 def _region_context(page_no: int | None, region: dict) -> dict:
     text_evidence = region.get("text_evidence") or {}
-    # v4 공개 명명과 v2/v3 호환 입력을 둘 다 받는다. 새 출력은 v4 명명만 쓴다.
-    vlm_reading = text_evidence.get("vlm_region_reading") or text_evidence.get("reader") or {}
-    comparison = (
-        text_evidence.get("parser_vlm_comparison")
-        or text_evidence.get("adjudication")
-        or {}
-    )
     return {
         "page_no": page_no,
         "region_id": region.get("region_id"),
-        "region_bbox": region.get("bbox"),
         "card_no": region.get("card_no"),
-        "layout": region.get("layout"),
-        "visibility": region.get("visibility"),
-        "vlm_region_reading": {
-            "text": vlm_reading.get("text") or comparison.get("vlm_region_text"),
-            "confidence": (
-                vlm_reading.get("confidence")
-                if vlm_reading.get("confidence") is not None
-                else comparison.get("vlm_region_confidence", comparison.get("reader_confidence"))
-            ),
-            "comparison_status": (
-                comparison.get("comparison_status")
-                or _legacy_comparison_status(comparison.get("status"))
-                if comparison else "not_run"
-            ),
-            "comparison_relation": (
-                comparison.get("comparison_relation") or comparison.get("relation")
-            ) if comparison else None,
-        } if vlm_reading or comparison else None,
-        # v2의 cells/html은 여기서 절대 복사하지 않는다.
-        "table": _table_observation(region),
-        "is_unassigned": False,
+        "region_line_refs": [line.get("line_ref") for line in region.get("lines") or []],
+        "p2_text_selection": text_evidence.get("p2_text_selection"),
     }
 
 
-def _table_observation(region: dict) -> dict | None:
-    table = region.get("table")
-    if not table:
-        return None
-    vlm_reading = table.get("vlm_table_reading") or table.get("reader")
-    if isinstance(vlm_reading, dict):
-        return {
-            "detected_by": table.get("detected_by") or "structurev3",
-            "paddlex_grid_used": False,
-            "parser_primary_line_refs": (
-                table.get("parser_primary_line_refs")
-                or table.get("canonical_line_refs")
-                or []
-            ),
-            "vlm_table_reading": {
-                "source": vlm_reading.get("source"),
-                "status": vlm_reading.get("status"),
-                "text": vlm_reading.get("text"),
-                "rows": vlm_reading.get("rows") or [],
-                "confidence": vlm_reading.get("confidence"),
-                "structure_confidence": vlm_reading.get("structure_confidence"),
-            },
-        }
+def _labelled_ad_copy(target: dict, refs: list[str], index: dict[str, dict]) -> dict:
+    """하나의 템플릿 라벨과 그 심의 대상 문구만 전달한다.
 
-    # 기존 v2 테스트 결과는 일반 VLM 영역 판독 문자열만 가지고 있다. 그 문자열을 셀/행
-    # 구조라고 주장하지 않고 text-only 관측으로만 옮긴다.
-    legacy_reader = (region.get("text_evidence") or {}).get("reader") or {}
+    ``target_id``/``field_key``는 P1에서 같은 값이므로 P2에는 하나의 안정 식별자
+    ``label_id``만 둔다. requirement, writing_rules, evidence_status, fixed_phrase_checks는
+    심의가 템플릿 팩이나 P1에서 조회할 정적/진단 정보라 여기서 복사하지 않는다.
+    """
     return {
-        "detected_by": "structurev3",
-        "paddlex_grid_used": False,
-        "parser_primary_line_refs": [line.get("line_ref") for line in region.get("lines") or []],
-        "vlm_table_reading": {
-            "source": "legacy_region_reading",
-            "status": "legacy_text_only" if legacy_reader.get("text") else "not_run",
-            "text": legacy_reader.get("text"),
-            "rows": [],
-            "confidence": legacy_reader.get("confidence"),
-            "structure_confidence": None,
-        },
-    }
-
-
-def _template_field(target: dict, refs: list[str], index: dict[str, dict]) -> dict:
-    values = _values_for_refs(refs, index, value_prefix=str(target.get("target_id") or "template:unknown"))
-    return {
-        "target_id": target.get("target_id"),
+        "label_id": target.get("target_id"),
         "label": target.get("label"),
-        # 템플릿에는 별도 영문 field_key가 없으므로 target_id가 안정적인 기계 식별자다.
-        "field_key": target.get("target_id"),
-        "requirement": target.get("requirement"),
-        "writing_rules": target.get("writing_rules") or [],
-        "evidence_status": target.get("evidence_status"),
-        "fixed_phrase_checks": (target.get("evidence") or {}).get("fixed_phrase_checks") or [],
-        "values": values,
+        "template_scope": target.get("template_scope"),
+        "text_views": _review_text_views(refs, index),
     }
 
 
-def _values_for_refs(refs: list[str], index: dict[str, dict], *, value_prefix: str) -> list[dict]:
-    grouped: dict[tuple, list[str]] = defaultdict(list)
+def _unmapped_review_text_views(refs: list[str], index: dict[str, dict]) -> list[dict]:
+    views = _review_text_views(refs, index)
+    return views
+
+
+def _review_text_views(refs: list[str], index: dict[str, dict]) -> list[dict]:
+    """같은 페이지·카드의 문구를 심의용 단일 view로 합친다.
+
+    view 안에서는 Region 단위 segment를 유지한다. 해당 segment가 Region의 모든 파서 줄을
+    포함해야만 P1 Judge가 고른 VLM 영역 문구를 사용한다. 일부 줄만 라벨에 속하면 원래
+    파서 줄만 이어 붙인다. 이 규칙이 영역 전체 VLM 문구의 잘못된 라벨 귀속을 막는다.
+    """
+    by_view: dict[tuple, list[str]] = defaultdict(list)
     for ref in refs:
         entry = index[ref]
-        # 하나의 라벨이 여러 상품 카드나 여러 독립 영역에 반복될 수 있으므로 합치지 않는다.
-        key = (entry["page_no"], entry["region_id"], entry["card_no"])
-        grouped[key].append(ref)
-
-    values: list[dict] = []
-    for ordinal, refs_in_group in enumerate(grouped.values(), start=1):
-        first = index[refs_in_group[0]]
-        lines = [_line_evidence(index[ref]["line"]) for ref in refs_in_group]
-        values.append({
-            "value_id": f"{value_prefix}:value:{ordinal}",
-            # 이 값은 문자열을 새로 추출/정규화하지 않고, 라벨에 배정된 파서 기본 줄을
-            # 그대로 이어 붙인 것이다.
-            "value": "\n".join(line["parser_text"] for line in lines).strip(),
-            "value_source": "parser_primary_text",
-            "page_no": first["page_no"],
-            "region_id": first["region_id"],
-            "region_bbox": first["region_bbox"],
-            "card_no": first["card_no"],
-            "lines": lines,
-            "vlm_region_reading": first["vlm_region_reading"],
-            "table": first["table"],
-        })
-    return values
-
-
-def _unmapped_copy(refs: list[str], index: dict[str, dict]) -> list[dict]:
-    grouped: dict[tuple, list[str]] = defaultdict(list)
-    for ref in refs:
-        entry = index[ref]
-        key = (entry["page_no"], entry["region_id"], entry["card_no"])
-        grouped[key].append(ref)
+        by_view[(entry["page_no"], entry["card_no"])].append(ref)
 
     output: list[dict] = []
-    for ordinal, refs_in_group in enumerate(grouped.values(), start=1):
-        first = index[refs_in_group[0]]
-        lines = [_line_evidence(index[ref]["line"]) for ref in refs_in_group]
-        suffix = first["region_id"] or f"p{first['page_no']}_unassigned"
+    for (page_no, card_no), view_refs in by_view.items():
+        by_region: dict[str | None, list[str]] = defaultdict(list)
+        for ref in view_refs:
+            by_region[index[ref]["region_id"]].append(ref)
+
+        segments = [_review_segment(region_refs, index) for region_refs in by_region.values()]
+        sources = {segment["review_text_source"] for segment in segments}
         output.append({
-            "copy_id": f"copy:{suffix}:{ordinal}",
-            "assignment_status": "unmapped_to_template",
-            "ad_copy_text": "\n".join(line["parser_text"] for line in lines).strip(),
-            "page_no": first["page_no"],
-            "region_id": first["region_id"],
-            "region_bbox": first["region_bbox"],
-            "card_no": first["card_no"],
-            "layout": first["layout"],
-            "visibility": first["visibility"],
-            "lines": lines,
-            "vlm_region_reading": first["vlm_region_reading"],
-            "table": first["table"],
+            "scope": {"page_no": page_no, "card_no": card_no},
+            "review_text": "\n".join(segment["review_text"] for segment in segments).strip(),
+            "text_source": next(iter(sources)) if len(sources) == 1 else "mixed",
+            # P2에는 OCR/VLM 후보와 bbox를 반복 복사하지 않는다. 필요한 상세 근거는
+            # 이 참조를 따라 P1에서 다시 읽는다.
+            "line_refs": view_refs,
         })
     return output
 
 
-def _line_evidence(line: dict) -> dict:
+def _review_segment(refs: list[str], index: dict[str, dict]) -> dict:
+    first = index[refs[0]]
+    parser_text = "\n".join(
+        str(index[ref]["line"].get("parser_text", index[ref]["line"].get("text") or ""))
+        for ref in refs
+    ).strip()
+    selection = first.get("p2_text_selection") or {}
+    all_region_refs = {ref for ref in first.get("region_line_refs") or [] if ref}
+    full_region_scope = bool(
+        first.get("region_id") and all_region_refs and set(refs) == all_region_refs
+    )
+    selected_source = selection.get("selected_text_source")
+    selected_text = str(selection.get("selected_text") or "").strip()
+    if full_region_scope and selected_source == "vlm_judge_selected_region_test" and selected_text:
+        text = selected_text
+        source = "vlm_judge_selected_region_test"
+    else:
+        text = parser_text
+        source = "parser_primary_text"
     return {
-        "line_ref": line.get("line_ref"),
-        "parser_text": line.get("parser_text", line.get("text") or ""),
-        "bbox": line.get("bbox"),
-        "text_source": line.get("text_source", line.get("source")),
-        "ocr_confidence": line.get("ocr_confidence", line.get("confidence")),
+        "review_text": text,
+        "review_text_source": source,
     }
 
 
@@ -312,15 +217,17 @@ def _unique_in_document_order(refs: list[str], ordered_refs: list[str]) -> list[
     return [ref for ref in ordered_refs if ref in wanted]
 
 
-def _verify_partition(ordered_refs: list[str], fields: list[dict], unmapped: list[dict]) -> None:
+def _verify_partition(ordered_refs: list[str], labelled: list[dict], unmapped: list[dict]) -> None:
     assigned = {
-        line["line_ref"]
-        for field in fields for value in field.get("values") or []
-        for line in value.get("lines") or []
+        ref
+        for item in labelled
+        for view in item.get("text_views") or []
+        for ref in view.get("line_refs") or []
     }
     remaining = {
-        line["line_ref"]
-        for copy in unmapped for line in copy.get("lines") or []
+        ref
+        for view in unmapped
+        for ref in view.get("line_refs") or []
     }
     all_refs = set(ordered_refs)
     if assigned & remaining:
@@ -329,14 +236,3 @@ def _verify_partition(ordered_refs: list[str], fields: list[dict], unmapped: lis
         missing = all_refs - (assigned | remaining)
         extra = (assigned | remaining) - all_refs
         raise ValueError(f"ad-review-input 문구 분할 오류: 누락={sorted(missing)[:3]!r}, 초과={sorted(extra)[:3]!r}")
-
-
-def _legacy_comparison_status(status: object) -> str | None:
-    """v2/v3 evidence의 내부 상태를 v2 review-input 공개 상태로 읽는다."""
-    return {
-        "reader_failed": "vlm_reading_failed",
-        "agreed": "parser_and_vlm_agree",
-        "judge_selected": "judge_selected_parser_primary_text",
-        "uncertain": "needs_human_review",
-        "judge_failed": "vlm_judge_failed",
-    }.get(str(status or ""))

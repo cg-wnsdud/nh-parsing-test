@@ -68,9 +68,9 @@ def main() -> None:
         print(
             f"✓ {src.name} → {dst}\n"
             f"  parser-primary {summary['parser_primary_line_total']} / "
-            f"template {summary['template_assigned_parser_primary_line_count']} / "
+            f"labelled {summary['labelled_parser_primary_line_count']} / "
             f"unmapped {summary['unmapped_ad_copy_parser_primary_line_count']} / "
-            f"fields {summary['template_field_count']}"
+            f"groups {summary['labelled_group_count']}"
         )
 
 

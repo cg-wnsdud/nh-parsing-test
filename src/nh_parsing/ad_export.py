@@ -14,8 +14,8 @@ line_ref 로 손수 이어 붙여야 했다. 그 이음질을 여기서 한 번�
 `build_unified()` 는 텍스트가 하나라도 새면 **예외를 던진다.** 조용히 빠뜨리느니
 멈추는 게 낫다 — 빠진 줄은 다음 단계에서 '광고에 그 말이 없다'로 둔갑한다.
 
-이 파일의 결과는 evidence-v4(감사 원본)다. 다음 단계가 바로 소비하는 필드 중심
-`ad-review-input-v2`는 ``ad_review_input.build_ad_review_input``이 이 결과에서 별도로
+이 파일의 결과는 evidence-v6(감사 원본)다. 다음 단계가 바로 소비하는 필드 중심
+`ad-review-input-v5`는 ``ad_review_input.build_ad_review_input``이 이 결과에서 별도로
 만든다. 두 출력을 섞으면 좌표 근거와 단순 필드 값 중 하나가 반드시 흐려진다.
 """
 
@@ -59,6 +59,17 @@ def label_parsed_ad(doc: dict, filename: str, canvases: dict, pack: dict | None 
     from . import ad_template as AT
 
     pack = pack or AT.load_pack()
+
+    # 카드가 둘 이상인 한 페이지는 상품 광고 두 장을 한 파일로 모은 경우가 많다. 이때
+    # 파일명(예: "입출식·적립식 통합")이나 문서 전체 문구로 템플릿 하나를 고르면 다른
+    # 카드의 필수 항목이 조용히 사라진다. 카드별 템플릿 경로를 먼저 선택한다.
+    card_scopes = _card_template_scopes(doc)
+    if card_scopes:
+        scoped_results = _label_card_scopes(doc, canvases, card_scopes, pack, AT)
+        resolution = _card_scoped_resolution(scoped_results)
+        label = _merge_scoped_labels(doc, scoped_results)
+        return build_unified(doc, resolution, label)
+
     resolution = AT.resolve_template(
         doc.get("product_group"), doc.get("product_name_shown"), filename, pack=pack,
     )
@@ -72,8 +83,177 @@ def label_parsed_ad(doc: dict, filename: str, canvases: dict, pack: dict | None 
             canvas_for_page=lambda pg: canvases.get(pg.get("page_no")),
         )
 
-    label = AT.label_document(doc, resolution.template_id, pack, vlm_labels=vlm_labels)
+    label = AT.label_document(
+        doc, resolution.template_id, pack, vlm_labels=vlm_labels,
+        apply_explicit_line_guard=True,
+    )
     return build_unified(doc, resolution.as_dict(), label)
+
+
+def _card_template_scopes(doc: dict) -> list[dict]:
+    """한 페이지 안에서 분리된 카드가 둘 이상일 때만 상품별 scope를 만든다.
+
+    ``card_no`` 는 읽기 순서 보조 정보로 이미 존재하지만, 여기서는 처음으로 템플릿
+    선택의 경계로도 쓴다. ``0``은 공통 헤더/고지이고, ``None``은 카드 판정이 없었던
+    영역이므로 상품 scope로 억지 배정하지 않는다.
+    """
+    scopes: list[dict] = []
+    for page in doc.get("pages") or []:
+        page_no = page.get("page_no")
+        cards = sorted({
+            region.get("card_no")
+            for region in page.get("regions") or []
+            if isinstance(region.get("card_no"), int) and region.get("card_no") > 0
+        })
+        if len(cards) < 2:
+            continue
+        scopes.extend({
+            "scope_id": f"p{page_no}:card{card_no}",
+            "scope": {"page_no": page_no, "card_no": card_no},
+        } for card_no in cards)
+    return scopes
+
+
+def _document_for_card(doc: dict, scope: dict) -> dict:
+    """원문 구조는 바꾸지 않고, 한 카드의 영역만 보이는 얕은 문서 view를 만든다."""
+    page_no = (scope.get("scope") or {}).get("page_no")
+    card_no = (scope.get("scope") or {}).get("card_no")
+    pages = []
+    for page in doc.get("pages") or []:
+        if page.get("page_no") != page_no:
+            continue
+        regions = [
+            region for region in page.get("regions") or []
+            if region.get("card_no") == card_no
+        ]
+        pages.append({
+            **page,
+            "regions": regions,
+            # 카드에 귀속되지 않은 낱줄은 상품 템플릿에 임의로 넣지 않는다.
+            "unassigned_lines": [],
+        })
+    return {**doc, "pages": pages}
+
+
+def _masked_card_canvas(canvas, page: dict, card_no: int):
+    """다른 카드의 텍스트만 흰색 처리한 같은 좌표계의 캔버스.
+
+    crop 좌표를 다시 계산하면 VLM 프롬프트의 bbox/화면 위치가 어긋난다. 그래서 원본과
+    같은 크기를 유지하고 다른 카드의 StructureV3 영역만 가린다. 공통(card 0) 요소는
+    그대로 둔다. 템플릿 선택은 자신의 카드 줄을 기준으로 하고, 공통 고지는 P2에서
+    ``unmapped_ad_copy``로 별도 보존한다.
+    """
+    if canvas is None:
+        return None
+    from PIL import ImageDraw
+
+    masked = canvas.convert("RGB").copy()
+    draw = ImageDraw.Draw(masked)
+    for region in page.get("regions") or []:
+        other = region.get("card_no")
+        bbox = region.get("bbox") or []
+        if other not in {None, 0, card_no} and len(bbox) == 4:
+            draw.rectangle(tuple(bbox), fill="white")
+    return masked
+
+
+def _label_card_scopes(doc: dict, canvases: dict, scopes: list[dict], pack: dict, AT) -> list[dict]:
+    """카드별 템플릿 확정과 영역 라벨링을 독립 수행한다."""
+    results: list[dict] = []
+    pages_by_no = {page.get("page_no"): page for page in doc.get("pages") or []}
+    for scope in scopes:
+        scope_doc = _document_for_card(doc, scope)
+        page_no = (scope.get("scope") or {}).get("page_no")
+        card_no = (scope.get("scope") or {}).get("card_no")
+        page = pages_by_no.get(page_no) or {}
+        scope_canvas = _masked_card_canvas(canvases.get(page_no), page, card_no)
+
+        # 통합 파일명에는 상충하는 세부유형 힌트가 함께 들어갈 수 있다. 카드별 판정에는
+        # 파일명 힌트를 쓰지 않고 해당 카드의 문구·이미지로 VLM 결선투표를 한다.
+        resolution = _resolve_card_template(
+            scope_doc, scope_canvas, pack, AT,
+        )
+
+        vlm_labels = {}
+        if resolution.template_id:
+            vlm_labels = AT.label_regions_vlm(
+                scope_doc, resolution.template_id, pack=pack,
+                canvas_for_page=lambda _page, image=scope_canvas: image,
+            )
+        label = AT.label_document(
+            scope_doc, resolution.template_id, pack, vlm_labels=vlm_labels,
+            apply_explicit_line_guard=True,
+        )
+        results.append({
+            **scope,
+            "template": resolution.as_dict(),
+            "label": label,
+        })
+    return results
+
+
+def _resolve_card_template(scope_doc: dict, scope_canvas, pack: dict, AT):
+    """카드별 문구·이미지로 한 번만 세부 템플릿을 선택한다.
+
+    통합 파일명에는 입출식·적립식처럼 상충하는 힌트가 함께 들어갈 수 있다. 따라서 파일명
+    힌트 없이 해당 카드의 문구와, 다른 카드 텍스트를 가린 페이지 이미지를 사용한다.
+    """
+    base = AT.resolve_template(
+        scope_doc.get("product_group"), scope_doc.get("product_name_shown"), "", pack=pack,
+    )
+    if base.status == "확정":
+        return base
+    return AT.resolve_template_vlm(scope_doc, base, pack=pack, canvas=scope_canvas)
+
+
+def _card_scoped_resolution(scoped_results: list[dict]) -> dict:
+    """기존 단일 ``template`` 자리에 카드별 선택 계약을 명시한다."""
+    return {
+        "template_id": None,
+        "status": "card_scoped",
+        "basis": ["card_no: per-card template selection"],
+        "note": "한 페이지에 둘 이상 카드가 있어 카드별 템플릿을 독립 선택했다",
+        "selection_mode": "per_card",
+        "shared_content_policy": (
+            "card_no=0/None content is preserved as unmapped_ad_copy; it is not copied into a product card"
+        ),
+        "scopes": [
+            {
+                "scope_id": result["scope_id"],
+                "scope": result["scope"],
+                "template": result["template"],
+            }
+            for result in scoped_results
+        ],
+    }
+
+
+def _merge_scoped_labels(doc: dict, scoped_results: list[dict]) -> dict:
+    """카드별 라벨 결과를 P1 공통 좌표 구조에 얹을 수 있게 합친다."""
+    items: list[dict] = []
+    region_labels: list[dict] = []
+    for result in scoped_results:
+        descriptor = {
+            "scope_id": result["scope_id"],
+            "scope": result["scope"],
+            "template_id": (result.get("template") or {}).get("template_id"),
+        }
+        label = result["label"]
+        items.extend({**item, "template_scope": descriptor} for item in label.get("items") or [])
+        region_labels.extend({**region, "template_scope": descriptor}
+                             for region in label.get("region_labels") or [])
+
+    line_total = sum(
+        len(region.get("lines") or [])
+        for page in doc.get("pages") or [] for region in page.get("regions") or []
+    ) + sum(len(page.get("unassigned_lines") or []) for page in doc.get("pages") or [])
+    return {
+        "template_id": None,
+        "items": items,
+        "region_labels": region_labels,
+        "other_content": [],
+        "completeness": {"lines_total": line_total},
+    }
 
 
 def label_parsed_ad_outputs(
@@ -84,8 +264,9 @@ def label_parsed_ad_outputs(
 ) -> tuple[dict, dict]:
     """파싱 후 공통 단계의 두 최종 산출물을 함께 만든다.
 
-    첫 값은 evidence-v4 감사 원본, 두 번째 값은 그것만을 입력으로 만든
-    ad-review-input-v2이다. 두 번째 생성은 모델 호출이 없고 파서 기본 텍스트를 바꾸지 않는다.
+    첫 값은 evidence-v6 감사 원본, 두 번째 값은 그것만을 입력으로 만든
+    ad-review-input-v5이다. P2는 Judge가 고른 VLM 영역 문구를 범위가 정확히 일치하는
+    view에만 시험적으로 사용하며, 파서 기본 텍스트 자체는 바꾸지 않는다.
     """
     from .ad_review_input import build_ad_review_input
 
@@ -170,10 +351,17 @@ def build_unified(
                     "parser_vlm_comparison": _vlm_comparison_evidence(
                         region.get("reading_adjudication"),
                     ),
+                    # P1은 파서/VLM/Judge 근거를 모두 보존한다. P2는 이 선택값을
+                    # 영역 전체가 하나의 심의 문구일 때만 쓸 수 있으며, Line.text 자체는
+                    # 어떤 경우에도 바꾸지 않는다.
+                    "p2_text_selection": _p2_text_selection(
+                        parser_primary_text, region.get("reading_adjudication"),
+                    ),
                 },
                 # 템플릿 라벨은 범용 role과 다르다. 대표값 하나로 접지 않고 줄 범위와
                 # 정형 문구 일치 근거를 모두 남긴다.
                 "template_labels": {
+                    "template_scope": meta.get("template_scope"),
                     "semantic": meta.get("gubun_breakdown") or [],
                     "fixed_phrase_hits": meta.get("phrase_hits") or [],
                     "phrase_share": meta.get("phrase_share", 0.0),
@@ -212,14 +400,21 @@ def build_unified(
         },
         "template": resolution,
         "reading_evidence_contract": {
-            "version": "nh-ad-review-evidence-v4",
+            "version": "nh-ad-review-evidence-v6",
             "parser_primary_text": (
                 "pages[].regions[].text_evidence.parser_primary_text + lines[].parser_text"
             ),
             "parser_primary_text_sources": ["digital", "ocr", "hybrid"],
             "vlm_region_reading_mode": "shadow_observation",
             "parser_mutates_primary_text_from_vlm": False,
-            "final_text_selection": "deferred_to_review",
+            "p2_text_selection": (
+                "judge_selected_region_test; only when a P2 view covers all parser primary lines "
+                "in the StructureV3 region"
+            ),
+            "card_template_selection": (
+                "per_card when two or more positive card_no values exist on a page; "
+                "card_no=0/None is preserved as shared/unmapped content"
+            ),
             "table_structure": "structurev3_bbox + vlm_table_reading_observation",
             "paddlex_table_grid_used": False,
         },
@@ -293,9 +488,10 @@ def _vlm_comparison_evidence(reading: dict | None) -> dict | None:
         return None
     proposed_source = reading.get("proposed_source")
     status = str(reading.get("status") or "")
-    # judge_selected는 현재 shadow 정책에서 파서 기본 텍스트만 자동 유지 대상으로
-    # 남긴다. 혹시 정책이 바뀌어 다른 출처가 기록되더라도 상태를 거짓으로 쓰지 않는다.
-    if status == "judge_selected" and proposed_source not in {None, "canonical"}:
+    # VLM을 택한 Judge 결과는 shadow 때문에 Region.lines를 바꾸지 않는다. 그래도 P1에는
+    # 그 선택 사실을 남겨, P2가 '영역 전체가 하나의 심의 문구'인 제한된 경우에만 시험할
+    # 수 있게 한다.
+    if proposed_source == "element_vlm" and reading.get("proposed_text"):
         public_status = "judge_selected_vlm_candidate_requires_review"
     else:
         public_status = _COMPARISON_STATUS.get(status, "needs_human_review")
@@ -320,6 +516,43 @@ def _vlm_comparison_evidence(reading: dict | None) -> dict | None:
             "error": reading.get("error"),
         },
     }
+
+
+def _p2_text_selection(parser_primary_text: str, reading: dict | None) -> dict:
+    """P2가 사용할 수 있는 영역 단위 단일 문구 후보를 명시한다.
+
+    Reader가 StructureV3 영역 전체를 읽으므로, VLM 선택은 P2에서 그 영역의 모든 파서
+    줄을 같은 view가 포함할 때만 사용한다. 영역 일부(예: 유의사항 7줄 중 금리 1줄)에
+    VLM 전체 판독을 억지로 잘라 넣는 일은 이 함수와 P2 투영 모두에서 금지한다.
+    """
+    fallback = {
+        "selected_text": parser_primary_text,
+        "selected_text_source": "parser_primary_text",
+        "selection_status": "parser_primary_fallback",
+        "selection_policy": "judge_selected_region_test",
+        "scope_requirement": "all_region_parser_primary_lines",
+    }
+    if not reading:
+        return {**fallback, "selection_status": "parser_primary_no_vlm_comparison"}
+
+    proposed = str(reading.get("proposed_text") or "").strip()
+    proposed_source = reading.get("proposed_source")
+    decision = reading.get("judge_decision")
+    if proposed and proposed_source == "element_vlm" and decision in {"candidate_a", "candidate_b"}:
+        return {
+            "selected_text": proposed,
+            "selected_text_source": "vlm_judge_selected_region_test",
+            "selection_status": "judge_selected_vlm_region_test",
+            "selection_policy": "judge_selected_region_test",
+            "scope_requirement": "all_region_parser_primary_lines",
+        }
+    if proposed_source == "canonical":
+        return {**fallback, "selection_status": "judge_selected_parser_primary_text"}
+    if proposed_source == "merged":
+        return {**fallback, "selection_status": "merged_candidate_not_used"}
+    if reading.get("status") in {"uncertain", "judge_failed", "reader_failed"}:
+        return {**fallback, "selection_status": "judge_unresolved_parser_primary_fallback"}
+    return fallback
 
 
 def _table_evidence(region: dict, lines: list[dict]) -> dict | None:
@@ -378,7 +611,7 @@ def _table_out(
 
     셀 좌표가 없으면(격자 note 참조) `line_refs` 는 빈 목록이 된다. 행·열 관계는 남는다.
 
-    현재 evidence-v4와 ad-review-input-v2는 이 함수를 호출하지 않는다. 표 구조의
+    현재 evidence-v6와 ad-review-input-v5는 이 함수를 호출하지 않는다. 표 구조의
     신뢰 원천은 StructureV3 영역 bbox + table_region_reader VLM 관측이다.
     """
     if not table:
@@ -543,6 +776,8 @@ def _labels_by_ref(label: dict) -> dict[str, list[dict]]:
                         "requirement": phrase.get("requirement"),
                         "how": match.get("how"),
                     }
+                    if item.get("template_scope"):
+                        entry["template_scope"] = item["template_scope"]
                     out.setdefault(ref, []).append(entry)
     return out
 
@@ -574,9 +809,17 @@ def _items_index(label: dict, labels_by_ref: dict) -> list[dict]:
     """
     items: list[dict] = []
     for item in label.get("items") or []:
+        scope_id = ((item.get("template_scope") or {}).get("scope_id"))
         fixed_refs = {
             r for r in labels_by_ref
-            if any(e["gubun"] == item["gubun"] for e in labels_by_ref[r])
+            if any(
+                e["gubun"] == item["gubun"]
+                and (
+                    not scope_id
+                    or ((e.get("template_scope") or {}).get("scope_id")) == scope_id
+                )
+                for e in labels_by_ref[r]
+            )
         }
         refs = fixed_refs | set(item.get("line_refs") or [])
         items.append({**item, "line_refs": sorted(refs)})
@@ -636,6 +879,8 @@ def _review_targets(items: list[dict], pages: list[dict]) -> list[dict]:
     for item in items:
         refs = sorted(set(item.get("line_refs") or []))
         owners = [owner[ref] for ref in refs if ref in owner]
+        template_scope = item.get("template_scope") or {}
+        scope_id = template_scope.get("scope_id")
         fixed_checks = []
         for phrase in item.get("fixed_phrases") or []:
             phrase_refs = sorted({ref for match in phrase.get("matches") or [] for ref in match.get("refs") or []})
@@ -655,8 +900,13 @@ def _review_targets(items: list[dict], pages: list[dict]) -> list[dict]:
         else:
             evidence_status = "not_applicable"
         targets.append({
-            "target_id": f"template:{item.get('gubun')}",
+            "target_id": (
+                f"{scope_id}:template:{item.get('gubun')}"
+                if scope_id else f"template:{item.get('gubun')}"
+            ),
             "label": item.get("gubun"),
+            "template_id": template_scope.get("template_id"),
+            "template_scope": template_scope or None,
             "requirement": item.get("requirement"),
             "writing_rules": item.get("writing_rules") or [],
             "evidence_status": evidence_status,

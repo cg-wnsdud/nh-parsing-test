@@ -113,8 +113,10 @@ class RegionTable(BaseModel):
 class ReadingAdjudication(BaseModel):
     """영역별 OCR/PDF 정본과 독립 VLM 판독의 shadow 교차검증 기록.
 
-    ``proposed_text``는 검수용 제안이며 Region.lines를 바꾸지 않는다. ambiguous·실패는
-    None으로 남겨 하류가 VLM 문자열 하나를 확정 정답으로 오인하지 못하게 한다.
+    ``proposed_text``는 Judge가 픽셀 근거로 고른 검수용 제안이며 Region.lines를 바꾸지
+    않는다. ``uncertain``이어도 Judge가 A/B 중 하나를 골랐다면 그 후보와 출처를 남긴다.
+    다만 이는 VLM 문자열을 정본으로 승격했다는 뜻이 아니며, P2의 제한된 시험 선택은
+    영역 전체가 하나의 심의 문구일 때만 이 근거를 사용할 수 있다.
     """
 
     mode: Literal["shadow"] = "shadow"

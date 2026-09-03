@@ -158,4 +158,5 @@ def test_vlm_선호_judge도_shadow에서는_정본을_바꾸지_않는다(monke
     assert region.element_vlm_reading == "완전히 다른 문구"
     assert region.reading_adjudication is not None
     assert region.reading_adjudication.status == "uncertain"
-    assert region.reading_adjudication.proposed_text is None
+    assert region.reading_adjudication.proposed_text == "완전히 다른 문구"
+    assert region.reading_adjudication.proposed_source == "element_vlm"
