@@ -14,7 +14,7 @@
   -> OCR 정본과 Reader가 다를 때만 Judge 비교 (정본 불변)
   -> 페이지 sweep으로 StructureV3 미검출 문구 후보만 별도 탐색
   -> 템플릿 항목 라벨링 — 정형 문구 완전일치(1층) + VLM 줄범위 판정(2층)
-  -> evidence-v6(P1 감사 원본) + ad-review-input-v5(P2 최소 심의 전달 JSON)
+  -> evidence-v6(P1 감사 원본) + ad-review-input-v6(P2 최소 심의 전달 JSON)
 ```
 
 **광고물 트랙은 스키마 기반 필드 추출(STAGE_3)을 거치지 않는다** — 종점은
@@ -123,7 +123,7 @@ uv run python tools/run_extract.py       # STAGE_3 필드 추출 → out/extract
 ```
 <out>/parse/<파일명>.json   파싱 결과 (레이아웃·OCR·VLM 판독, --reuse-parse 재사용 대상)
 <out>/json/<doc_id>.json    evidence-v6(P1) — 좌표·파서 기본 텍스트·VLM/Judge·시인성·카드·카드별 템플릿 근거 원본
-<out>/review_input/<doc_id>.json  ad-review-input-v5(P2) — 라벨별 심의 문구 + 미배정 광고문구 + P1 줄 참조  ★다음 단계 인계
+<out>/review_input/<doc_id>.json  ad-review-input-v6(P2) — 라벨별 심의 문구 + 미배정 광고문구 + 표 격자 + P1 줄 참조  ★다음 단계 인계
 <out>/pages/<doc_id>_p<n>.jpg   쪽 이미지(검수용, 박스 없음)
 ```
 
@@ -131,6 +131,11 @@ uv run python tools/run_extract.py       # STAGE_3 필드 추출 → out/extract
 위한 원본이며, `review_input/`은 `labelled_ad_copy[]`와 `unmapped_ad_copy[]`가 파서 기본
 줄을 빠짐없이 나눠 다음 심의/RAG/RDB 단계가 평면적으로 소비할 수 있게 만든 투영본이다.
 페이지 sweep 후보는 어느 쪽에도 파서 기본 문구로 섞이지 않고 `unverified_recovery_candidates[]`에 남는다.
+표는 `review_text` 평면 문구 **옆에** `text_views[].tables[]`로 행/열 격자를 함께 넘긴다 —
+평면 텍스트로 접으면 격자를 되살릴 수 없다(실측 `16. 대출성상품` p1_r019: 요율 56줄이
+한 줄씩 나열되면 헤더가 중복되고 교차 요율을 복원 못 한다). 격자는 VLM 관측이고 파서
+정본이 아니므로 `status`·`confidence`를 함께 싣고, 라벨 연결은 **2층 VLM 의미 판정이
+있을 때만** 한다(정형문구 완전일치만으로는 표를 다른 라벨에 붙이지 않는다).
 기본 `--out`은 `out_ad`; 93건 전수조사는 `--out out_ad_full`로 만들었다.
 `.gitignore` 대상이라 새로 클론하면 비어 있다 — 위 명령을 돌려야 생긴다.
 

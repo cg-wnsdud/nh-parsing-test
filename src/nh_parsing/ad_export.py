@@ -15,7 +15,7 @@ line_ref 로 손수 이어 붙여야 했다. 그 이음질을 여기서 한 번�
 멈추는 게 낫다 — 빠진 줄은 다음 단계에서 '광고에 그 말이 없다'로 둔갑한다.
 
 이 파일의 결과는 evidence-v6(감사 원본)다. 다음 단계가 바로 소비하는 필드 중심
-`ad-review-input-v5`는 ``ad_review_input.build_ad_review_input``이 이 결과에서 별도로
+`ad-review-input-v6`는 ``ad_review_input.build_ad_review_input``이 이 결과에서 별도로
 만든다. 두 출력을 섞으면 좌표 근거와 단순 필드 값 중 하나가 반드시 흐려진다.
 """
 
@@ -265,7 +265,7 @@ def label_parsed_ad_outputs(
     """파싱 후 공통 단계의 두 최종 산출물을 함께 만든다.
 
     첫 값은 evidence-v6 감사 원본, 두 번째 값은 그것만을 입력으로 만든
-    ad-review-input-v5이다. P2는 Judge가 고른 VLM 영역 문구를 범위가 정확히 일치하는
+    ad-review-input-v6이다. P2는 Judge가 고른 VLM 영역 문구를 범위가 정확히 일치하는
     view에만 시험적으로 사용하며, 파서 기본 텍스트 자체는 바꾸지 않는다.
     """
     from .ad_review_input import build_ad_review_input
@@ -611,7 +611,7 @@ def _table_out(
 
     셀 좌표가 없으면(격자 note 참조) `line_refs` 는 빈 목록이 된다. 행·열 관계는 남는다.
 
-    현재 evidence-v6와 ad-review-input-v5는 이 함수를 호출하지 않는다. 표 구조의
+    현재 evidence-v6와 ad-review-input-v6는 이 함수를 호출하지 않는다. 표 구조의
     신뢰 원천은 StructureV3 영역 bbox + table_region_reader VLM 관측이다.
     """
     if not table:

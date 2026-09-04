@@ -152,7 +152,7 @@ nh_parsing.ad_export.process_ad_file_outputs()  파싱 + 템플릿 판정 + 라�
         ↓
 작업 폴더에 남는 것
 ├─ <원본파일명>_parsed.json   P1/evidence-v6: 좌표·파서 기본 텍스트·VLM/Judge·카드·카드별 템플릿·라벨 근거 원본
-├─ <원본파일명>_review_input.json  P2/ad-review-input-v5: 라벨별 심의 문구 + 미배정 광고문구 + P1 줄 참조
+├─ <원본파일명>_review_input.json  P2/ad-review-input-v6: 라벨별 심의 문구 + 미배정 광고문구 + P1 줄 참조
 ├─ ad_summary.json            분류·템플릿·완결성만 뽑은 짧은 요약
 ├─ image/<이름>_p1.jpg …      쪽 이미지 (박스를 그려 넣지 않은 원본)
 └─ genaikl.status             DONE

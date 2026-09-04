@@ -3,7 +3,7 @@
 
 이 도구는 OCR/VLM 서비스를 호출하지 않는다. 과거 ``*_parsed.json``에 보존된
 템플릿 라벨과 같은 실행의 내부 parse JSON을 이용해 현행 evidence-v6 근거 원장과
-ad-review-input-v5 인계본을 만든다. 따라서 새 VLM 표 판독이 없던 실행은 결과에도
+ad-review-input-v6 인계본을 만든다. 따라서 새 VLM 표 판독이 없던 실행은 결과에도
 ``not_run``으로 남고, 존재하지 않는 관측값을 꾸며 넣지 않는다.
 
 사용 예::

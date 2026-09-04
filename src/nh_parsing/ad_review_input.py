@@ -9,6 +9,12 @@ P1로 돌아갈 ``line_refs``만 전달한다. 템플릿의 requirement/writing 
 VLM Judge가 고른 문구는 **그 view가 StructureV3 영역의 모든 파서 줄을 포함할 때만**
 시험적으로 쓴다. 영역 일부에 해당하는 라벨에는 VLM 전체 문구를 잘라 넣지 않고 파서
 기본 줄만 쓴다. 페이지 sweep 회수 후보는 확정 문구와 섞지 않고 별도 목록으로 남긴다.
+
+표는 ``text_views[].tables[]``로 **행/열 구조를 유지한 보조 표현**을 함께 넘긴다.
+``review_text``는 그대로 두고 그 옆에 붙이는 이유는, 평면 텍스트로 접으면 격자가 복원
+불가능해지기 때문이다 — 실측(`16. 대출성상품` p1_r019): 요율 56줄이 한 줄씩 나열되면
+`이하`·`초과` 헤더가 중복되고 (부부합산 연소득 × 임차보증금) 교차 요율을 되살릴 수 없다.
+격자는 VLM 관측이고 파서 정본이 아니므로 ``status``/``confidence``를 반드시 같이 보낸다.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from collections import defaultdict
 from typing import Any
 
 
-CONTRACT_VERSION = "nh-ad-review-input-v5"
+CONTRACT_VERSION = "nh-ad-review-input-v6"
 
 
 def build_ad_review_input(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -58,6 +64,16 @@ def build_ad_review_input(evidence: dict[str, Any]) -> dict[str, Any]:
             "text_partition": "labelled_ad_copy + unmapped_ad_copy partition P1 parser primary lines",
             "p1_reference": "every transmitted text keeps P1 line_refs; bbox/VLM/Judge detail remains in P1",
             "template_rules": "resolve requirement and writing rules from the configured template pack using document.template and label",
+            # 표 격자는 review_text 를 대체하지 않는 보조 표현이다. line_refs 분할 불변식과
+            # 무관하며(_verify_partition 은 tables 를 보지 않는다) 소유권도 만들지 않는다.
+            "tables": (
+                "text_views[].tables[] projects P1 region.table.vlm_table_reading; "
+                "VLM grid observation, not parser primary text, and creates no text ownership"
+            ),
+            "table_label_link": (
+                "a table attaches to a labelled view only when the label is one of the region's "
+                "template_labels.semantic verdicts; fixed-phrase hits alone never attach a table"
+            ),
         },
         "document": {
             "doc_id": evidence.get("doc_id"),
@@ -118,6 +134,8 @@ def _line_index(evidence: dict[str, Any]) -> tuple[dict[str, dict], list[str], l
                 "card_no": None,
                 "region_line_refs": [],
                 "p2_text_selection": None,
+                "table": None,
+                "semantic_labels": [],
             }
             ordered.append(ref)
         for candidate in page.get("recovery_candidates") or []:
@@ -127,12 +145,22 @@ def _line_index(evidence: dict[str, Any]) -> tuple[dict[str, dict], list[str], l
 
 def _region_context(page_no: int | None, region: dict) -> dict:
     text_evidence = region.get("text_evidence") or {}
+    template_labels = region.get("template_labels") or {}
     return {
         "page_no": page_no,
         "region_id": region.get("region_id"),
         "card_no": region.get("card_no"),
         "region_line_refs": [line.get("line_ref") for line in region.get("lines") or []],
         "p2_text_selection": text_evidence.get("p2_text_selection"),
+        "table": region.get("table"),
+        # 2층 VLM 의미 판정만 담는다. 1층 정형문구 히트(fixed_phrase_hits)는 넣지 않는다 —
+        # `NH농협은행` 6글자가 표 안 문장에도 들어 있어서, 그걸로 표를 연결하면 대출금리
+        # 표 전체가 회사명 라벨에 붙는다(_view_tables 주석 참조).
+        "semantic_labels": [
+            verdict.get("gubun")
+            for verdict in template_labels.get("semantic") or []
+            if verdict.get("gubun")
+        ],
     }
 
 
@@ -147,16 +175,16 @@ def _labelled_ad_copy(target: dict, refs: list[str], index: dict[str, dict]) -> 
         "label_id": target.get("target_id"),
         "label": target.get("label"),
         "template_scope": target.get("template_scope"),
-        "text_views": _review_text_views(refs, index),
+        "text_views": _review_text_views(refs, index, label=target.get("label")),
     }
 
 
 def _unmapped_review_text_views(refs: list[str], index: dict[str, dict]) -> list[dict]:
-    views = _review_text_views(refs, index)
+    views = _review_text_views(refs, index, label=None)
     return views
 
 
-def _review_text_views(refs: list[str], index: dict[str, dict]) -> list[dict]:
+def _review_text_views(refs: list[str], index: dict[str, dict], label: str | None) -> list[dict]:
     """같은 페이지·카드의 문구를 심의용 단일 view로 합친다.
 
     view 안에서는 Region 단위 segment를 유지한다. 해당 segment가 Region의 모든 파서 줄을
@@ -176,13 +204,58 @@ def _review_text_views(refs: list[str], index: dict[str, dict]) -> list[dict]:
 
         segments = [_review_segment(region_refs, index) for region_refs in by_region.values()]
         sources = {segment["review_text_source"] for segment in segments}
-        output.append({
+        view = {
             "scope": {"page_no": page_no, "card_no": card_no},
             "review_text": "\n".join(segment["review_text"] for segment in segments).strip(),
             "text_source": next(iter(sources)) if len(sources) == 1 else "mixed",
             # P2에는 OCR/VLM 후보와 bbox를 반복 복사하지 않는다. 필요한 상세 근거는
             # 이 참조를 따라 P1에서 다시 읽는다.
             "line_refs": view_refs,
+        }
+        tables = _view_tables(view_refs, index, label)
+        if tables:
+            view["tables"] = tables
+        output.append(view)
+    return output
+
+
+def _view_tables(refs: list[str], index: dict[str, dict], label: str | None) -> list[dict]:
+    """이 view가 안고 있는 표 영역의 VLM 격자 관측을 투영한다.
+
+    **연결 규칙.** 라벨 view 는 그 라벨이 표 영역의 2층 VLM 의미 판정(``semantic``)에
+    들어 있을 때만 연결한다. 1층 정형문구 완전일치는 보지 않는다 — 실측(`16. 대출성상품`):
+    표 영역 두 개 모두 1층 히트가 0개이고 의미 판정만 있다. 1층까지 보면 `NH농협은행`
+    6글자가 표 안 문장에 들어 있는 경우 대출금리 표 전체가 회사명 라벨에 붙는다.
+    미배정(``label is None``) view 는 의미 판정을 주장하지 않으므로 잘못된 귀속 위험이
+    없어 보유한 표 영역을 그대로 싣는다 — 표가 라벨을 아예 못 받았거나(영역 전체 미배정)
+    일부 줄만 미배정으로 남은 경우(실측 p1_r019: L00~L39 대출금리 / L40~L55 미배정)를
+    같은 규칙으로 덮는다.
+
+    ``rows`` 가 비어도 싣는다. StructureV3 가 표로 검출한 사실 자체가 심의에 필요한
+    정보이고, 읽지 못했다는 것은 ``status`` 로 정직하게 전달한다.
+    """
+    output: list[dict] = []
+    seen: set[str] = set()
+    for ref in refs:
+        entry = index[ref]
+        region_id = entry.get("region_id")
+        table = entry.get("table")
+        if not (region_id and table) or region_id in seen:
+            continue
+        if label is not None and label not in (entry.get("semantic_labels") or []):
+            continue
+        seen.add(region_id)
+        observation = table.get("vlm_table_reading") or {}
+        output.append({
+            "region_id": region_id,
+            "rows": observation.get("rows") or [],
+            "source": observation.get("source"),
+            "status": observation.get("status"),
+            "confidence": observation.get("confidence"),
+            "structure_confidence": observation.get("structure_confidence"),
+            # 표 영역 전체의 파서 줄이다. 이 view 가 그 줄을 다 갖는다는 뜻이 아니며
+            # (p1_r019 는 두 view 에 걸친다) 텍스트 소유권도 만들지 않는다.
+            "parser_primary_line_refs": table.get("parser_primary_line_refs") or [],
         })
     return output
 
