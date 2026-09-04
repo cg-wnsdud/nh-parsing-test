@@ -102,6 +102,7 @@ function simplifyDocument(p1, p2) {
       reviewText: view.review_text,
       textSource: view.text_source,
       lineRefs: view.line_refs || [],
+      tables: view.tables || [],
     })),
   }));
   const unmapped = (p2.unmapped_ad_copy || []).map((view) => ({
@@ -109,6 +110,7 @@ function simplifyDocument(p1, p2) {
     reviewText: view.review_text,
     textSource: view.text_source,
     lineRefs: view.line_refs || [],
+    tables: view.tables || [],
   }));
   return {
     id: p1.doc_id,
@@ -286,7 +288,19 @@ const html = `<!doctype html>
       const refs = selectedRefs(doc); const lookup = refMap(doc);
       const p1Regions = [...new Set([...refs].map(ref => lookup.get(ref)?.region?.id).filter(Boolean))];
       const scopeText = views.map(view => 'p' + (view.scope?.page_no ?? '?') + ' / ' + (view.scope?.card_no == null ? '공통' : '카드 ' + view.scope.card_no)).join(', ');
-      detail.innerHTML = '<h3>' + esc(p2Title(item)) + '</h3><div class="metadata"><span class="tag purple">P2 ' + (mode === 'labels' ? '라벨 묶음' : '미분류 묶음') + '</span><span class="tag">' + refs.size + ' P1 줄</span><span class="tag">' + esc(scopeText) + '</span><span class="tag">영역 ' + esc(p1Regions.join(', ') || '미배정') + '</span></div>' + views.map(view => '<div><p><b>심의 텍스트</b> <span class="tag">' + esc(view.textSource) + '</span></p><pre>' + esc(view.reviewText) + '</pre><p class="hint">근거: ' + (view.lineRefs || []).map(ref => '<code>' + esc(ref) + '</code>').join(' ') + '</p></div>').join('');
+      detail.innerHTML = '<h3>' + esc(p2Title(item)) + '</h3><div class="metadata"><span class="tag purple">P2 ' + (mode === 'labels' ? '라벨 묶음' : '미분류 묶음') + '</span><span class="tag">' + refs.size + ' P1 줄</span><span class="tag">' + esc(scopeText) + '</span><span class="tag">영역 ' + esc(p1Regions.join(', ') || '미배정') + '</span></div>' + views.map(view => '<div><p><b>심의 텍스트</b> <span class="tag">' + esc(view.textSource) + '</span></p><pre>' + esc(view.reviewText) + '</pre><p class="hint">근거: ' + (view.lineRefs || []).map(ref => '<code>' + esc(ref) + '</code>').join(' ') + '</p>' + tablesHtml(view) + '</div>').join('');
+    }
+    function tablesHtml(view) {
+      // 격자는 VLM 관측이라 정본이 아니다 — status/신뢰도를 값과 같이 보여 준다.
+      return (view.tables || []).map(table => {
+        const rows = (table.rows || []).map(row => '<tr>' + row.map(cell => '<td>' + esc(cell) + '</td>').join('') + '</tr>').join('');
+        const meta = [table.status, table.confidence == null ? null : 'conf ' + table.confidence,
+                      table.structure_confidence == null ? null : 'struct ' + table.structure_confidence]
+                     .filter(Boolean).map(text => '<span class="tag amber">' + esc(text) + '</span>').join('');
+        return '<p><b>표 격자 관측</b> <span class="tag">' + esc(table.region_id) + '</span>' + meta + '</p>'
+             + (rows ? '<table><tbody>' + rows + '</tbody></table>'
+                     : '<div class="empty">격자를 읽지 못했습니다 (표 영역만 검출).</div>');
+      }).join('');
     }
     function render() {
       const doc = DATA.docs[docIndex];
