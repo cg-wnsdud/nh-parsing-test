@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 import unicodedata
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -565,21 +567,37 @@ _GUBUN_PROMPT = """당신은 금융상품 광고심의 보조 시스템의 항�
 - 특정 낱말이 있는지가 아니라 **그 문구가 무슨 역할을 하는지**를 보세요.
 - 판단이 서지 않으면 {abstain} 을 쓰세요. **억지로 끼워 맞추지 마세요** —
   틀린 라벨은 없는 라벨보다 나쁩니다.
-- y_ratio 는 화면에서의 세로 위치입니다(0=최상단, 1=최하단). 참고만 하세요.
 - 첨부 이미지는 전체 화면 축소본입니다.
 
+[영역마다 붙은 구조 신호 — 참고용이며 정답이 아닙니다]
+- layout_label: 레이아웃 모델이 본 블록 종류(text/table/doc_title/paragraph_title/
+  vision_footnote 등). layout_score 는 그 검출의 확신도입니다.
+  · doc_title·header 는 광고 헤드라인/머리글 자리입니다. 본문 항목의 세부 설명이
+    아니라 광고 전체의 표제일 수 있으니, 낱말이 겹친다고 본문 항목으로 보지 마세요.
+  · vision_footnote 는 표나 본문에 딸린 각주입니다. 본문 항목 자체와 혼동하지 마세요.
+  · 다만 표제·각주에도 상품명이나 금리 같은 정상 항목이 들어갑니다. **신호를 근거로
+    쓰되 신호만으로 배제하지는 마세요.**
+- x_ratio, y_ratio, w_ratio, h_ratio: 화면에서의 좌우·상하 위치와 크기(0~1).
+- table: 이 영역이 표로 검출됐는지.
+- line_h, line_h_rel: 줄 높이와 **그 쪽 본문 중앙값 대비 배수**입니다. 2배가 넘으면
+  큰 글씨(표제·강조)이고, 1배 안팎이면 본문입니다. `?` 는 알 수 없다는 뜻입니다.
+
 **한 영역 안에 항목이 여러 개 섞여 있을 수 있습니다.** 각 영역의 줄은
-`[00] 텍스트` `[01] 텍스트` 처럼 번호가 붙어 있습니다. 그 영역 전체가 한 항목이면
-`line_from=0, line_to=마지막 줄번호` 로 한 번만 답하세요. 항목이 줄 경계에서
-바뀌면(예: 0~2번 줄은 대출금리, 3~4번 줄은 대출기간) **같은 region_id 를 항목
-수만큼 여러 번** 반환하고 각각 다른 줄 범위를 쓰세요. 범위는 겹치지 않아야 하고
-빠지는 줄이 없어야 합니다(0번줄부터 마지막 줄까지 전부 어느 판정엔가 속해야 함).
+`[00] 텍스트` `[01] 텍스트` 처럼 번호가 붙어 있습니다. 한 영역은 문맥이 끊기지 않도록
+항상 처음부터 끝까지 한 요청에 통째로 옵니다. 영역 전체가 한 항목이면
+`line_from=0, line_to=마지막줄`로 한 번만 답하세요. 항목이 줄
+경계에서 바뀌면(예: 0~2번 줄은 대출금리, 3~4번 줄은 대출기간) **같은 region_id 를
+항목 수만큼 여러 번** 반환하고 각각 다른 줄 범위를 쓰세요. 범위는 겹치지 않아야 하고
+빠지는 줄이 없어야 합니다(적힌 A번줄부터 B번줄까지 전부 어느 판정엔가 속해야 함).
+- `table=있음`인 영역은 표 머리·행 머리·열 머리·본문 값을 **표 전체 맥락으로** 보고
+  무슨 항목의 표인지 판정하세요. 숫자 한 줄만 떼어 낱말 의미로 분류하지 마세요. 한 표에
+  서로 다른 항목이 함께 있으면 같은 region_id를 항목 수만큼 반환해도 됩니다.
 
 영역 목록:
 {regions}
 
 먼저 analysis 에 이 광고가 어떤 내용인지 한두 문장으로 적은 뒤,
-**모든 region_id 의 모든 줄이 하나 이상의 판정에 포함되도록** 반환하세요."""
+**모든 region_id 의 판정할 줄 범위 전체가 하나 이상의 판정에 포함되도록** 반환하세요."""
 
 
 def _gubun_definitions(pack: dict, template_id: str) -> str:
@@ -608,14 +626,72 @@ def _gubun_definitions(pack: dict, template_id: str) -> str:
 # 그래서 나눠 묻는다. 나누면 한 번에 지는 대신 그 조각만 진다.
 _GUBUN_CHUNK = 12
 
+# 한 요청에 담는 줄 수 총합 상한. **영역 자체는 절대 자르지 않는다.** 앞 40줄만 보내던
+# 과거 구현은 뒤쪽 줄을 조용히 잃었고, 이를 20줄씩 나눈 구현은 표 머리가 없는 뒤 조각을
+# 다른 항목으로 오판했다(2026-09-03, `16. 대출성상품` p1_r019 L40~55가 대출대상).
+# 예산을 넘는 단일 영역은 혼자 한 요청에 넣고, 여러 영역을 한 요청에 묶는 양만 제한한다.
+_REQUEST_LINE_BUDGET = 120
+
+# 줄 수만으로는 아주 긴 문장 묶음의 프롬프트 크기를 못 막는다. 이 값도 **영역 사이의
+# 배치 경계**로만 쓰며 한 영역의 문구를 자르지는 않는다.
+_REQUEST_CHAR_BUDGET = 12000
+
+
+def _region_requests(regions: list[dict]) -> list[tuple[dict, int, int]]:
+    """각 영역을 `(영역, 0, 마지막줄)` 한 항목으로 만든다 — 문맥 보존이 불변식이다."""
+    return [(region, 0, len(region["lines"]) - 1) for region in regions if region.get("lines")]
+
+
+def _pack_region_requests(
+    requests: list[tuple[dict, int, int]],
+) -> list[list[tuple[dict, int, int]]]:
+    """온전한 영역들을 요청 단위로 묶는다. 줄·글자 예산은 영역 사이에서만 끊는다."""
+    batches: list[list[tuple[dict, int, int]]] = []
+    batch: list[tuple[dict, int, int]] = []
+    lines = 0
+    chars = 0
+    for region, start, end in requests:
+        span = end - start + 1
+        text_chars = sum(len(str(line.get("text") or "")) for line in region["lines"])
+        if batch and (
+            len(batch) >= _GUBUN_CHUNK
+            or lines + span > _REQUEST_LINE_BUDGET
+            or chars + text_chars > _REQUEST_CHAR_BUDGET
+        ):
+            batches.append(batch)
+            batch, lines, chars = [], 0, 0
+        batch.append((region, start, end))
+        lines += span
+        chars += text_chars
+    if batch:
+        batches.append(batch)
+    return batches
+
+
+def _compress_indices(indices: list[int]) -> str:
+    """[40,41,42,55] → '40-42,55'. 노트를 읽을 수 있게 줄인다."""
+    if not indices:
+        return ""
+    spans: list[str] = []
+    start = previous = indices[0]
+    for index in indices[1:]:
+        if index == previous + 1:
+            previous = index
+            continue
+        spans.append(f"{start}-{previous}" if start != previous else f"{start}")
+        start = previous = index
+    spans.append(f"{start}-{previous}" if start != previous else f"{start}")
+    return ",".join(spans)
+
 
 def label_regions_vlm(
     doc: dict, template_id: str, pack: dict | None = None, canvas_for_page=None,
-) -> dict[str, dict]:
-    """영역마다 템플릿 항목명을 붙인다. 영역 12개마다 VLM 1회.
+) -> dict[str, list[dict]]:
+    """영역 전체마다 0개·1개·여러 개의 템플릿 항목 범위를 붙인다.
 
-    반환: `region_id` → `{"gubun", "confidence"}`. `해당없음` 은 담지 않는다.
-    실패한 조각은 건너뛰되 **반드시 노트를 남긴다** — 조용히 넘기면 "VLM 이 판단을
+    반환: `region_id` → `[{"gubun", "confidence", "line_from", "line_to"}, ...]`.
+    `해당없음`은 담지 않는다. 여러 영역을 한 요청에 묶되 영역 내부는 자르지 않는다.
+    실패한 요청은 건너뛰되 **반드시 노트를 남긴다** — 조용히 넘기면 "VLM 이 판단을
     보류했다"와 "호출이 깨졌다"가 결과에서 똑같이 라벨 0으로 보인다(실측으로 당했다).
     텍스트 자체는 라벨과 무관하게 보존되므로 파이프라인을 멈추지는 않는다.
     """
@@ -624,43 +700,217 @@ def label_regions_vlm(
     schema = _gubun_schema(gubuns)
     defs = _gubun_definitions(pack, template_id)
 
-    verdicts: dict[str, dict] = {}
+    verdicts: dict[str, list[dict]] = {}
     for page in doc.get("pages") or []:
         regions = [r for r in (page.get("regions") or []) if r.get("lines")]
         if not regions:
             continue
         canvas = canvas_for_page(page) if canvas_for_page else None
+        line_median = _page_line_height_median(regions)
         missing: list[str] = []
-        for i in range(0, len(regions), _GUBUN_CHUNK):
-            chunk = regions[i:i + _GUBUN_CHUNK]
-            got = _label_chunk(chunk, page, template_id, defs, schema, canvas, doc)
-            verdicts.update(got["verdicts"])
-            missing.extend(got["missing"])
-        if missing:
-            # 답이 안 온 영역을 값으로 남긴다. 이게 없으면 '해당없음' 과 구분이 안 된다.
-            doc.setdefault("notes", []).append(
-                f"템플릿 항목 라벨링: p{page.get('page_no')} 영역 {len(missing)}개 무응답 "
-                f"({', '.join(missing[:8])}{'…' if len(missing) > 8 else ''})"
+        clamped: list[str] = []
+        answered: dict[str, set[int]] = defaultdict(set)
+        for batch in _pack_region_requests(_region_requests(regions)):
+            got = _label_chunk(
+                batch, page, template_id, defs, schema, canvas, doc,
+                line_median=line_median,
             )
+            for region_id, items in got["verdicts"].items():
+                verdicts.setdefault(region_id, []).extend(items)
+            missing.extend(got["missing"])
+            clamped.extend(got["clamped"])
+            for region_id, indices in got["answered"].items():
+                answered[region_id].update(indices)
+        _note_label_coverage(doc, page, regions, verdicts, answered, missing, clamped)
     return verdicts
 
 
-def _label_chunk(chunk, page, template_id, defs, schema, canvas, doc) -> dict:
-    """영역 한 묶음을 판정한다. 돌려주지 않은 region_id 는 `missing` 으로 올린다."""
+def _note_label_coverage(
+    doc: dict,
+    page: dict,
+    regions: list[dict],
+    verdicts: dict[str, list[dict]],
+    answered: dict[str, set[int]],
+    missing: list[str],
+    clamped: list[str],
+) -> None:
+    """영역 응답의 실제 줄 범위를 검사해 노트로 남긴다 — **조용히 버리지 않는다.**
+
+    세 가지를 가른다.
+      · 무응답 영역      호출이 답을 안 줬다. 이 줄들은 판정 기회를 못 얻었다.
+      · 범위 밖 응답      `line_to` 가 물어본 영역을 넘었다 → 영역 범위로 자른다.
+      · 겹친 줄          두 항목 이상이 같은 줄을 가리킨다. **오류가 아니다** — 이 계약은
+                        라벨 간 줄 중복을 허용한다. 다만 몇 줄이 그런지는 값으로 남긴다.
+
+    '해당없음' 으로 판정된 줄은 노트에 넣지 않는다. 그건 정상적인 미배정이고, 그것까지
+    적으면 대부분의 문서에서 노트가 소음이 된다 — 가려야 할 것은 "판정 자체를 못 받은 줄"이다.
+
+    ⚠️ **여기 적히는 것은 VLM 원응답 기준이다.** 이 함수는 `label_regions_vlm` 안에서
+    돌고, `_guard_explicit_line_labels`(명시 표제 안전장치)는 그 뒤 `label_document`
+    에서 실행돼 줄 범위를 다시 쪼갠다. 그래서 가드가 만든 겹침은 여기 안 잡힌다 —
+    실측(2026-09-03, `002-예금성` p1_r043): 최종 산출물에는 `우대금리[1-4]` 와
+    `유의사항[1-5]` 가 겹치는데, 그 겹침은 가드가 `L00→우대금리` 를 강제하며 생긴 것이라
+    가드 자신의 노트('명시표제 안전장치 적용')에 남는다. 두 노트를 함께 봐야 한다.
+    """
+    notes = doc.setdefault("notes", [])
+    page_no = page.get("page_no")
+    if missing:
+        notes.append(
+            f"템플릿 항목 라벨링: p{page_no} 영역 {len(missing)}개 무응답 "
+            f"({', '.join(missing[:8])}{'…' if len(missing) > 8 else ''})"
+        )
+    if clamped:
+        notes.append(
+            f"템플릿 항목 라벨링: p{page_no} 줄범위 밖 응답 {len(clamped)}건 보정 "
+            f"({', '.join(clamped[:6])}{'…' if len(clamped) > 6 else ''})"
+        )
+
+    unjudged: list[str] = []
+    overlapped: list[str] = []
+    for region in regions:
+        region_id = region["region_id"]
+        asked = answered.get(region_id) or set()
+        gap = [index for index in range(len(region["lines"])) if index not in asked]
+        if gap:
+            unjudged.append(f"{region_id}[{_compress_indices(gap)}]")
+        counts = Counter()
+        for verdict in verdicts.get(region_id) or []:
+            for index in range(verdict["line_from"], verdict["line_to"] + 1):
+                counts[index] += 1
+        duplicated = sorted(index for index, count in counts.items() if count > 1)
+        if duplicated:
+            overlapped.append(f"{region_id}[{_compress_indices(duplicated)}]")
+
+    if unjudged:
+        notes.append(
+            f"템플릿 항목 라벨링: p{page_no} 판정 기회를 못 얻은 줄 "
+            f"{', '.join(unjudged[:6])}{'…' if len(unjudged) > 6 else ''} — 미배정으로 남는다"
+        )
+    if overlapped:
+        notes.append(
+            f"템플릿 항목 라벨링: p{page_no} 두 항목 이상이 겹친 줄 "
+            f"{', '.join(overlapped[:6])}{'…' if len(overlapped) > 6 else ''} (중복 허용 정책상 오류 아님)"
+        )
+
+
+def _page_line_height_median(regions: list[dict]) -> float | None:
+    """페이지 안 모든 정본 줄의 줄높이 중앙값(px). 없으면 None.
+
+    **왜 `style.size_pt` 를 안 쓰나.** 선언 글자 크기는 디지털 텍스트에서만 나온다 —
+    실측(4문서): `16. 대출성상품`(hybrid)은 영역 33개 중 31개가 스타일을 갖지만
+    OCR 문서 3건은 **전부 0개**다. 반면 줄높이(bbox)는 같은 4문서에서 189/212 영역에
+    있다. 그래서 크기 신호는 줄높이로 만들고, 절대 px 대신 이 중앙값 대비 배수로 준다 —
+    문서마다 캔버스 해상도가 달라 절대값은 비교가 안 된다.
+    """
+    heights = [
+        line["bbox"][3] - line["bbox"][1]
+        for region in regions
+        for line in region["lines"]
+        if line.get("bbox") and len(line["bbox"]) == 4 and line["bbox"][3] > line["bbox"][1]
+    ]
+    return statistics.median(heights) if heights else None
+
+
+def _region_signal_text(
+    region: dict, canvas_w: int, canvas_h: int, line_median: float | None,
+) -> str:
+    """영역의 구조 신호를 한 줄로. `vlm_judge._region_listing_line` 과 같은 어휘를 쓴다.
+
+    **왜 필요한가.** 이 프롬프트는 그동안 `region_id` · `y_ratio` · 번호 붙은 텍스트만
+    줬다. 그러면 뜻이 비슷한 낱말이 겹칠 때 가릴 근거가 없다 — 실측(2026-08-31,
+    `16. 대출성상품`):
+
+        p1_r002  layout=doc_title(0.92) 줄높이 81.5px(본문 20~28px의 3~4배)
+                 → 광고 헤드라인 '중도상환해약금 없이 저렴한 금리의' 인데 진짜 부대비용
+                   문구('ㆍ중도상환해약금 : 면제')와 낱말이 겹쳐 **부대비용**으로 판정됨
+        p1_r012  layout=vision_footnote(0.88)
+                 → 대출한도 표의 각주인데 대출대상 본문과 어휘가 겹쳐 **대출대상**으로 판정됨
+
+    둘 다 `layout_label` 하나만 있었어도 가릴 수 있었다(doc_title 은 각주가 아니고,
+    vision_footnote 는 본문이 아니다). **참고 신호로만 준다** — 제목이라는 이유로 라벨을
+    규칙으로 빼지는 않는다(제목에도 상품명·금리 같은 정상 라벨이 들어간다).
+
+    `vlm_judge` 와 공통 함수로 묶지 않은 이유: 그쪽은 pydantic `Region` 을 받고 여기는
+    `model_dump` 한 dict 를 받는다. 자료 모양이 달라 어휘만 맞추고 구현은 나눈다.
+    """
+    bbox = region.get("bbox") or []
+    if len(bbox) == 4 and canvas_w > 0 and canvas_h > 0:
+        x0, y0, x1, y1 = bbox
+        x_ratio = f"{x0 / canvas_w:.2f}~{x1 / canvas_w:.2f}"
+        y_ratio = f"{y0 / canvas_h:.2f}"
+        w_ratio = f"{(x1 - x0) / canvas_w:.2f}"
+        h_ratio = f"{(y1 - y0) / canvas_h:.2f}"
+    else:
+        x_ratio = y_ratio = w_ratio = h_ratio = "?"
+
+    score = region.get("layout_score")
+    heights = [
+        line["bbox"][3] - line["bbox"][1]
+        for line in region["lines"]
+        if line.get("bbox") and len(line["bbox"]) == 4 and line["bbox"][3] > line["bbox"][1]
+    ]
+    if heights:
+        mean_height = sum(heights) / len(heights)
+        line_h = f"{mean_height:.0f}px"
+        line_h_rel = f"{mean_height / line_median:.1f}x" if line_median else "?"
+    else:
+        line_h = line_h_rel = "?"
+
+    # 표 판정은 `ad_export._table_evidence` 와 같은 기준을 쓴다 — PaddleX 격자(`table`)가
+    # 비어 있어도 레이아웃이 표로 봤으면 표다. 실측(`16. 대출성상품` p1_r019): 요율표인데
+    # `table` 이 None 이라 격자만 보면 '표 아님'으로 신고된다(격자 원천은 VLM 관측이다).
+    is_table = (
+        str(region.get("label") or "").casefold() == "table"
+        or region.get("table") is not None
+        or bool(region.get("table_vlm_reading"))
+    )
+    return (
+        f"layout_label={region.get('label') or '?'!r} "
+        f"layout_score={'?' if score is None else f'{score:.2f}'} "
+        f"x_ratio={x_ratio} y_ratio={y_ratio} w_ratio={w_ratio} h_ratio={h_ratio} "
+        f"table={'있음' if is_table else '없음'} "
+        f"line_h={line_h} line_h_rel={line_h_rel}"
+    )
+
+
+def _label_chunk(
+    batch: list[tuple[dict, int, int]],
+    page: dict,
+    template_id: str,
+    defs: str,
+    schema: dict,
+    canvas,
+    doc: dict,
+    line_median: float | None = None,
+) -> dict:
+    """온전한 영역 한 묶음을 판정한다.
+
+    `batch` 는 `(영역, 0, 마지막줄)` 목록이고 줄 인덱스는 **영역 내 절대값**이다.
+
+    반환 `answered` 는 VLM 원응답이 실제로 덮은 줄 번호다. `해당없음` 범위도 답이므로
+    포함한다 — 그래야 부분 응답, 명시적 미배정, 호출 무응답을 구분할 수 있다.
+    """
     from .gemma_client import chat_json, image_part          # 지연 import (배포 진입점 대비)
 
+    canvas_w = page.get("canvas_w") or 0
     canvas_h = page.get("canvas_h") or 0
+    asked: dict[str, tuple[int, int]] = {}
     listing = []
-    for r in chunk:
-        bbox = r.get("bbox") or []
-        y = round(bbox[1] / canvas_h, 2) if (bbox and canvas_h) else "?"
-        # 이전에는 앞 4줄만 발췌했다 — 영역이 여러 항목을 담고 있으면(표 행이 뭉친 경우
-        # 등) 뒤쪽 줄이 안 보여 전부 첫 항목으로 오판됐다(2026-08-26 실측, 25번 문서).
-        # 전체 줄을 번호와 함께 준다. 길이는 상한을 두어 프롬프트 폭주를 막는다.
+    for region, start, end in batch:
+        region_id = region["region_id"]
+        asked[region_id] = (start, end)
+        # 영역의 모든 줄을 원래 번호와 전문 그대로 준다. 줄 수/글자 수 예산은 이 영역을
+        # 자르는 데 쓰지 않고, 다른 영역과 같은 요청에 묶을지를 정하는 데만 쓴다.
         numbered = " ".join(
-            f"[{i:02d}]{(l.get('text') or '')[:40]}" for i, l in enumerate(r["lines"][:40])
-        )[:600]
-        listing.append(f'- region_id={r["region_id"]} y_ratio={y} 줄들: {numbered}')
+            f"[{index:02d}]{region['lines'][index].get('text') or ''}"
+            for index in range(start, end + 1)
+        )
+        total = len(region["lines"])
+        scope = f"판정할 줄 0~{end} (영역 전체 {total}줄)"
+        listing.append(
+            f'- region_id={region_id} {scope} '
+            f'{_region_signal_text(region, canvas_w, canvas_h, line_median)} 줄들: {numbered}'
+        )
 
     parts: list[dict] = [{"type": "text", "text": _GUBUN_PROMPT.format(
         template_id=template_id, gubun_defs=defs, abstain=_ABSTAIN,
@@ -669,35 +919,56 @@ def _label_chunk(chunk, page, template_id, defs, schema, canvas, doc) -> dict:
     if canvas is not None:
         parts.append(image_part(canvas))
 
-    asked = [r["region_id"] for r in chunk]
+    def _all_missing() -> list[str]:
+        return [f"{region_id}[{lo}-{hi}]" for region_id, (lo, hi) in asked.items()]
+
     try:
         data = chat_json(
             parts, schema_name="template_gubun", schema=schema,
-            max_tokens=max(1200, 60 * len(chunk) + 300),
+            max_tokens=max(1200, 60 * len(batch) + 300),
         )
     except Exception as exc:                                 # noqa: BLE001
         doc.setdefault("notes", []).append(
             f"템플릿 항목 라벨링 실패(p{page.get('page_no')}): {exc}"
         )
-        return {"verdicts": {}, "missing": asked}
+        return {"verdicts": {}, "missing": _all_missing(), "clamped": [], "answered": {}}
 
     # region_id → 판정 목록. 한 영역에 항목이 여러 개 섞였으면 여기 여러 개가 쌓인다
     # (예전엔 dict[str, dict] 라 영역당 값이 하나뿐이었다 — 뒤에 온 판정이 앞을 덮었다).
     verdicts: dict[str, list[dict]] = {}
-    answered: set[str] = set()
+    answered: dict[str, set[int]] = defaultdict(set)
+    clamped: list[str] = []
     for v in data.get("regions") or []:
-        rid = v.get("region_id")
-        if rid not in asked:
+        region_id = v.get("region_id")
+        if region_id not in asked:
             continue        # 안 물어본 영역을 지어낸 경우 — 버린다
-        answered.add(rid)
-        if v.get("gubun") and v["gubun"] != _ABSTAIN:
-            verdicts.setdefault(rid, []).append({
-                "gubun": v["gubun"],
-                "confidence": v.get("confidence"),
-                "line_from": v.get("line_from", 0),
-                "line_to": v.get("line_to", 0),
-            })
-    return {"verdicts": verdicts, "missing": [r for r in asked if r not in answered]}
+        low, high = asked[region_id]
+        line_from, line_to = int(v.get("line_from", low)), int(v.get("line_to", low))
+        if line_to < line_from:
+            line_from, line_to = line_to, line_from
+        # 물어본 영역 밖은 자른다. 범위 밖 값을 그대로 받아 P1에 없는 줄을 만드는 것보다
+        # 보수적으로 실제 영역 경계까지만 인정한다.
+        cut_from, cut_to = max(line_from, low), min(line_to, high)
+        if cut_from > cut_to:
+            clamped.append(f"{region_id}:{line_from}~{line_to}→버림")
+            continue
+        if (cut_from, cut_to) != (line_from, line_to):
+            clamped.append(f"{region_id}:{line_from}~{line_to}→{cut_from}~{cut_to}")
+        answered[region_id].update(range(cut_from, cut_to + 1))
+        if not v.get("gubun") or v["gubun"] == _ABSTAIN:
+            continue
+        verdicts.setdefault(region_id, []).append({
+            "gubun": v["gubun"],
+            "confidence": v.get("confidence"),
+            "line_from": cut_from,
+            "line_to": cut_to,
+        })
+    missing = [
+        f"{region_id}[{lo}-{hi}]"
+        for region_id, (lo, hi) in asked.items()
+        if not answered.get(region_id)
+    ]
+    return {"verdicts": verdicts, "missing": missing, "clamped": clamped, "answered": answered}
 
 
 # VLM은 문장의 뜻을 읽는 주체지만, ``가입기간:``처럼 스스로 항목명을 밝힌 줄까지

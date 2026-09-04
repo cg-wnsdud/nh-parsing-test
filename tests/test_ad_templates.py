@@ -312,6 +312,229 @@ def test_안_물어본_영역을_지어내면_버린다(pack: dict, monkeypatch)
     assert list(v) == ["p1_r000"]
 
 
+# ─────────── 긴 영역 절단 (실측 `16. 대출성상품` p1_r019, 요율표 56줄) ───────────
+
+def _prompts(monkeypatch, responses: list[dict]) -> list[str]:
+    """프롬프트 원문을 그대로 모은다 — 어떤 줄 번호가 실렸는지 보려면 텍스트를 봐야 한다."""
+    from nh_parsing import gemma_client
+
+    seen: list[str] = []
+    seq = list(responses)
+
+    def fake(parts, **kw):
+        seen.append(parts[0]["text"])
+        return seq.pop(0) if seq else {"analysis": "", "regions": []}
+
+    monkeypatch.setattr(gemma_client, "chat_json", fake)
+    return seen
+
+
+def test_56줄_영역의_모든_줄이_프롬프트에_실린다(pack: dict, monkeypatch) -> None:
+    """예전에는 `lines[:40]` 으로 잘려 L40~L55 가 번호 목록에 아예 없었다 —
+    VLM 이 가리킬 방법이 없어 16줄이 조용히 미배정으로 남았다."""
+    doc = _doc([f"요율 {i}" for i in range(56)])
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    joined = "\n".join(prompts)
+    for index in range(56):
+        assert f"[{index:02d}]요율 {index}" in joined, f"L{index:02d} 가 프롬프트에 없다"
+
+
+def test_긴_영역은_자르지_않고_한번에_묻는다(pack: dict, monkeypatch) -> None:
+    doc = _doc([f"요율 {i}" for i in range(56)])
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert len(prompts) == 1
+    assert "판정할 줄 0~55 (영역 전체 56줄)" in prompts[0]
+    assert "[00]요율 0" in prompts[0]
+    assert "[40]요율 40" in prompts[0]
+    assert "[55]요율 55" in prompts[0]
+
+
+def test_한_영역_응답에_복수_라벨을_함께_받는다(pack: dict, monkeypatch) -> None:
+    doc = _doc([f"요율 {i}" for i in range(56)])
+    _prompts(monkeypatch, [{"analysis": "", "regions": [
+        {"region_id": "p1_r000", "gubun": "금리", "confidence": 0.9,
+         "line_from": 0, "line_to": 39},
+        {"region_id": "p1_r000", "gubun": "우대금리", "confidence": 0.85,
+         "line_from": 40, "line_to": 55},
+    ]}])
+    verdicts = AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    covered = {
+        index
+        for verdict in verdicts["p1_r000"]
+        for index in range(verdict["line_from"], verdict["line_to"] + 1)
+    }
+    assert covered == set(range(56))
+    assert [v["gubun"] for v in verdicts["p1_r000"]] == ["금리", "우대금리"]
+    assert not any("판정 기회를 못 얻은 줄" in note for note in doc["notes"])
+
+
+def test_영역_내부의_부분_무응답은_그_줄만_노트로_남는다(pack: dict, monkeypatch) -> None:
+    """한 응답이 영역 일부만 덮어도 내부 구멍을 조용히 삼키지 않는다."""
+    doc = _doc([f"요율 {i}" for i in range(56)])
+    _prompts(monkeypatch, [{"analysis": "", "regions": [
+        {"region_id": "p1_r000", "gubun": "금리", "confidence": 0.9,
+         "line_from": 0, "line_to": 19},
+        {"region_id": "p1_r000", "gubun": "금리", "confidence": 0.9,
+         "line_from": 40, "line_to": 55},
+    ]}])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    gap = next(note for note in doc["notes"] if "판정 기회를 못 얻은 줄" in note)
+    assert "p1_r000[20-39]" in gap
+    assert not any("영역 1개 무응답" in note for note in doc["notes"])
+
+
+def test_줄범위_밖_응답은_영역_범위로_자르고_노트로_남긴다(pack: dict, monkeypatch) -> None:
+    """`line_to` 가 영역 마지막을 넘는 응답을 실제 영역으로 제한한다."""
+    doc = _doc([f"요율 {i}" for i in range(25)])
+    _prompts(monkeypatch, [{"analysis": "", "regions": [
+        {"region_id": "p1_r000", "gubun": "금리", "confidence": 0.9,
+         "line_from": -10, "line_to": 999},
+    ]}])
+    verdicts = AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    spans = sorted((v["line_from"], v["line_to"]) for v in verdicts["p1_r000"])
+    assert spans == [(0, 24)]
+    assert any("줄범위 밖 응답" in note for note in doc["notes"])
+
+
+def test_영역_밖만_가리키는_응답은_버리고_노트로_남긴다(pack: dict, monkeypatch) -> None:
+    doc = _doc([f"요율 {i}" for i in range(25)])
+    _prompts(monkeypatch, [{"analysis": "", "regions": [
+        {"region_id": "p1_r000", "gubun": "금리", "confidence": 0.9,
+         "line_from": 30, "line_to": 40},
+    ]}])
+    verdicts = AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert "p1_r000" not in verdicts
+    assert any("→버림" in note for note in doc["notes"])
+
+
+def test_겹친_줄은_오류가_아니고_값으로만_남는다(pack: dict, monkeypatch) -> None:
+    """라벨 간 줄 중복은 이 계약이 허용한다 — 다만 몇 줄이 그런지는 적어 둔다."""
+    doc = _doc([f"문구 {i}" for i in range(5)])
+    _prompts(monkeypatch, [{"analysis": "", "regions": [
+        {"region_id": "p1_r000", "gubun": "금리", "confidence": 0.9, "line_from": 0, "line_to": 3},
+        {"region_id": "p1_r000", "gubun": "우대금리", "confidence": 0.8, "line_from": 2, "line_to": 4},
+    ]}])
+    verdicts = AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert len(verdicts["p1_r000"]) == 2
+    assert any("겹친 줄" in note and "p1_r000[2-3]" in note for note in doc["notes"])
+
+
+def test_짧은_영역은_한_요청에_묶여_그대로_간다(pack: dict, monkeypatch) -> None:
+    """문맥 보존 변경 뒤에도 짧은 영역은 12개씩 묶어 효율적으로 보낸다."""
+    doc = _doc(*[[f"문구 {i}"] for i in range(25)])
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert [len(re.findall(r"region_id=(\S+)", text)) for text in prompts] == [12, 12, 1]
+    assert "판정할 줄 0~0 (영역 전체 1줄)" in prompts[0]
+
+
+def test_120줄을_넘는_단일_영역도_자르지_않는다(pack: dict, monkeypatch) -> None:
+    """요청 예산은 영역 사이 배치 기준이지 영역 내부 절단 기준이 아니다."""
+    doc = _doc([f"긴 표 {i}" for i in range(121)])
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert len(prompts) == 1
+    assert "판정할 줄 0~120 (영역 전체 121줄)" in prompts[0]
+    assert "[120]긴 표 120" in prompts[0]
+
+
+# ─────────────────── 구조 신호 (실측 p1_r002 / p1_r012 오배정) ───────────────────
+
+def test_구조_신호가_프롬프트에_실린다(pack: dict, monkeypatch) -> None:
+    doc = _doc(["헤드라인"], ["본문 한 줄"])
+    page = doc["pages"][0]
+    page["canvas_w"] = 800          # 공용 _doc 은 canvas_h 만 둔다 (실제 파싱 결과는 둘 다 있다)
+    page["regions"][0].update({
+        "bbox": [80, 100, 720, 200], "label": "doc_title", "layout_score": 0.92,
+        "lines": [{"text": "헤드라인", "bbox": [80, 100, 720, 200],
+                   "source": "ocr", "confidence": 0.9, "style": None}],
+    })
+    page["regions"][1].update({
+        "bbox": [80, 300, 400, 325], "label": "vision_footnote", "layout_score": 0.88,
+        "lines": [{"text": "본문 한 줄", "bbox": [80, 300, 400, 325],
+                   "source": "ocr", "confidence": 0.9, "style": None}],
+    })
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    text = prompts[0]
+    assert "layout_label='doc_title' layout_score=0.92" in text
+    assert "layout_label='vision_footnote' layout_score=0.88" in text
+    assert "x_ratio=0.10~0.90" in text          # 80/800 ~ 720/800
+    assert "y_ratio=0.10" in text               # 100/1000
+    assert "w_ratio=0.80" in text and "h_ratio=0.10" in text
+    assert "table=없음" in text
+    # 줄높이 100px vs 25px → 페이지 중앙값 62.5 대비 1.6x / 0.4x
+    assert "line_h=100px line_h_rel=1.6x" in text
+    assert "line_h=25px line_h_rel=0.4x" in text
+    # 프롬프트가 신호 해석법을 함께 설명해야 모델이 참고 신호로 쓴다.
+    assert "layout_label:" in text and "line_h, line_h_rel:" in text
+
+
+def test_ocr문서처럼_글자크기가_없어도_상대_줄높이를_만든다(pack: dict, monkeypatch) -> None:
+    """`style.size_pt` 는 OCR 문서에서 전부 None 이다(실측 4문서 중 3건 0개).
+    그래서 크기 신호는 bbox 줄높이로 만든다."""
+    doc = _doc(["큰 글씨"], ["작은 글씨"])
+    page = doc["pages"][0]
+    page["regions"][0]["lines"] = [{"text": "큰 글씨", "bbox": [0, 0, 100, 80],
+                                    "source": "ocr", "confidence": 0.9, "style": None}]
+    page["regions"][1]["lines"] = [{"text": "작은 글씨", "bbox": [0, 100, 100, 120],
+                                    "source": "ocr", "confidence": 0.9, "style": None}]
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert all(line.get("style") is None for r in page["regions"] for line in r["lines"])
+    assert "line_h_rel=1.6x" in prompts[0]      # 80 / median 50
+    assert "line_h_rel=0.4x" in prompts[0]      # 20 / median 50
+
+
+def test_bbox가_없으면_구조_신호를_지어내지_않는다(pack: dict, monkeypatch) -> None:
+    doc = _doc(["좌표 없는 줄"])
+    region = doc["pages"][0]["regions"][0]
+    region["bbox"] = None
+    region["layout_score"] = None
+    region["lines"] = [{"text": "좌표 없는 줄", "bbox": None,
+                        "source": "digital", "confidence": None, "style": None}]
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert "x_ratio=? y_ratio=? w_ratio=? h_ratio=?" in prompts[0]
+    assert "layout_score=?" in prompts[0]
+    assert "line_h=? line_h_rel=?" in prompts[0]
+
+
+def test_표_영역은_table_있음으로_알린다(pack: dict, monkeypatch) -> None:
+    doc = _doc(["표 줄"])
+    doc["pages"][0]["regions"][0].update({"label": "table", "table": {"n_rows": 3, "cells": []}})
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert "table=있음" in prompts[0]
+
+
+def test_paddlex_격자가_비어도_레이아웃이_표면_표로_알린다(pack: dict, monkeypatch) -> None:
+    """실측 p1_r019: 요율표인데 `table` 이 None 이라 격자만 보면 '표 아님'이 된다.
+    격자의 원천은 VLM 관측이므로 판정 기준을 `ad_export._table_evidence` 와 맞춘다."""
+    doc = _doc(["요율 줄"])
+    doc["pages"][0]["regions"][0].update({"label": "table", "table": None})
+    prompts = _prompts(monkeypatch, [])
+    AT.label_regions_vlm(doc, "예금성상품-적립식", pack)
+
+    assert "layout_label='table'" in prompts[0]
+    assert "table=있음" in prompts[0]
+
+
 def _found(r: dict, gubun: str) -> list[dict]:
     item = next(i for i in r["items"] if i["gubun"] == gubun)
     return [f for f in item["fixed_phrases"] if f["found"]]
