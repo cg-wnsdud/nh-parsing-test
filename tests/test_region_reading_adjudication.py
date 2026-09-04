@@ -91,6 +91,39 @@ def test_targeted_선별은_위험_근거가_있는_영역만_고른다(monkeypa
     assert ra.selection_reasons(_region(text="금리 7.1%", band="금리 71%")) == []
 
 
+def test_tables_선별은_표_영역만_고른다(monkeypatch):
+    _settings(monkeypatch, scope="tables")
+    assert ra.selection_reasons(_region(table=True)) == ["table_structure"]
+    assert ra.selection_reasons(_region(confidence=0.2)) == []
+
+
+def test_adjudicate의_tables_scope도_표만_실행한다(monkeypatch):
+    _settings(monkeypatch, scope="all")
+    table = _region(text="상품 금리 A 3%", table=True)
+    table.region_id = "p1_r001"
+    plain = _region(text="일반 본문")
+    plain.region_id = "p1_r002"
+    calls = []
+
+    def fake_chat(messages, **kwargs):
+        calls.append(kwargs["schema_name"])
+        return {
+            "analysis": "표", "text": "상품 금리 A 3%",
+            "rows": [["상품", "금리"], ["A", "3%"]],
+            "confidence": 0.95, "structure_confidence": 0.9,
+        }
+
+    monkeypatch.setattr(ra, "chat_json", fake_chat)
+    stats = ra.adjudicate_regions_shadow(
+        [table, plain], Image.new("RGB", (120, 80), "white"), scope="tables",
+    )
+
+    assert stats["eligible"] == stats["requested"] == 1
+    assert calls == ["table_region_reader"]
+    assert table.table_vlm_reading is not None
+    assert plain.reading_adjudication is None
+
+
 def test_reader_합의는_judge를_생략하고_정본을_보존한다(monkeypatch):
     _settings(monkeypatch, scope="all")
     calls = []

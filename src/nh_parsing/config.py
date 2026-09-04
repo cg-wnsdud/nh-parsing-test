@@ -156,7 +156,7 @@ class Settings:
     region_reading_mode: str = os.environ.get("REGION_READING_MODE", "off").strip().lower()
     # 이 브랜치의 Reader 경로는 StructureV3가 반환한 모든 텍스트/표 영역을 독립 판독하는
     # 것이 기본이다. 영역별 후보를 넓은 밴드에서 다시 읽는 이전 구조와 섞지 않는다.
-    # 비용 절감용 targeted는 비교 실험 때만 명시적으로 쓴다.
+    # 표만 확인할 때는 tables, 표+저신뢰 OCR은 targeted를 비교 실험에서 명시한다.
     region_reading_scope: str = os.environ.get("REGION_READING_SCOPE", "all").strip().lower()
     region_reader_max_per_page: int = int(os.environ.get("REGION_READER_MAX_PER_PAGE", "0"))
     # Region bbox 밖의 픽셀은 흰색으로 마스킹한다. StructureV3 bbox가 글자 끝을 약간

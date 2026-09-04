@@ -3,10 +3,11 @@
 
     파싱(process_file)      쪽·영역·줄·좌표
       → resolve_template    12종 중 하나 (못 정하면 VLM 결선투표 1회)
-      → label_regions_vlm   영역마다 템플릿 항목명 (쪽당 1회)
+      → label_regions_vlm   온전한 영역마다 0..N 템플릿 항목 범위
       → label_document      정형 문구 대조(1층) + 영역 라벨(2층) 합치기
       → evidence-v6         좌표·파서 기본 텍스트·VLM/Judge 근거를 보존하는 감사 JSON
-      → ad-review-input-v5  라벨별 심의 문구/미배정 광고문구/P1 줄 참조 인계 JSON
+      → ad-review-input-v6  라벨별 심의 문구/미배정 광고문구/P1 줄 참조 인계 JSON
+      → region-input-v1     영역 전문 1회 + 영역당 0..N 라벨 범위 + 표 형제값(P3 후보)
 
 산출: `<out>/json/<doc_id>.json` (통합) · `<out>/pages/<doc_id>_p{n}.jpg` (검수 화면용
 원본 축소본 — 파이프라인 미리보기와 달리 **박스를 그리지 않는다.** 박스는 검수 화면이
@@ -32,14 +33,23 @@ from PIL import Image                                          # noqa: E402
 
 from nh_parsing import ad_template as AT                       # noqa: E402
 from nh_parsing.ad_export import label_parsed_ad_outputs, page_canvases  # noqa: E402
+from nh_parsing.ad_review_region_input import build_ad_review_region_input  # noqa: E402
 from nh_parsing.gemma_client import STATS, reset_stats, stats_table  # noqa: E402
+from nh_parsing.ir import AdDocument                            # noqa: E402
 from nh_parsing.pipeline import process_file                   # noqa: E402
+from nh_parsing.reading_adjudication import adjudicate_regions_shadow  # noqa: E402
 
 EXTS = {".pdf", ".png", ".jpg", ".jpeg"}
 PAGE_MAX_W = 1000        # 검수 화면용 축소 폭. 좌표는 canvas_w 기준 비율로 다시 그린다.
 
 
-def run_one(path: Path, out_dir: Path, pack: dict, reuse_parse: bool = False) -> dict:
+def run_one(
+    path: Path,
+    out_dir: Path,
+    pack: dict,
+    reuse_parse: bool = False,
+    read_tables: bool = False,
+) -> dict:
     started = time.time()
     reset_stats()          # 문서별로 따로 본다 — 누적되면 차분을 손으로 빼야 한다
 
@@ -55,16 +65,31 @@ def run_one(path: Path, out_dir: Path, pack: dict, reuse_parse: bool = False) ->
         parse_path.parent.mkdir(parents=True, exist_ok=True)
         parse_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
     canvases = page_canvases(path)
+    if read_tables:
+        # 저장된 parse를 재사용하면서 표 영역만 고해상 crop Reader/Judge에 보낼 수 있게
+        # 한다. OCR/StructureV3 전체 재실행 없이 표 격자 후보를 관측하는 실험용 경로다.
+        # 결과는 P1/P2/P3에 쓰되 parse 원본은 덮지 않아 전후 비교가 가능하다.
+        parsed = AdDocument.model_validate(doc)
+        for page in parsed.pages:
+            canvas = canvases.get(page.page_no)
+            if canvas is not None:
+                adjudicate_regions_shadow(page.regions, canvas, scope="tables")
+        doc = json.loads(parsed.model_dump_json())
     unified, review_input = label_parsed_ad_outputs(doc, path.name, canvases, pack)
+    region_review_input = build_ad_review_region_input(unified)
 
     (out_dir / "json").mkdir(parents=True, exist_ok=True)
     (out_dir / "review_input").mkdir(parents=True, exist_ok=True)
+    (out_dir / "review_region_input").mkdir(parents=True, exist_ok=True)
     (out_dir / "pages").mkdir(parents=True, exist_ok=True)
     (out_dir / "json" / f"{doc['doc_id']}.json").write_text(
         json.dumps(unified, ensure_ascii=False, indent=2), encoding="utf-8",
     )
     (out_dir / "review_input" / f"{doc['doc_id']}.json").write_text(
         json.dumps(review_input, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    (out_dir / "review_region_input" / f"{doc['doc_id']}.json").write_text(
+        json.dumps(region_review_input, ensure_ascii=False, indent=2), encoding="utf-8",
     )
     for pno, img in canvases.items():
         if img.width > PAGE_MAX_W:
@@ -114,6 +139,8 @@ def main() -> None:
     ap.add_argument("--only", default=None, help="폴더일 때 파일명 부분 일치 필터")
     ap.add_argument("--reuse-parse", action="store_true",
                     help="<out>/parse 에 저장된 파싱 결과가 있으면 다시 파싱하지 않는다")
+    ap.add_argument("--read-tables", action="store_true",
+                    help="표 영역만 crop Reader/Judge로 읽어 P1/P2/P3에 표 관측을 추가한다")
     args = ap.parse_args()
 
     pack = AT.load_pack()
@@ -134,7 +161,11 @@ def main() -> None:
     for path in files:
         print(f"\n{'=' * 72}\n▶ {path.name}")
         try:
-            row = run_one(path, args.out, pack, reuse_parse=args.reuse_parse)
+            row = run_one(
+                path, args.out, pack,
+                reuse_parse=args.reuse_parse,
+                read_tables=args.read_tables,
+            )
         except Exception as exc:                               # noqa: BLE001
             print(f"  ✗ 실패: {type(exc).__name__}: {exc}")
             failed.append(path.name)

@@ -36,6 +36,7 @@ from PIL import Image  # noqa: E402
 from measure_parse_defects import measure_doc  # noqa: E402
 from nh_parsing import ad_template as AT  # noqa: E402
 from nh_parsing.ad_export import label_parsed_ad_outputs, page_canvases  # noqa: E402
+from nh_parsing.ad_review_region_input import build_ad_review_region_input  # noqa: E402
 from nh_parsing.assets import decode_asset_image, is_decorative, iter_assets  # noqa: E402
 from nh_parsing.gemma_client import STATS, reset_stats  # noqa: E402
 from nh_parsing.pipeline import process_file  # noqa: E402
@@ -289,6 +290,7 @@ def _run_entry(entry: dict[str, Any], out_dir: Path, pack: dict[str, Any]) -> tu
     parse_path = group_dir / "parse" / f"{entry['result_id']}.json"
     unified_path = group_dir / "json" / f"{entry['result_id']}.json"
     review_input_path = group_dir / "review_input" / f"{entry['result_id']}.json"
+    region_review_input_path = group_dir / "review_region_input" / f"{entry['result_id']}.json"
     pages_dir = group_dir / "pages"
     started = time.monotonic()
     reset_stats()
@@ -309,6 +311,7 @@ def _run_entry(entry: dict[str, Any], out_dir: Path, pack: dict[str, Any]) -> tu
     if source.suffix.lower() in {".hwp", ".hwpx"}:
         canvases = _hwp_embedded_images(source, doc)
     unified, review_input = label_parsed_ad_outputs(export_doc, source.name, canvases, pack)
+    region_review_input = build_ad_review_region_input(unified)
     unified["batch_source"] = {
         "input_group": entry["group"],
         "relative_path": entry["relative_path"],
@@ -317,6 +320,7 @@ def _run_entry(entry: dict[str, Any], out_dir: Path, pack: dict[str, Any]) -> tu
     }
     _atomic_json(unified_path, unified)
     _atomic_json(review_input_path, review_input)
+    _atomic_json(region_review_input_path, region_review_input)
     saved_pages = _save_pages(canvases, pages_dir, entry["result_id"])
     warnings = _pipeline_warnings(doc, canvases)
     metrics = _result_metrics(unified, time.monotonic() - started)

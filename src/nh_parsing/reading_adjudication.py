@@ -242,17 +242,19 @@ def selection_reasons(region: Region, scope: str | None = None) -> list[str]:
     """StructureV3 텍스트 영역을 Reader에 보낼지와 그 근거를 판정한다.
 
     기본 ``all``은 역할·기존 밴드 후보와 무관하게 모든 텍스트/표 영역을 보낸다. 이것이
-    이 브랜치의 비교 기준이다. ``targeted``는 비용 측정용 보조 모드일 뿐, role 9종이나
-    넓은 밴드 후보를 다시 의존하지 않는다.
+    이 브랜치의 비교 기준이다. ``tables``는 표만, ``targeted``는 표와 저신뢰 OCR만
+    보낸다. 두 모드 모두 비용/품질 비교용이며 role 9종이나 넓은 밴드 후보에 의존하지 않는다.
     """
     if not region.lines or region.is_illustrative or not region.bbox:
         return []
     active_scope = (scope or SETTINGS.region_reading_scope).strip().lower()
     if active_scope == "all":
         return ["all_structure_text_regions"]
+    if active_scope == "tables":
+        return ["table_structure"] if _is_table_region(region) else []
     if active_scope != "targeted":
         raise ValueError(
-            f"REGION_READING_SCOPE는 'targeted' 또는 'all'이어야 함: {active_scope!r}"
+            f"REGION_READING_SCOPE는 'tables', 'targeted', 'all' 중 하나여야 함: {active_scope!r}"
         )
 
     reasons: list[str] = []
@@ -389,6 +391,7 @@ def adjudicate_regions_shadow(
     canvas: Image.Image,
     *,
     max_regions: int | None = None,
+    scope: str | None = None,
     on_region_complete: Callable[[Region], None] | None = None,
 ) -> dict[str, int]:
     """선별한 영역만 Reader/Judge로 교차검증하고, 모든 결과를 Region에 보존한다."""
@@ -404,7 +407,7 @@ def adjudicate_regions_shadow(
     candidates = [
         (region, reasons)
         for region in regions
-        if (reasons := selection_reasons(region)) and region.reading_adjudication is None
+        if (reasons := selection_reasons(region, scope=scope)) and region.reading_adjudication is None
     ]
     stats["eligible"] = len(candidates)
     limit = SETTINGS.region_reader_max_per_page if max_regions is None else max_regions
