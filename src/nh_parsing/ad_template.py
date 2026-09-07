@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import statistics
 import unicodedata
@@ -34,6 +35,24 @@ from typing import Any, Iterable
 PACK_PATH = Path(__file__).resolve().parent / "templates" / "ad_templates.json"
 
 _PACK_CACHE: dict | None = None
+
+# ── 라벨 설명 실험 (A/B/C) ──────────────────────────────────────────────
+# 항목 정의문에 무엇까지 넣을지를 가른다. 기본 A 는 종전 동작 그대로다 — 환경변수를
+# 주지 않으면 이 파일의 다른 무엇도 달라지지 않는다.
+#   A: 항목명 + 예시 1줄            (종전)
+#   B: A + 구분 설명(description)
+#   C: B + 포함범위·구별기준
+# 설명 원본은 out_labeling_schema_20260907/labeling_catalog.json 이며, 이 실험을
+# 위해서만 읽는다. 예시는 세 조건 모두 **팩의 같은 예시 1줄**을 쓴다 — 예시가 늘면
+# 설명 덕인지 예시 덕인지 가릴 수 없기 때문이다.
+_LABEL_DEFS_MODE = os.environ.get("NH_LABEL_DEFS", "A").strip().upper() or "A"
+_LABEL_CATALOG_PATH = Path(
+    os.environ.get(
+        "NH_LABEL_CATALOG",
+        Path(__file__).resolve().parents[2] / "out_labeling_schema_20260907" / "labeling_catalog.json",
+    )
+)
+_CATALOG_CACHE: dict | None = None
 
 
 # ───────────────────────────── 사전 읽기 ─────────────────────────────
@@ -606,8 +625,10 @@ def _gubun_definitions(pack: dict, template_id: str) -> str:
     정의를 손으로 쓰지 않는 이유: 템플릿이 갱신되면 정의도 같이 따라가야 한다.
     """
     pool = pack["phrase_pool"]
+    semantics = _label_semantics(template_id) if _LABEL_DEFS_MODE in {"B", "C"} else {}
     out: list[str] = []
     for item in pack["templates"][template_id]["items"]:
+        gubun = item["gubun"]
         sample = ""
         for e in item["entries"]:
             text = pool[e["phrase_id"]]["text"] if e["kind"] == "정형" else e["example"]
@@ -615,8 +636,49 @@ def _gubun_definitions(pack: dict, template_id: str) -> str:
             if text:
                 sample = text[:60]
                 break
-        out.append(f"- {item['gubun']}: 예) {sample}" if sample else f"- {item['gubun']}")
+        sem = semantics.get(gubun)
+        if not sem:
+            out.append(f"- {gubun}: 예) {sample}" if sample else f"- {gubun}")
+            continue
+        head = f"- {gubun}: {sem['description']}" if sem.get("description") else f"- {gubun}"
+        lines = [head]
+        if sample:
+            lines.append(f"    예) {sample}")
+        if _LABEL_DEFS_MODE == "C":
+            for tag, key in (("포함", "include"), ("구별", "exclude_or_distinguish")):
+                for rule in sem.get(key) or []:
+                    lines.append(f"    {tag}) {rule}")
+        out.append("\n".join(lines))
     return "\n".join(out)
+
+
+def _load_label_catalog() -> dict:
+    global _CATALOG_CACHE
+    if _CATALOG_CACHE is None:
+        _CATALOG_CACHE = json.loads(_LABEL_CATALOG_PATH.read_text(encoding="utf-8"))
+    return _CATALOG_CACHE
+
+
+def _label_semantics(template_id: str) -> dict[str, dict]:
+    """카탈로그에서 이 템플릿의 `gubun -> 설명/포함/구별` 을 뽑는다.
+
+    카탈로그에 없는 템플릿·항목은 조용히 건너뛴다(그 항목만 A 형식으로 남는다).
+    실험용 경로이므로 파일이 없으면 예외를 낸다 — 조건 B/C 를 지정했는데 조용히
+    A 로 돌아가면 "설명을 넣었는데 차이가 없다"는 잘못된 결론이 나온다.
+    """
+    catalog = _load_label_catalog()
+    definitions = catalog["definitions"]
+    template = next(
+        (t for t in catalog["templates"] if t["template_id"] == template_id), None
+    )
+    if template is None:
+        return {}
+    out: dict[str, dict] = {}
+    for label in template["labels"]:
+        definition = definitions.get(label.get("definition_id"))
+        if definition:
+            out[label["label_id"]] = definition
+    return out
 
 
 # 한 번에 물어보는 영역 수. 쪽당 1회로 하다가 실측(2026-08-24)에서 깨졌다:
