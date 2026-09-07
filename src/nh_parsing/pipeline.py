@@ -149,7 +149,7 @@ def _ocr_canvas_to_page(
     all_lines: list[Line] = []
     all_blocks: list[LayoutBlock] = []
     errors: list[str] = []
-    for tile in tiles:
+    for tile_index, tile in enumerate(tiles):
         try:
             result = request_layout_parsing(tile.image)
         except Exception as exc:
@@ -167,10 +167,13 @@ def _ocr_canvas_to_page(
                 # 표 셀 좌표도 블록 bbox 와 같은 만큼 내려야 한다 — 안 하면 셀이 타일
                 # 좌표에 남아 페이지 위쪽 엉뚱한 자리를 가리킨다.
                 table=_shift_table(block.table, tile.y_offset),
+                tile_indices=(tile_index,),
+                tile_spans=((tile.y_offset, tile.y_offset + tile.image.height),),
             )
             all_blocks.append(shifted)
 
     lines = dedupe_lines(all_lines)
+    all_blocks, duplicate_blocks = _dedupe_tiled_layout_blocks(all_blocks)
     if extra_digital:
         # 디지털 우선(설계서 원칙 4): OCR 라인 중 디지털과 겹치는 것 제거
         lines = _merge_digital_ocr(extra_digital, lines)
@@ -180,6 +183,11 @@ def _ocr_canvas_to_page(
         page.parse_status = "partial" if lines else "unreadable"
         page.notes.extend(f"OCR 타일 실패 {msg}" for msg in errors)
     page.notes.append(f"타일 {len(tiles)}개 처리 (오버랩 {SETTINGS.tile_overlap_px}px)")
+    if duplicate_blocks:
+        page.notes.append(
+            f"오버랩 타일 중복 레이아웃 블록 {duplicate_blocks}개 병합 "
+            "(동일 label/source + 가로 90%·세로 50% 이상 중첩)"
+        )
     return page
 
 
@@ -195,6 +203,87 @@ def _shift_table(table: dict | None, y_offset: int) -> dict | None:
         for c in table.get("cells") or []
     ]
     return out
+
+
+_TILED_BLOCK_MIN_X_SHARE = 0.90
+_TILED_BLOCK_MIN_Y_SHARE = 0.50
+
+
+def _axis_overlap_share(a0: int, a1: int, b0: int, b1: int) -> float:
+    """두 구간의 교집합 / 짧은 구간 길이."""
+    overlap = max(0, min(a1, b1) - max(a0, b0))
+    return overlap / max(1, min(a1 - a0, b1 - b0))
+
+
+def _tile_spans_overlap_at_block(a: LayoutBlock, b: LayoutBlock) -> bool:
+    """두 블록이 서로 다른 타일의 실제 오버랩 띠에서 만났는지 확인한다."""
+    block_y0 = max(a.bbox[1], b.bbox[1])
+    block_y1 = min(a.bbox[3], b.bbox[3])
+    if block_y1 <= block_y0:
+        return False
+    return any(
+        max(a0, b0, block_y0) < min(a1, b1, block_y1)
+        for a0, a1 in a.tile_spans
+        for b0, b1 in b.tile_spans
+    )
+
+
+def _same_tiled_layout_block(a: LayoutBlock, b: LayoutBlock) -> bool:
+    """겹치는 타일이 같은 레이아웃 요소를 중복 반환한 경우만 좁게 인정한다.
+
+    같은 타일 안의 중첩 박스는 PaddleX가 의도한 계층일 수 있으므로 절대 합치지 않는다.
+    서로 다른 타일이어도 label/source가 다르거나 가로 폭이 거의 같지 않으면 별개다.
+    세로 방향은 타일 경계에서 한쪽 블록이 잘려 길이가 달라질 수 있어, 짧은 쪽의 절반이
+    겹치는지를 본다. 마지막으로 실제 두 타일의 오버랩 띠 안에서 겹쳐야 한다.
+    """
+    if not a.tile_indices or not b.tile_indices:
+        return False
+    if set(a.tile_indices) & set(b.tile_indices):
+        return False
+    if a.source != b.source or a.label.casefold() != b.label.casefold():
+        return False
+    if _axis_overlap_share(a.bbox[0], a.bbox[2], b.bbox[0], b.bbox[2]) < _TILED_BLOCK_MIN_X_SHARE:
+        return False
+    if _axis_overlap_share(a.bbox[1], a.bbox[3], b.bbox[1], b.bbox[3]) < _TILED_BLOCK_MIN_Y_SHARE:
+        return False
+    return _tile_spans_overlap_at_block(a, b)
+
+
+def _merge_tiled_layout_blocks(a: LayoutBlock, b: LayoutBlock) -> LayoutBlock:
+    """중복 블록의 합집합 bbox와 provenance를 보존한다."""
+    contents = [text for text in (a.content, b.content) if text]
+    return LayoutBlock(
+        label=a.label,
+        bbox=[
+            min(a.bbox[0], b.bbox[0]), min(a.bbox[1], b.bbox[1]),
+            max(a.bbox[2], b.bbox[2]), max(a.bbox[3], b.bbox[3]),
+        ],
+        score=max((score for score in (a.score, b.score) if score is not None), default=None),
+        content=max(contents, key=len) if contents else None,
+        source=a.source,
+        table=a.table or b.table,
+        tile_indices=tuple(dict.fromkeys((*a.tile_indices, *b.tile_indices))),
+        tile_spans=tuple(dict.fromkeys((*a.tile_spans, *b.tile_spans))),
+    )
+
+
+def _dedupe_tiled_layout_blocks(blocks: list[LayoutBlock]) -> tuple[list[LayoutBlock], int]:
+    """오버랩 타일에서만 생긴 레이아웃 블록 복제본을 병합한다.
+
+    앞 블록의 목록 위치를 유지하므로 PaddleX 읽기순서를 불필요하게 흔들지 않는다.
+    병합된 합집합이 세 번째 타일의 같은 블록과 이어지는 경우도 반복 비교로 흡수한다.
+    """
+    kept: list[LayoutBlock] = []
+    merged_count = 0
+    for block in blocks:
+        for index, other in enumerate(kept):
+            if _same_tiled_layout_block(other, block):
+                kept[index] = _merge_tiled_layout_blocks(other, block)
+                merged_count += 1
+                break
+        else:
+            kept.append(block)
+    return kept, merged_count
 
 
 def _apply_vlm_judgments(page: AdPage, canvas_img: Image.Image | None) -> None:

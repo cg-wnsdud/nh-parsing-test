@@ -30,6 +30,12 @@ class LayoutBlock:
     # 표 블록일 때만 채워지는 행·열 격자 (`_build_table_grid`). ir.RegionTable 로 그대로
     # 넘어가므로 dict 로 나른다 — 같은 모양을 두 곳에 정의하지 않으려고.
     table: dict | None = None
+    # 타일 OCR 호출에서 온 블록이면 원본 페이지상의 타일 범위를 남긴다. PaddleX 원응답의
+    # 의미 필드가 아니라, 겹치는 타일이 같은 레이아웃 블록을 조금 다른 bbox로 두 번
+    # 반환했는지 안전하게 가르는 파이프라인 provenance다. 단일 이미지 직접 호출과 기존
+    # 테스트는 빈 튜플 그대로여서 타일 간 중복 제거 대상이 되지 않는다.
+    tile_indices: tuple[int, ...] = ()
+    tile_spans: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass

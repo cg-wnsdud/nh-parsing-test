@@ -110,7 +110,11 @@ class Settings:
     paddlex_text_det_limit_type: str = "max"
     # 기본 "large" 는 겹침 박스를 큰 쪽으로 흡수 — 사진형 카드 콜라주(003 p1)가
     # 통짜 1블록이 된 원인. "small" 로 카드별 하위 블록 유지 (3→20블록 실측).
-    paddlex_layout_merge_bboxes_mode: str = "small"
+    # A/B 실험에서 코드 자체를 바꾸지 않고 large/small을 갈라 실행할 수 있게 한다.
+    # 기본값은 기존 카드 콜라주 회귀를 막은 small을 유지한다.
+    paddlex_layout_merge_bboxes_mode: str = os.environ.get(
+        "PADDLEX_LAYOUT_MERGE_BBOXES_MODE", "small"
+    ).strip().lower()
     paddlex_use_formula_recognition: bool = False  # 광고물에 수식 없음 — 속도 절약
     # 방향 분류기(기본 True)가 얇은 회색 fine-print 를 180도 회전으로 오판해
     # 거꾸로 인식('링이어니을용은' 사건, 2026-07-17 실측). 디지털 캡처/정방향
